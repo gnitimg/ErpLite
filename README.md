@@ -1,12 +1,8 @@
 <p align="center">
   <img alt="logo" width="120" height="120" src="./frontend/src/common/assets/images/layouts/logo.png">
 </p>
+<h1 align="center">ERPLite</h1>
 
-<h1 align="center">简仓 ERP</h1>
-
-<p align="center">
-  面向小型仓库与轻量组装业务的轻量 ERP 系统
-</p>
 
 <p align="center">
   <a href="./README.zh-CN.md"><img alt="Chinese" src="https://img.shields.io/badge/文档-简体中文-green"></a>
@@ -18,7 +14,7 @@
 
 ## 简介
 
-简仓 ERP 是一套面向**小型仓库**与**轻量组装业务**的进销存与客户订单管理系统。前端完整采用 MIT 许可的 [V3 Admin Vite](https://github.com/un-pany/v3-admin-vite) 后台模板（保留主题、标签页、布局设置、响应式侧栏和登录页），后端为 FastAPI + SQLAlchemy，数据库使用 MySQL 8。
+ERPLite 是一套面向**小型仓库**与**轻量组装业务**的进销存与客户订单管理系统。前端完整采用 MIT 许可的 [V3 Admin Vite](https://github.com/un-pany/v3-admin-vite) 后台模板（保留主题、标签页、布局设置、响应式侧栏和登录页），后端为 FastAPI + SQLAlchemy，数据库使用 MySQL 8。
 
 - 零件与产品统一物料管理，产品支持 BOM 组装
 - 采购入库、按 BOM 生产入库、手工出库、销售出库，全程流水可追溯
