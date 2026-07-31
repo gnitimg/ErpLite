@@ -24,7 +24,7 @@ const metrics = [
 </script>
 
 <template>
-  <div v-loading="loading">
+  <div v-loading="loading" class="erp-page">
     <section class="metric-grid">
       <div v-for="metric in metrics" :key="metric.key" class="metric-card">
         <div>

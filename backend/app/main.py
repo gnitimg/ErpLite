@@ -1,14 +1,20 @@
 from contextlib import asynccontextmanager
-import base64
+from datetime import date
+import logging
 import os
 from pathlib import Path
+import sys
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "app"
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .database import Base, SessionLocal, engine, get_db
@@ -19,9 +25,14 @@ from .services import create_transaction, ensure_sku_available, item_dict, load_
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    with SessionLocal() as db:
-        seed_demo(db)
+    try:
+        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            seed_demo(db)
+        _app.state.database_ready = True
+    except SQLAlchemyError as error:
+        _app.state.database_ready = False
+        logging.getLogger("uvicorn.error").warning("MySQL is not ready; ERP data APIs are temporarily unavailable: %s", error)
     yield
 
 
@@ -33,6 +44,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error_handler(_request, _error):
+    return JSONResponse(status_code=503, content={"detail": "MySQL 数据库尚未就绪，请先启动本机数据库"})
 
 
 def find_item(db: Session, item_id: int, kind: str | None = None) -> InventoryItem:
@@ -55,22 +71,15 @@ def list_items(db: Session, kind: str, keyword: str = "", include_bom: bool = Fa
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "lite-erp"}
-
-
-@app.get("/api/v1/auth/captcha")
-def captcha():
-    svg = """<svg xmlns='http://www.w3.org/2000/svg' width='100' height='40'><rect width='100' height='40' rx='5' fill='#eef2ff'/><path d='M5 30L95 8M12 8L88 34' stroke='#b8c4ef' stroke-width='1'/><text x='50' y='27' text-anchor='middle' font-family='Arial' font-size='21' font-weight='700' letter-spacing='4' fill='#3155d9'>1234</text></svg>"""
-    encoded = base64.b64encode(svg.encode()).decode()
-    return {"code": 0, "data": f"data:image/svg+xml;base64,{encoded}", "message": "success"}
+    return {"status": "ok", "service": "lite-erp", "database": "ready" if getattr(app.state, "database_ready", False) else "unavailable"}
 
 
 @app.post("/api/v1/auth/login")
 def login(payload: LoginPayload):
     username = os.getenv("ERP_ADMIN_USER", "admin")
     password = os.getenv("ERP_ADMIN_PASSWORD", "12345678")
-    if payload.username != username or payload.password != password or payload.code.strip() != "1234":
-        raise HTTPException(401, "用户名、密码或验证码错误")
+    if payload.username != username or payload.password != password:
+        raise HTTPException(401, "用户名或密码错误")
     return {"code": 0, "data": {"token": "lite-erp-local-admin"}, "message": "success"}
 
 
@@ -243,10 +252,23 @@ def outbound(payload: StockPayload, db: Session = Depends(get_db)):
 
 
 @app.get("/api/orders")
-def orders(status: str | None = None, db: Session = Depends(get_db)):
+def orders(
+    status: str | None = None,
+    keyword: str = "",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
     query = select(SalesOrder).options(selectinload(SalesOrder.items).selectinload(SalesOrderItem.product))
     if status:
         query = query.where(SalesOrder.status == status)
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(SalesOrder.order_no.ilike(token), SalesOrder.customer_name.ilike(token), SalesOrder.customer_phone.ilike(token)))
+    if start_date:
+        query = query.where(SalesOrder.order_date >= start_date)
+    if end_date:
+        query = query.where(SalesOrder.order_date <= end_date)
     rows = db.scalars(query.order_by(SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
     return [order_dict(order) for order in rows]
 
@@ -316,3 +338,9 @@ def frontend(full_path: str):
     if index.exists():
         return FileResponse(index)
     return {"message": "前端尚未构建，请先执行 npm --prefix frontend run build", "api_docs": "/docs"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

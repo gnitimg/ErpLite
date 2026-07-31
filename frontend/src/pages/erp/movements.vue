@@ -39,7 +39,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div class="erp-page">
     <div class="page-toolbar">
       <div class="toolbar-group"><el-alert title="库存修改必须通过业务流水，系统会自动阻止负库存。" type="info" :closable="false" show-icon /></div>
       <div class="toolbar-group"><el-button @click="open('outbound')"><el-icon><TopRight /></el-icon>办理出库</el-button><el-button type="primary" @click="open('inbound')"><el-icon><BottomLeft /></el-icon>办理入库</el-button></div>

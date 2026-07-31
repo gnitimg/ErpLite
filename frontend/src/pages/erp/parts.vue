@@ -56,7 +56,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div class="erp-page">
     <div class="page-toolbar">
       <div class="toolbar-group">
         <el-input v-model="keyword" clearable placeholder="搜索编码或名称" style="width:260px" @keyup.enter="load" @clear="load"><template #prefix><el-icon><Search /></el-icon></template></el-input>

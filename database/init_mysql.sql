@@ -9,3 +9,4 @@ ALTER USER 'lite_erp'@'127.0.0.1' IDENTIFIED BY 'LiteErp@2026!';
 GRANT ALL PRIVILEGES ON `lite_erp`.* TO 'lite_erp'@'localhost';
 GRANT ALL PRIVILEGES ON `lite_erp`.* TO 'lite_erp'@'127.0.0.1';
 FLUSH PRIVILEGES;
+ALTER USER 'root'@'localhost' IDENTIFIED BY 'LocalRoot@2026!';

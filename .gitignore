@@ -1,49 +1,14 @@
-# Python
 .venv/
-venv/
 __pycache__/
 *.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
-*.egg-info/
-build/
-dist/
-.eggs/
-
-# Frontend (managed per frontend/.gitignore, kept here as safety)
 frontend/node_modules/
 frontend/dist/
-frontend/.eslintcache
-frontend/vite.config.*.timestamp*
-
-# Environment & secrets
-/.env
-.env.*.local
-*.local
-*.local.json
-!frontend/.env
-
-# Logs & runtime
+.env
 logs/
-*.log
-*.pid
 .erp.pid
-
-# Editor & OS
-.idea/
-/.vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+.mysql-data/
+.mysql-undo/
+.mysql-initialized
+.mysql-local.ini
+.mysql-init.ini
 .DS_Store
-Thumbs.db
-desktop.ini
-
-# Temp
-.tmp/
-temp/

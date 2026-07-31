@@ -25,6 +25,7 @@ switch ($Action) {
     if (-not (Test-Path -LiteralPath $PythonExe) -or -not (Test-Path -LiteralPath $FrontendIndex)) {
       & (Join-Path $ProjectDir "setup.ps1")
     }
+    & (Join-Path $ProjectDir "mysql-local.ps1") start
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
     $arguments = @("-m", "uvicorn", "app.main:app", "--app-dir", (Join-Path $ProjectDir "backend"), "--host", "0.0.0.0", "--port", "8000")
     $process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WorkingDirectory $ProjectDir -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru
@@ -36,6 +37,7 @@ switch ($Action) {
     if ($running) { Stop-Process -Id $running.Id; Write-Host "ERP stopped." -ForegroundColor Yellow }
     else { Write-Host "ERP is not running." }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+    & (Join-Path $ProjectDir "mysql-local.ps1") stop
   }
   "status" {
     $running = Get-ErpProcess
@@ -47,4 +49,3 @@ switch ($Action) {
     if (Test-Path -LiteralPath $OutLog) { Get-Content -LiteralPath $OutLog -Tail 80 }
   }
 }
-

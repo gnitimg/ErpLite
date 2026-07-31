@@ -25,7 +25,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div class="erp-page">
     <div class="metric-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
       <div class="metric-card"><div><div class="metric-label">当前物料</div><div class="metric-value">{{ rows.length }}</div><div class="metric-note">筛选范围内的物料</div></div><div class="metric-icon"><el-icon><Files /></el-icon></div></div>
       <div class="metric-card"><div><div class="metric-label">库存预警</div><div class="metric-value">{{ lowCount }}</div><div class="metric-note">结存小于或等于安全线</div></div><div class="metric-icon"><el-icon><Warning /></el-icon></div></div>

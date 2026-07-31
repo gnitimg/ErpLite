@@ -34,7 +34,7 @@ export default defineConfig(({ mode }) => {
       // 端口被占用时，是否直接退出
       strictPort: false,
       // 是否自动打开浏览器
-      open: true,
+      open: false,
       // 反向代理
       proxy: {
         "/api": {

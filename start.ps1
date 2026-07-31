@@ -7,7 +7,8 @@ if (-not (Test-Path -LiteralPath $PythonExe) -or -not (Test-Path -LiteralPath $F
   & (Join-Path $ProjectDir "setup.ps1")
 }
 
+& (Join-Path $ProjectDir "mysql-local.ps1") start
+
 Write-Host "Lite ERP: http://localhost:8000" -ForegroundColor Cyan
 Write-Host "API docs: http://localhost:8000/docs" -ForegroundColor DarkGray
 & $PythonExe -m uvicorn app.main:app --app-dir (Join-Path $ProjectDir "backend") --host 0.0.0.0 --port 8000
-

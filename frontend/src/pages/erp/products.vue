@@ -55,7 +55,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div class="erp-page">
     <div class="page-toolbar">
       <div class="toolbar-group"><el-input v-model="keyword" clearable placeholder="搜索产品编码或名称" style="width:280px" @keyup.enter="load" @clear="load"><template #prefix><el-icon><Search /></el-icon></template></el-input><el-button @click="load">查询</el-button></div>
       <el-button type="primary" @click="openCreate"><el-icon><Plus /></el-icon>新建产品</el-button>

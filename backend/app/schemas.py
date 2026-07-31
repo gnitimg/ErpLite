@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 class LoginPayload(BaseModel):
     username: str
     password: str
-    code: str
+    code: str = ""
 
 
 class PartPayload(BaseModel):
