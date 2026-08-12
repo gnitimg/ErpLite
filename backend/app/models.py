@@ -19,6 +19,7 @@ class InventoryItem(Base):
     sale_price: Mapped[float] = mapped_column(Float, default=0)
     min_stock: Mapped[float] = mapped_column(Float, default=0)
     stock_qty: Mapped[float] = mapped_column(Float, default=0)
+    supply_mode: Mapped[str] = mapped_column(String(20), default="STOCK")  # STOCK / BUY_TO_ORDER（仅零件）
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -54,6 +55,7 @@ class SalesOrder(Base):
     customer_address: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(20), default="DRAFT", index=True)
     order_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
+    required_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
     total_amount: Mapped[float] = mapped_column(Float, default=0)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -69,6 +71,8 @@ class SalesOrderItem(Base):
     order_id: Mapped[int] = mapped_column(ForeignKey("sales_orders.id", ondelete="CASCADE"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
     quantity: Mapped[float] = mapped_column(Float)
+    reserved_quantity: Mapped[float] = mapped_column(Float, default=0)
+    reference_price: Mapped[float] = mapped_column(Float, default=0)
     unit_price: Mapped[float] = mapped_column(Float)
     line_total: Mapped[float] = mapped_column(Float)
 
@@ -117,4 +121,3 @@ class OperationLog(Base):
     status: Mapped[str] = mapped_column(String(20), default="SUCCESS", index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
-

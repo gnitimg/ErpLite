@@ -47,6 +47,19 @@ const templateConstantRoutes: RouteRecordRaw[] = [
     }
   },
   {
+    path: "/settings",
+    component: Layouts,
+    meta: { hidden: true },
+    children: [
+      {
+        path: "theme",
+        component: () => import("@/pages/settings/theme.vue"),
+        name: "ThemeSettings",
+        meta: { title: "主题设置", hidden: true }
+      }
+    ]
+  },
+  {
     path: "/",
     component: Layouts,
     redirect: DASHBOARD_PATH,
@@ -93,41 +106,38 @@ const templateConstantRoutes: RouteRecordRaw[] = [
     component: Layouts,
     redirect: "/warehouse/inventory",
     name: "Warehouse",
-    meta: {
-      title: "仓库管理",
-      elIcon: "House",
-      alwaysShow: true
-    },
+    meta: { title: "库存查询", elIcon: "DataAnalysis", alwaysShow: true },
     children: [
       {
         path: "inventory",
         component: () => import("@/pages/erp/inventory.vue"),
         name: "Inventory",
         meta: { title: "实时库存", elIcon: "DataAnalysis", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/operations",
+    component: Layouts,
+    redirect: "/operations/orders",
+    name: "BusinessOperations",
+    meta: {
+      title: "业务处理",
+      elIcon: "Tickets",
+      alwaysShow: true
+    },
+    children: [
+      {
+        path: "orders",
+        component: () => import("@/pages/erp/orders.vue"),
+        name: "Orders",
+        meta: { title: "客户订单", elIcon: "Tickets", keepAlive: true }
       },
       {
         path: "movements",
         component: () => import("@/pages/erp/movements.vue"),
         name: "Movements",
-        meta: { title: "出入库记录", elIcon: "Sort", keepAlive: true }
-      }
-    ]
-  },
-  {
-    path: "/orders",
-    component: Layouts,
-    redirect: "/orders/list",
-    name: "OrderCenter",
-    meta: {
-      title: "客户订单",
-      elIcon: "Tickets"
-    },
-    children: [
-      {
-        path: "list",
-        component: () => import("@/pages/erp/orders.vue"),
-        name: "Orders",
-        meta: { title: "客户订单", keepAlive: true }
+        meta: { title: "出入库作业", elIcon: "Sort", keepAlive: true }
       }
     ]
   },

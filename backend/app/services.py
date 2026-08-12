@@ -3,7 +3,7 @@ import logging
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import InventoryItem, OperationLog, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
@@ -93,6 +93,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "sale_price": item.sale_price,
         "min_stock": item.min_stock,
         "stock_qty": item.stock_qty,
+        "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
         "active": item.active,
         "low_stock": item.stock_qty <= item.min_stock,
         "created_at": item.created_at.isoformat(),
@@ -123,6 +124,7 @@ def order_dict(order: SalesOrder) -> dict:
         "customer_address": order.customer_address,
         "status": order.status,
         "order_date": order.order_date.isoformat(),
+        "required_date": (order.required_date or order.order_date).isoformat(),
         "total_amount": order.total_amount,
         "notes": order.notes,
         "created_at": order.created_at.isoformat(),
@@ -133,8 +135,12 @@ def order_dict(order: SalesOrder) -> dict:
                 "product_sku": line.product.sku,
                 "product_name": line.product.name,
                 "quantity": line.quantity,
+                "reserved_quantity": line.reserved_quantity or 0,
+                "reference_price": line.reference_price,
                 "unit_price": line.unit_price,
                 "line_total": line.line_total,
+                "discount_rate": round((line.unit_price / line.reference_price * 100) if line.reference_price else 100, 2),
+                "discount_amount": round(max(line.reference_price - line.unit_price, 0) * line.quantity, 2),
             }
             for line in order.items
         ],
@@ -195,11 +201,228 @@ def load_order(db: Session, order_id: int) -> SalesOrder:
     order = db.scalar(
         select(SalesOrder)
         .where(SalesOrder.id == order_id)
-        .options(selectinload(SalesOrder.items).selectinload(SalesOrderItem.product))
+        .options(
+            selectinload(SalesOrder.items)
+            .selectinload(SalesOrderItem.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
     )
     if not order:
         raise HTTPException(404, "客单不存在")
     return order
+
+
+RESERVATION_STATUSES = ("CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP")
+
+
+def rebalance_product_reservations(db: Session, product_ids: set[int] | None = None) -> None:
+    """按要求交期、订单日期、订单号的顺序，将现有成品库存分配给所有活动客单。"""
+    query = (
+        select(SalesOrderItem)
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .options(selectinload(SalesOrderItem.product))
+        .where(SalesOrder.status.in_(RESERVATION_STATUSES))
+        .order_by(SalesOrder.required_date, SalesOrder.order_date, SalesOrder.id, SalesOrderItem.id)
+    )
+    if product_ids:
+        query = query.where(SalesOrderItem.product_id.in_(product_ids))
+    lines = db.scalars(query).all()
+    remaining: dict[int, float] = {}
+    for line in lines:
+        available = remaining.setdefault(line.product_id, float(line.product.stock_qty))
+        line.reserved_quantity = round(min(float(line.quantity), max(available, 0)), 6)
+        remaining[line.product_id] = available - line.reserved_quantity
+    affected_orders = {line.order_id for line in lines}
+    if product_ids:
+        affected_orders.update(db.scalars(
+            select(SalesOrder.id)
+            .join(SalesOrderItem, SalesOrderItem.order_id == SalesOrder.id)
+            .where(SalesOrderItem.product_id.in_(product_ids), SalesOrder.status.in_(RESERVATION_STATUSES))
+        ).all())
+    for order_id in affected_orders:
+        active_order = db.get(SalesOrder, order_id)
+        order_lines = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)).all()
+        if active_order and active_order.status in RESERVATION_STATUSES:
+            active_order.status = (
+                "READY_TO_SHIP"
+                if all(float(line.reserved_quantity or 0) + 1e-9 >= float(line.quantity) for line in order_lines)
+                else "WAITING_MATERIALS"
+            )
+    db.flush()
+
+
+def reserved_product_quantity(db: Session, product_id: int, exclude_order_id: int | None = None) -> float:
+    query = (
+        select(func.coalesce(func.sum(SalesOrderItem.reserved_quantity), 0))
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .where(SalesOrderItem.product_id == product_id, SalesOrder.status.in_(RESERVATION_STATUSES))
+    )
+    if exclude_order_id is not None:
+        query = query.where(SalesOrderItem.order_id != exclude_order_id)
+    return float(db.scalar(query) or 0)
+
+
+def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
+    product_lines: list[dict] = []
+    material_map: dict[int, dict] = {}
+    missing_bom: list[dict] = []
+
+    for line in order.items:
+        reserved = min(float(line.reserved_quantity or 0), float(line.quantity))
+        other_reserved = reserved_product_quantity(db, line.product_id, order.id)
+        free_stock = max(float(line.product.stock_qty) - other_reserved - reserved, 0)
+        production_required = max(float(line.quantity) - reserved, 0)
+        priority_rows = db.execute(
+            select(SalesOrder.id, SalesOrder.order_no, SalesOrder.required_date)
+            .join(SalesOrderItem, SalesOrderItem.order_id == SalesOrder.id)
+            .where(SalesOrderItem.product_id == line.product_id, SalesOrder.status.in_(RESERVATION_STATUSES))
+            .order_by(SalesOrder.required_date, SalesOrder.order_date, SalesOrder.id)
+        ).all()
+        priority_rank = next((index + 1 for index, row in enumerate(priority_rows) if row.id == order.id), 1)
+        product_lines.append({
+            "order_item_id": line.id,
+            "product_id": line.product_id,
+            "sku": line.product.sku,
+            "name": line.product.name,
+            "unit": line.product.unit,
+            "ordered_quantity": line.quantity,
+            "reserved_quantity": reserved,
+            "free_stock": round(free_stock, 6),
+            "production_required": round(production_required, 6),
+            "bom_configured": bool(line.product.bom_components),
+            "priority_rank": priority_rank,
+            "priority_total": len(priority_rows),
+            "waiting_for_earlier_orders": priority_rank > 1 and production_required > 1e-9,
+        })
+        if production_required <= 1e-9:
+            continue
+        if not line.product.bom_components:
+            missing_bom.append({"product_id": line.product_id, "sku": line.product.sku, "name": line.product.name})
+            continue
+        for component in line.product.bom_components:
+            required = float(component.quantity) * production_required
+            material = material_map.setdefault(component.part_id, {
+                "part_id": component.part_id,
+                "sku": component.part.sku,
+                "name": component.part.name,
+                "unit": component.part.unit,
+                "supply_mode": component.part.supply_mode or "STOCK",
+                "required_quantity": 0.0,
+                "available_stock": float(component.part.stock_qty),
+            })
+            material["required_quantity"] += required
+
+    material_lines = []
+    for material in material_map.values():
+        material["required_quantity"] = round(material["required_quantity"], 6)
+        material["shortage_quantity"] = round(
+            max(material["required_quantity"] - material["available_stock"], 0), 6
+        )
+        material_lines.append(material)
+    material_lines.sort(key=lambda row: (row["shortage_quantity"] <= 0, row["sku"]))
+
+    has_shortage = any(row["shortage_quantity"] > 1e-9 for row in material_lines)
+    waiting_for_priority = any(row["waiting_for_earlier_orders"] for row in product_lines)
+    production_required = any(row["production_required"] > 1e-9 for row in product_lines)
+    ready_to_ship = all(row["reserved_quantity"] + 1e-9 >= row["ordered_quantity"] for row in product_lines)
+    if order.status == "DRAFT":
+        next_action = "CONFIRM"
+    elif order.status == "FULFILLED":
+        next_action = "COMPLETED"
+    elif order.status == "CANCELLED":
+        next_action = "CANCELLED"
+    elif ready_to_ship:
+        next_action = "SHIP"
+    elif waiting_for_priority:
+        next_action = "WAIT_PRIORITY"
+    elif missing_bom:
+        next_action = "CONFIGURE_BOM"
+    elif has_shortage:
+        next_action = "PURCHASE"
+    elif production_required:
+        next_action = "PRODUCE"
+    else:
+        next_action = "CHECK_STOCK"
+
+    return {
+        "order_id": order.id,
+        "order_no": order.order_no,
+        "status": order.status,
+        "ready_to_ship": ready_to_ship,
+        "next_action": next_action,
+        "product_lines": product_lines,
+        "material_lines": material_lines,
+        "missing_bom": missing_bom,
+    }
+
+
+def prepare_order_stock(db: Session, order: SalesOrder) -> dict:
+    if order.status not in RESERVATION_STATUSES:
+        raise HTTPException(409, "只有已确认且未完结的客单可以执行备货检查")
+
+    db.flush()
+    product_ids = {line.product_id for line in order.items}
+    rebalance_product_reservations(db, product_ids)
+
+    workflow = order_workflow_dict(db, order)
+    if (
+        workflow["next_action"] == "WAIT_PRIORITY"
+        or workflow["missing_bom"]
+        or any(row["shortage_quantity"] > 1e-9 for row in workflow["material_lines"])
+    ):
+        order.status = "WAITING_MATERIALS"
+        db.commit()
+        refreshed = load_order(db, order.id)
+        return {"order": order_dict(refreshed), "workflow": order_workflow_dict(db, refreshed), "transaction_id": None}
+
+    changes: dict[int, list] = {}
+    for line in order.items:
+        production_quantity = max(float(line.quantity) - float(line.reserved_quantity or 0), 0)
+        if production_quantity <= 1e-9:
+            continue
+        for component in line.product.bom_components:
+            entry = changes.setdefault(component.part_id, [component.part, 0.0, component.part.cost_price])
+            entry[1] -= float(component.quantity) * production_quantity
+        product_entry = changes.setdefault(line.product_id, [line.product, 0.0, line.product.cost_price])
+        product_entry[1] += production_quantity
+
+    transaction_id = None
+    if changes:
+        for item, delta, _unit_cost in changes.values():
+            if item.kind == "PART" and item.stock_qty + delta < -1e-9:
+                order.status = "WAITING_MATERIALS"
+                db.commit()
+                refreshed = load_order(db, order.id)
+                return {
+                    "order": order_dict(refreshed),
+                    "workflow": order_workflow_dict(db, refreshed),
+                    "transaction_id": None,
+                }
+        transaction = create_transaction(
+            db,
+            "ASSEMBLY_IN",
+            [(item, round(delta, 6), unit_cost) for item, delta, unit_cost in changes.values()],
+            f"客单 {order.order_no} 缺货产品生产入库",
+            order.id,
+        )
+        transaction_id = transaction.id
+        rebalance_product_reservations(db, product_ids)
+
+    refreshed_workflow = order_workflow_dict(db, order)
+    order.status = "READY_TO_SHIP" if refreshed_workflow["ready_to_ship"] else "WAITING_MATERIALS"
+    db.commit()
+    refreshed = load_order(db, order.id)
+    return {
+        "order": order_dict(refreshed),
+        "workflow": order_workflow_dict(db, refreshed),
+        "transaction_id": transaction_id,
+    }
+
+
+def release_order_reservations(order: SalesOrder) -> None:
+    for line in order.items:
+        line.reserved_quantity = 0
 
 
 def seed_demo(db: Session) -> None:
@@ -237,10 +460,9 @@ def seed_demo(db: Session) -> None:
     )
     order = SalesOrder(
         order_no=serial("SO"), customer_name="上海示例科技", customer_phone="021-5555 0188",
-        customer_address="上海市浦东新区", status="CONFIRMED", order_date=date.today(), notes="演示客单"
+        customer_address="上海市浦东新区", status="CONFIRMED", order_date=date.today(), required_date=date.today(), notes="演示客单"
     )
-    order.items = [SalesOrderItem(product_id=products[0].id, quantity=3, unit_price=239, line_total=717)]
+    order.items = [SalesOrderItem(product_id=products[0].id, quantity=3, reference_price=239, unit_price=239, line_total=717)]
     order.total_amount = 717
     db.add(order)
     db.commit()
-

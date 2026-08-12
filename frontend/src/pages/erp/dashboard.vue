@@ -38,7 +38,7 @@ const metrics = [
 
     <section class="dashboard-grid">
       <div class="content-card">
-        <div class="card-head"><h3>最近库存动态</h3><router-link to="/movements">查看全部</router-link></div>
+        <div class="card-head"><h3>最近库存动态</h3><router-link to="/operations/movements">查看全部</router-link></div>
         <el-table :data="data.recent_transactions" style="width: 100%">
           <el-table-column label="流水号" min-width="175"><template #default="{ row }"><span class="mono">{{ row.transaction_no }}</span></template></el-table-column>
           <el-table-column label="业务类型" width="105"><template #default="{ row }"><el-tag size="small" effect="plain">{{ txLabels[row.transaction_type] || row.transaction_type }}</el-tag></template></el-table-column>
@@ -53,8 +53,8 @@ const metrics = [
           <div class="card-body quick-actions">
             <router-link class="quick-action" to="/parts"><strong>新建零件</strong><span>建立配件档案</span></router-link>
             <router-link class="quick-action" to="/products"><strong>新建产品</strong><span>编辑产品 BOM</span></router-link>
-            <router-link class="quick-action" to="/movements"><strong>办理入库</strong><span>采购或生产入库</span></router-link>
-            <router-link class="quick-action" to="/orders"><strong>录入客单</strong><span>创建销售订单</span></router-link>
+            <router-link class="quick-action" to="/operations/movements"><strong>办理入库</strong><span>采购或生产入库</span></router-link>
+            <router-link class="quick-action" to="/operations/orders"><strong>录入客单</strong><span>创建销售订单</span></router-link>
           </div>
         </div>
         <div class="content-card">

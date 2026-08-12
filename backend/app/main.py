@@ -19,10 +19,24 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
-from .database import Base, SessionLocal, engine, get_db
+from .database import Base, SessionLocal, engine, ensure_schema_compatibility, get_db
 from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
 from .schemas import BackupRestorePayload, LoginPayload, OrderPayload, PartPayload, ProductPayload, StockPayload
-from .services import create_transaction, ensure_sku_available, item_dict, load_order, order_dict, seed_demo, serial, transaction_dict
+from .services import (
+    create_transaction,
+    ensure_sku_available,
+    item_dict,
+    load_order,
+    order_dict,
+    order_workflow_dict,
+    prepare_order_stock,
+    rebalance_product_reservations,
+    release_order_reservations,
+    reserved_product_quantity,
+    seed_demo,
+    serial,
+    transaction_dict,
+)
 
 
 StockStatus = Literal["LOW", "NORMAL"]
@@ -33,6 +47,7 @@ BomStatus = Literal["CONFIGURED", "EMPTY"]
 async def lifespan(_app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
+        ensure_schema_compatibility()
         with SessionLocal() as db:
             seed_demo(db)
         _app.state.database_ready = True
@@ -71,6 +86,7 @@ def list_items(
     include_bom: bool = False,
     stock_status: StockStatus | None = None,
     bom_status: BomStatus | None = None,
+    supply_mode: Literal["STOCK", "BUY_TO_ORDER"] | None = None,
 ) -> list[dict]:
     query = select(InventoryItem).where(InventoryItem.kind == kind, InventoryItem.active.is_(True))
     if keyword.strip():
@@ -86,10 +102,19 @@ def list_items(
         query = query.where(InventoryItem.bom_components.any())
     elif bom_status == "EMPTY":
         query = query.where(~InventoryItem.bom_components.any())
+    if kind == "PART" and supply_mode:
+        query = query.where(InventoryItem.supply_mode == supply_mode)
     if include_bom:
         query = query.options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part))
     items = db.scalars(query.order_by(InventoryItem.id.desc())).all()
-    return [item_dict(item, include_bom) for item in items]
+    rows = []
+    for item in items:
+        data = item_dict(item, include_bom)
+        reserved = reserved_product_quantity(db, item.id) if item.kind == "PRODUCT" else 0
+        data["reserved_qty"] = reserved
+        data["available_qty"] = max(float(item.stock_qty) - reserved, 0)
+        rows.append(data)
+    return rows
 
 
 @app.get("/api/health")
@@ -117,7 +142,7 @@ def dashboard(db: Session = Depends(get_db)):
     part_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PART")) or 0
     product_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PRODUCT")) or 0
     low_stock = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.stock_qty <= InventoryItem.min_stock)) or 0
-    pending_orders = db.scalar(select(func.count()).select_from(SalesOrder).where(SalesOrder.status.in_(["DRAFT", "CONFIRMED"]))) or 0
+    pending_orders = db.scalar(select(func.count()).select_from(SalesOrder).where(SalesOrder.status.in_(["DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"]))) or 0
     inventory_value = db.scalar(select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active)) or 0
     recent_txs = db.scalars(
         select(StockTransaction)
@@ -136,9 +161,10 @@ def dashboard(db: Session = Depends(get_db)):
 def parts(
     keyword: str = "",
     stock_status: StockStatus | None = None,
+    supply_mode: Literal["STOCK", "BUY_TO_ORDER"] | None = None,
     db: Session = Depends(get_db),
 ):
-    return list_items(db, "PART", keyword, stock_status=stock_status)
+    return list_items(db, "PART", keyword, stock_status=stock_status, supply_mode=supply_mode)
 
 
 @app.post("/api/parts", status_code=201)
@@ -253,7 +279,14 @@ def inventory(
             or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
         )
     items = db.scalars(query.order_by(InventoryItem.kind, InventoryItem.sku)).all()
-    return [item_dict(item) for item in items]
+    rows = []
+    for item in items:
+        data = item_dict(item)
+        reserved = reserved_product_quantity(db, item.id) if item.kind == "PRODUCT" else 0
+        data["reserved_qty"] = reserved
+        data["available_qty"] = max(float(item.stock_qty) - reserved, 0)
+        rows.append(data)
+    return rows
 
 
 @app.get("/api/stock/transactions")
@@ -310,6 +343,11 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
 @app.post("/api/stock/outbound", status_code=201)
 def outbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
+    if item.kind == "PRODUCT":
+        reserved = reserved_product_quantity(db, item.id)
+        free_stock = max(float(item.stock_qty) - reserved, 0)
+        if payload.quantity > free_stock + 1e-9:
+            raise HTTPException(409, f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留")
     tx = create_transaction(db, "MANUAL_OUT", [(item, -payload.quantity, item.cost_price)], payload.notes)
     db.commit()
     tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
@@ -334,7 +372,7 @@ def orders(
         query = query.where(SalesOrder.order_date >= start_date)
     if end_date:
         query = query.where(SalesOrder.order_date <= end_date)
-    rows = db.scalars(query.order_by(SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
+    rows = db.scalars(query.order_by(SalesOrder.required_date.asc(), SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
     return [order_dict(order) for order in rows]
 
 
@@ -346,10 +384,17 @@ def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
         raise HTTPException(400, "客单中包含无效产品")
     order = SalesOrder(
         order_no=serial("SO"), customer_name=payload.customer_name, customer_phone=payload.customer_phone,
-        customer_address=payload.customer_address, order_date=payload.order_date, notes=payload.notes, status="DRAFT"
+        customer_address=payload.customer_address, order_date=payload.order_date,
+        required_date=payload.required_date or payload.order_date, notes=payload.notes, status="DRAFT"
     )
     order.items = [
-        SalesOrderItem(product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=round(line.quantity * line.unit_price, 2))
+        SalesOrderItem(
+            product_id=line.product_id,
+            quantity=line.quantity,
+            reference_price=products[line.product_id].sale_price,
+            unit_price=line.unit_price,
+            line_total=round(line.quantity * line.unit_price, 2),
+        )
         for line in payload.items
     ]
     order.total_amount = round(sum(line.line_total for line in order.items), 2)
@@ -364,17 +409,37 @@ def confirm_order(order_id: int, db: Session = Depends(get_db)):
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿客单可以确认")
     order.status = "CONFIRMED"
+    result = prepare_order_stock(db, order)
+    rebalance_product_reservations(db, {line.product_id for line in order.items})
     db.commit()
-    return order_dict(order)
+    refreshed = load_order(db, order.id)
+    result["order"] = order_dict(refreshed)
+    result["workflow"] = order_workflow_dict(db, refreshed)
+    return result
+
+
+@app.get("/api/orders/{order_id}/availability")
+def order_availability(order_id: int, db: Session = Depends(get_db)):
+    return order_workflow_dict(db, load_order(db, order_id))
+
+
+@app.post("/api/orders/{order_id}/prepare")
+def prepare_order(order_id: int, db: Session = Depends(get_db)):
+    return prepare_order_stock(db, load_order(db, order_id))
 
 
 @app.post("/api/orders/{order_id}/fulfill")
 def fulfill_order(order_id: int, db: Session = Depends(get_db)):
     order = load_order(db, order_id)
-    if order.status not in {"DRAFT", "CONFIRMED"}:
-        raise HTTPException(409, "当前客单不能出库")
+    if order.status != "READY_TO_SHIP":
+        raise HTTPException(409, "客单尚未完成库存检查和备货，不能出库")
+    if any(float(line.reserved_quantity or 0) + 1e-9 < float(line.quantity) for line in order.items):
+        raise HTTPException(409, "客单产品预留数量不足，请重新执行备货检查")
+    product_ids = {line.product_id for line in order.items}
     tx = create_transaction(db, "SALE_OUT", [(line.product, -line.quantity, line.product.cost_price) for line in order.items], f"客单 {order.order_no} 出库", order.id)
+    release_order_reservations(order)
     order.status = "FULFILLED"
+    rebalance_product_reservations(db, product_ids)
     db.commit()
     return {"order": order_dict(order), "transaction_id": tx.id}
 
@@ -382,9 +447,12 @@ def fulfill_order(order_id: int, db: Session = Depends(get_db)):
 @app.post("/api/orders/{order_id}/cancel")
 def cancel_order(order_id: int, db: Session = Depends(get_db)):
     order = load_order(db, order_id)
-    if order.status == "FULFILLED":
-        raise HTTPException(409, "已出库客单不能直接取消")
+    if order.status in {"FULFILLED", "CANCELLED"}:
+        raise HTTPException(409, "已完结客单不能取消")
+    product_ids = {line.product_id for line in order.items}
+    release_order_reservations(order)
     order.status = "CANCELLED"
+    rebalance_product_reservations(db, product_ids)
     db.commit()
     return order_dict(order)
 

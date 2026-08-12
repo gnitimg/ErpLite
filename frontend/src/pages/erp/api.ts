@@ -32,6 +32,10 @@ export const txLabels: Record<string, string> = {
 }
 
 export const statusMap: Record<string, { label: string; type: string }> = {
-  DRAFT: { label: '草稿', type: 'info' }, CONFIRMED: { label: '已确认', type: 'warning' }, FULFILLED: { label: '已出库', type: 'success' }, CANCELLED: { label: '已取消', type: 'danger' },
+  DRAFT: { label: '草稿', type: 'info' },
+  CONFIRMED: { label: '检查库存', type: 'primary' },
+  WAITING_MATERIALS: { label: '缺料待采购', type: 'warning' },
+  READY_TO_SHIP: { label: '待出库', type: 'success' },
+  FULFILLED: { label: '已出库', type: 'success' },
+  CANCELLED: { label: '已取消', type: 'danger' },
 }
-

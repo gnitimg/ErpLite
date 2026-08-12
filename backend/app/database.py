@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
@@ -36,6 +36,54 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 class Base(DeclarativeBase):
     pass
+
+
+def ensure_schema_compatibility() -> None:
+    """为无迁移框架的本机版本补齐新增列，同时兼容已有 MySQL 数据。"""
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    additions = {
+        "inventory_items": (
+            "supply_mode",
+            "ALTER TABLE inventory_items ADD COLUMN supply_mode VARCHAR(20) NOT NULL DEFAULT 'STOCK'",
+        ),
+        "sales_order_items": (
+            "reserved_quantity",
+            "ALTER TABLE sales_order_items ADD COLUMN reserved_quantity FLOAT NOT NULL DEFAULT 0",
+        ),
+        "sales_order_items.reference_price": (
+            "reference_price",
+            "ALTER TABLE sales_order_items ADD COLUMN reference_price FLOAT NOT NULL DEFAULT 0",
+        ),
+        "sales_orders.required_date": (
+            "required_date",
+            "ALTER TABLE sales_orders ADD COLUMN required_date DATE NULL",
+        ),
+    }
+    with engine.begin() as connection:
+        for addition_key, (column_name, statement) in additions.items():
+            table_name = addition_key.split(".", 1)[0]
+            if table_name not in tables:
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if column_name not in columns:
+                connection.execute(text(statement))
+        if "sales_orders" in tables:
+            connection.execute(text("UPDATE sales_orders SET required_date = order_date WHERE required_date IS NULL"))
+        if "sales_order_items" in tables and "inventory_items" in tables:
+            if engine.dialect.name == "mysql":
+                connection.execute(text(
+                    "UPDATE sales_order_items AS order_item "
+                    "JOIN inventory_items AS product ON product.id = order_item.product_id "
+                    "SET order_item.reference_price = product.sale_price "
+                    "WHERE order_item.reference_price IS NULL OR order_item.reference_price = 0"
+                ))
+            else:
+                connection.execute(text(
+                    "UPDATE sales_order_items SET reference_price = COALESCE(("
+                    "SELECT sale_price FROM inventory_items WHERE inventory_items.id = sales_order_items.product_id"
+                    "), unit_price) WHERE reference_price IS NULL OR reference_price = 0"
+                ))
 
 
 def get_db():
