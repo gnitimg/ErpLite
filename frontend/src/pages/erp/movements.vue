@@ -2,22 +2,36 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, formatTime, money, qty, txLabels } from './api'
+import ListToolbar from './components/ListToolbar.vue'
 
 const loading = ref(false)
 const saving = ref(false)
 const drawer = ref(false)
+const filterDrawer = ref(false)
 const mode = ref<'inbound' | 'outbound'>('inbound')
 const items = ref<any[]>([])
 const rows = ref<any[]>([])
+const keyword = ref('')
+const filters = reactive({ transactionType: '', dateRange: [] as string[] })
 const form = reactive({ item_id: undefined as number | undefined, quantity: 1, unit_cost: 0, notes: '', consume_bom: true })
 const selected = computed(() => items.value.find(item => item.id === form.item_id))
+const activeFilterCount = computed(() => Number(Boolean(filters.transactionType)) + Number(filters.dateRange.length === 2))
 
 async function load() {
   loading.value = true
-  try { [items.value, rows.value] = await Promise.all([api('/api/inventory'), api('/api/stock/transactions')]) }
+  const params = new URLSearchParams()
+  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
+  if (filters.transactionType) params.set('transaction_type', filters.transactionType)
+  if (filters.dateRange.length === 2) {
+    params.set('start_date', filters.dateRange[0])
+    params.set('end_date', filters.dateRange[1])
+  }
+  try { [items.value, rows.value] = await Promise.all([api('/api/inventory'), api(`/api/stock/transactions?${params}`)]) }
   catch (error: any) { ElMessage.error(error.message) }
   finally { loading.value = false }
 }
+function applyFilters() { filterDrawer.value = false; load() }
+function resetFilters() { filters.transactionType = ''; filters.dateRange = []; applyFilters() }
 function open(type: 'inbound' | 'outbound') {
   mode.value = type
   Object.assign(form, { item_id: undefined, quantity: 1, unit_cost: 0, notes: '', consume_bom: true })
@@ -40,10 +54,11 @@ onMounted(load)
 
 <template>
   <div class="erp-page">
-    <div class="page-toolbar">
-      <div class="toolbar-group"><el-alert title="库存修改必须通过业务流水，系统会自动阻止负库存。" type="info" :closable="false" show-icon /></div>
-      <div class="toolbar-group"><el-button @click="open('outbound')"><el-icon><TopRight /></el-icon>办理出库</el-button><el-button type="primary" @click="open('inbound')"><el-icon><BottomLeft /></el-icon>办理入库</el-button></div>
-    </div>
+    <ListToolbar v-model="keyword" placeholder="搜索流水号、物料编码/名称或备注" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load">
+      <el-button @click="open('outbound')"><el-icon><TopRight /></el-icon>办理出库</el-button>
+      <el-button type="primary" @click="open('inbound')"><el-icon><BottomLeft /></el-icon>办理入库</el-button>
+    </ListToolbar>
+    <el-alert class="list-page-alert" title="库存修改必须通过业务流水，系统会自动阻止负库存。" type="info" :closable="false" show-icon />
     <div class="content-card">
       <div class="card-head"><h3>库存流水</h3><span>最近 {{ rows.length }} 条</span></div>
       <el-table v-loading="loading" :data="rows">
@@ -54,6 +69,14 @@ onMounted(load)
         <el-table-column label="备注" min-width="150"><template #default="{ row }"><span class="muted">{{ row.notes || '-' }}</span></template></el-table-column>
       </el-table>
     </div>
+
+    <el-drawer v-model="filterDrawer" title="筛选库存流水" size="min(420px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="业务类型"><el-select v-model="filters.transactionType" clearable placeholder="全部类型" style="width:100%"><el-option v-for="(label, key) in txLabels" :key="key" :label="label" :value="key" /></el-select></el-form-item>
+        <el-form-item label="发生日期"><el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" range-separator="至" style="width:100%" /></el-form-item>
+        <div class="filter-drawer-footer"><el-button @click="resetFilters">重置</el-button><el-button type="primary" @click="applyFilters">应用筛选</el-button></div>
+      </el-form>
+    </el-drawer>
 
     <el-drawer v-model="drawer" :title="mode === 'inbound' ? '办理入库' : '办理出库'" size="min(520px, 94vw)">
       <el-form label-position="top">

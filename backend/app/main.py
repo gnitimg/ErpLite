@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, time
 import logging
 import os
 from pathlib import Path
 import sys
+from typing import Literal
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,10 +18,15 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
+from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import Base, SessionLocal, engine, get_db
 from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
-from .schemas import LoginPayload, OrderPayload, PartPayload, ProductPayload, StockPayload
+from .schemas import BackupRestorePayload, LoginPayload, OrderPayload, PartPayload, ProductPayload, StockPayload
 from .services import create_transaction, ensure_sku_available, item_dict, load_order, order_dict, seed_demo, serial, transaction_dict
+
+
+StockStatus = Literal["LOW", "NORMAL"]
+BomStatus = Literal["CONFIGURED", "EMPTY"]
 
 
 @asynccontextmanager
@@ -58,11 +64,28 @@ def find_item(db: Session, item_id: int, kind: str | None = None) -> InventoryIt
     return item
 
 
-def list_items(db: Session, kind: str, keyword: str = "", include_bom: bool = False) -> list[dict]:
+def list_items(
+    db: Session,
+    kind: str,
+    keyword: str = "",
+    include_bom: bool = False,
+    stock_status: StockStatus | None = None,
+    bom_status: BomStatus | None = None,
+) -> list[dict]:
     query = select(InventoryItem).where(InventoryItem.kind == kind, InventoryItem.active.is_(True))
-    if keyword:
+    if keyword.strip():
         token = f"%{keyword.strip()}%"
-        query = query.where(or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token)))
+        query = query.where(
+            or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
+        )
+    if stock_status == "LOW":
+        query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
+    elif stock_status == "NORMAL":
+        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+    if bom_status == "CONFIGURED":
+        query = query.where(InventoryItem.bom_components.any())
+    elif bom_status == "EMPTY":
+        query = query.where(~InventoryItem.bom_components.any())
     if include_bom:
         query = query.options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part))
     items = db.scalars(query.order_by(InventoryItem.id.desc())).all()
@@ -110,8 +133,12 @@ def dashboard(db: Session = Depends(get_db)):
 
 
 @app.get("/api/parts")
-def parts(keyword: str = "", db: Session = Depends(get_db)):
-    return list_items(db, "PART", keyword)
+def parts(
+    keyword: str = "",
+    stock_status: StockStatus | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_items(db, "PART", keyword, stock_status=stock_status)
 
 
 @app.post("/api/parts", status_code=201)
@@ -147,8 +174,13 @@ def delete_part(item_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/products")
-def products(keyword: str = "", db: Session = Depends(get_db)):
-    return list_items(db, "PRODUCT", keyword, True)
+def products(
+    keyword: str = "",
+    stock_status: StockStatus | None = None,
+    bom_status: BomStatus | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_items(db, "PRODUCT", keyword, True, stock_status, bom_status)
 
 
 def save_product(db: Session, payload: ProductPayload, product: InventoryItem | None = None) -> InventoryItem:
@@ -201,26 +233,59 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/inventory")
-def inventory(kind: str | None = None, low_stock: bool = False, keyword: str = "", db: Session = Depends(get_db)):
+def inventory(
+    kind: str | None = None,
+    low_stock: bool = False,
+    stock_status: StockStatus | None = None,
+    keyword: str = "",
+    db: Session = Depends(get_db),
+):
     query = select(InventoryItem).where(InventoryItem.active.is_(True))
     if kind in {"PART", "PRODUCT"}:
         query = query.where(InventoryItem.kind == kind)
-    if low_stock:
+    if stock_status == "LOW" or (stock_status is None and low_stock):
         query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
-    if keyword:
+    elif stock_status == "NORMAL":
+        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+    if keyword.strip():
         token = f"%{keyword.strip()}%"
-        query = query.where(or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token)))
+        query = query.where(
+            or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
+        )
     items = db.scalars(query.order_by(InventoryItem.kind, InventoryItem.sku)).all()
     return [item_dict(item) for item in items]
 
 
 @app.get("/api/stock/transactions")
-def stock_transactions(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
-    txs = db.scalars(
+def stock_transactions(
+    limit: int = Query(100, ge=1, le=500),
+    keyword: str = "",
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    query = (
         select(StockTransaction)
         .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order))
-        .order_by(StockTransaction.occurred_at.desc()).limit(limit)
-    ).all()
+    )
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        item_matches = or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token))
+        query = query.where(
+            or_(
+                StockTransaction.transaction_no.ilike(token),
+                StockTransaction.notes.ilike(token),
+                StockTransaction.lines.any(StockTransactionItem.item.has(item_matches)),
+            )
+        )
+    if transaction_type and transaction_type.strip():
+        query = query.where(StockTransaction.transaction_type == transaction_type.strip().upper())
+    if start_date:
+        query = query.where(StockTransaction.occurred_at >= datetime.combine(start_date, time.min))
+    if end_date:
+        query = query.where(StockTransaction.occurred_at <= datetime.combine(end_date, time.max))
+    txs = db.scalars(query.order_by(StockTransaction.occurred_at.desc()).limit(limit)).all()
     return [transaction_dict(tx) for tx in txs]
 
 
@@ -322,6 +387,40 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     order.status = "CANCELLED"
     db.commit()
     return order_dict(order)
+
+
+@app.get("/api/backups")
+def backups():
+    return list_backup_archives()
+
+
+@app.post("/api/backups", status_code=201)
+def create_backup(db: Session = Depends(get_db)):
+    return create_backup_archive(db)
+
+
+@app.get("/api/backups/{filename}/download")
+def download_backup(filename: str):
+    try:
+        path = resolve_backup_file(filename)
+    except BackupError as error:
+        raise HTTPException(400, str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(404, "备份文件不存在") from error
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+@app.post("/api/backups/{filename}/restore")
+def restore_backup(filename: str, payload: BackupRestorePayload, db: Session = Depends(get_db)):
+    if payload.confirm_filename != filename:
+        raise HTTPException(400, "确认文件名与待恢复备份不一致")
+    try:
+        path = resolve_backup_file(filename)
+        return restore_backup_archive(db, path)
+    except BackupError as error:
+        raise HTTPException(400, str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(404, "备份文件不存在") from error
 
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"

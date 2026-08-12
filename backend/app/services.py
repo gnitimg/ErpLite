@@ -1,11 +1,72 @@
 from datetime import date, datetime
+import logging
 from uuid import uuid4
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
+from .models import InventoryItem, OperationLog, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
+
+
+_logger = logging.getLogger("uvicorn.error")
+
+
+def client_ip(request: Request) -> str:
+    """从请求中解析客户端 IP 地址。优先使用反向代理头，最后回退到连接地址。"""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else "unknown"
+
+
+def record_operation(
+    db: Session,
+    *,
+    request: Request,
+    username: str = "",
+    action: str = "",
+    target: str = "",
+    status: str = "SUCCESS",
+    detail: str = "",
+) -> None:
+    """记录一条操作日志。日志写入失败不会影响业务流程。"""
+    try:
+        db.add(OperationLog(
+            username=(username or "").strip()[:120],
+            action=(action or "").strip()[:60],
+            target=(target or "").strip()[:255],
+            method=request.method,
+            path=request.url.path[:255],
+            ip_address=client_ip(request)[:64],
+            status=(status or "SUCCESS").strip()[:20],
+            detail=(detail or "")[:2000],
+        ))
+        db.commit()
+    except Exception as error:  # noqa: BLE001 - 日志失败不应中断业务
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _logger.warning("记录操作日志失败: %s", error)
+
+
+def operation_log_dict(log: OperationLog) -> dict:
+    return {
+        "id": log.id,
+        "username": log.username,
+        "action": log.action,
+        "target": log.target,
+        "method": log.method,
+        "path": log.path,
+        "ip_address": log.ip_address,
+        "status": log.status,
+        "detail": log.detail,
+        "created_at": log.created_at.isoformat(),
+    }
 
 
 def serial(prefix: str) -> str:

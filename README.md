@@ -11,6 +11,7 @@
 - 客户订单：草稿、确认、取消和销售出库。
 - 客单列表支持按客单号、客户名称/电话模糊搜索，并可在筛选侧栏按状态和日期范围过滤。
 - 实时库存、低库存预警、库存成本与完整流水。
+- 数据备份：一键创建、列表筛选、下载 ZIP 快照，并可从指定快照快速恢复。
 - 工作台：关键指标、最近库存动态和快捷入口。
 
 ## 技术栈
@@ -63,12 +64,45 @@ Set-Location F:\DockerDesktop\erp
 
 默认登录信息：用户名 `admin`，密码 `12345678`。账号可在 `.env` 中修改；当前本机版本暂未启用验证码。
 
+## 开发调试
+
+后端支持在 `backend\app` 目录直接运行，不会再出现相对导入错误：
+
+```powershell
+Set-Location F:\DockerDesktop\erp\backend\app
+..\..\.venv\Scripts\python.exe main.py
+```
+
+另开一个 PowerShell 启动完整模板开发服务器：
+
+```powershell
+Set-Location F:\DockerDesktop\erp\frontend
+corepack pnpm dev
+```
+
+- 开发页面：http://localhost:3333
+- 开发代理目标：http://localhost:8000
+
+MySQL 暂未启动时，页面与无验证码登录仍可使用；依赖库存数据的接口会明确返回 HTTP 503“数据库尚未就绪”，不会让整个后端启动失败。
+
+## 数据备份与恢复
+
+登录后从“系统管理 → 数据备份”进入管理页：
+
+1. 点击“立即备份”创建完整业务数据快照。
+2. 可下载 ZIP 文件并复制到项目目录之外长期留存。
+3. 恢复时需要输入完整备份文件名进行二次确认。
+4. 系统会在恢复前自动创建一份“恢复前自动备份”，随后在单个数据库事务中替换数据；任一步骤失败都会回滚本次恢复。
+
+备份覆盖零件/产品、BOM、客单、库存结存及库存流水，文件默认保存在项目根目录的 `backups\`，该目录已加入 `.gitignore`。备份文件含业务数据，请按敏感数据管理，不要提交到 Git 仓库。
+
 ## 项目结构
 
 ```text
 backend/app/        FastAPI、SQLAlchemy 模型与库存业务逻辑
 database/           MySQL 初始化脚本
 frontend/           完整 V3 Admin Vite 模板与 ERP 页面
+backups/            运行时生成的数据备份（不提交 Git）
 docs/DATA_MODEL.md  数据表与业务约束说明
 setup.ps1           安装依赖并构建前端
 start.ps1           前台启动
@@ -88,6 +122,16 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | 出入库 | `POST /api/stock/inbound`、`POST /api/stock/outbound` |
 | 流水 | `GET /api/stock/transactions` |
 | 客单 | `GET/POST /api/orders`，以及 `confirm/fulfill/cancel` 动作 |
+| 数据备份 | `GET/POST /api/backups`、`GET /api/backups/{filename}/download`、`POST /api/backups/{filename}/restore` |
+
+### 列表筛选参数
+
+| 接口 | 参数 | 说明 |
+|---|---|---|
+| `GET /api/parts` | `keyword`、`stock_status` | `keyword` 模糊匹配零件 SKU/名称/规格；`stock_status` 可选 `LOW`（库存小于等于安全库存）或 `NORMAL`（库存高于安全库存） |
+| `GET /api/products` | `keyword`、`stock_status`、`bom_status` | `keyword` 模糊匹配产品 SKU/名称/规格；库存状态同上；`bom_status` 可选 `CONFIGURED`（已配置 BOM）或 `EMPTY`（未配置 BOM） |
+| `GET /api/inventory` | `keyword`、`kind`、`stock_status`、`low_stock` | `keyword` 模糊匹配物料 SKU/名称/规格；`kind` 可选 `PART` 或 `PRODUCT`；库存状态同上。保留 `low_stock=true` 兼容旧调用，同时传入时以 `stock_status` 为准 |
+| `GET /api/stock/transactions` | `keyword`、`transaction_type`、`start_date`、`end_date`、`limit` | `keyword` 模糊匹配流水号、物料 SKU/名称或备注；类型精确匹配（如 `PURCHASE_IN`、`ASSEMBLY_IN`、`MANUAL_IN`、`MANUAL_OUT`、`SALE_OUT`、`OPENING`）；日期格式为 `YYYY-MM-DD` 且包含起止当日；`limit` 范围为 1–500 |
 
 ## 当前边界
 

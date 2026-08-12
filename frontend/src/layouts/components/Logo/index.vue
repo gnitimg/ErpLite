@@ -17,7 +17,7 @@ const { isLeft, isTop } = useLayoutMode()
         <span class="layout-logo">仓</span>
       </router-link>
       <router-link v-else key="expand" to="/">
-        <span class="layout-logo-text" :class="{ dark: isLeft }"><b>仓</b> 简仓 ERP</span>
+        <span class="layout-logo-text" :class="{ dark: isLeft }"><b>仓</b> ErpLite</span>
       </router-link>
     </transition>
   </div>

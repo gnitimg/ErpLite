@@ -69,7 +69,7 @@ function handleLogin() {
     <Owl :close-eyes="isFocus" />
     <div class="login-card">
       <div class="title">
-        <div class="brand-title"><b>仓</b><span>简仓 ERP<small>轻量仓库与订单管理</small></span></div>
+        <div class="brand-title"><b>仓</b><span>ErpLite<small>轻量仓库与订单管理</small></span></div>
       </div>
       <div class="content">
         <el-form ref="loginFormRef" :model="loginFormData" :rules="loginFormRules" @keyup.enter="handleLogin">
