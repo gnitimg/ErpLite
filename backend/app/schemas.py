@@ -32,6 +32,22 @@ class PartPayload(BaseModel):
         return value
 
 
+class SamplePayload(BaseModel):
+    sku: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=120)
+    unit: str = Field(default="件", max_length=20)
+    spec: str = Field(default="", max_length=200)
+    stock_qty: int = Field(default=300, ge=0)
+
+    @field_validator("sku", "name")
+    @classmethod
+    def strip_required(cls, value: str):
+        value = value.strip()
+        if not value:
+            raise ValueError("不能为空")
+        return value
+
+
 class BomLinePayload(BaseModel):
     part_id: int
     quantity: float = Field(gt=0)
@@ -70,6 +86,11 @@ class StockPayload(BaseModel):
     unit_cost: float = Field(default=0, ge=0)
     notes: str = Field(default="", max_length=500)
     consume_bom: bool = True
+
+
+class OrderStockPayload(BaseModel):
+    notes: str = Field(default="", max_length=500)
+
 
 class OrderLinePayload(BaseModel):
     product_id: int

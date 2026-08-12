@@ -82,7 +82,7 @@ const templateConstantRoutes: RouteRecordRaw[] = [
     redirect: "/master-data/parts",
     name: "MasterData",
     meta: {
-      title: "基础资料",
+      title: "物料目录",
       elIcon: "Collection",
       alwaysShow: true
     },
@@ -91,13 +91,19 @@ const templateConstantRoutes: RouteRecordRaw[] = [
         path: "parts",
         component: () => import("@/pages/erp/parts.vue"),
         name: "Parts",
-        meta: { title: "零件管理", elIcon: "Cpu", keepAlive: true }
+        meta: { title: "零件目录", elIcon: "Cpu", keepAlive: true }
       },
       {
         path: "products",
         component: () => import("@/pages/erp/products.vue"),
         name: "Products",
         meta: { title: "产品与 BOM", elIcon: "Box", keepAlive: true }
+      },
+      {
+        path: "samples",
+        component: () => import("@/pages/erp/samples.vue"),
+        name: "Samples",
+        meta: { title: "样品库存", elIcon: "Present", keepAlive: true }
       }
     ]
   },

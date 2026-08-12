@@ -1,14 +1,14 @@
 <script setup lang="ts">
-const keyword = defineModel<string>({ default: '' })
-
 withDefaults(defineProps<{
   placeholder?: string
   filterCount?: number
   loading?: boolean
+  showFilter?: boolean
 }>(), {
-  placeholder: '搜索关键词',
+  placeholder: "搜索关键词",
   filterCount: 0,
-  loading: false
+  loading: false,
+  showFilter: true
 })
 
 const emit = defineEmits<{
@@ -16,6 +16,8 @@ const emit = defineEmits<{
   filter: []
   refresh: []
 }>()
+
+const keyword = defineModel<string>({ default: "" })
 </script>
 
 <template>
@@ -29,13 +31,21 @@ const emit = defineEmits<{
         @keyup.enter="emit('search')"
         @clear="emit('search')"
       >
-        <template #prefix><el-icon><Search /></el-icon></template>
+        <template #prefix>
+          <el-icon><Search /></el-icon>
+        </template>
       </el-input>
-      <el-badge :value="filterCount" :hidden="!filterCount" class="filter-badge">
-        <el-button @click="emit('filter')"><el-icon><Filter /></el-icon>筛选</el-button>
+      <el-badge v-if="showFilter" :value="filterCount" :hidden="!filterCount" class="filter-badge">
+        <el-button @click="emit('filter')">
+          <el-icon><Filter /></el-icon>筛选
+        </el-button>
       </el-badge>
-      <el-button :loading="loading" @click="emit('refresh')"><el-icon><Refresh /></el-icon>刷新</el-button>
+      <el-button :loading="loading" @click="emit('refresh')">
+        <el-icon><Refresh /></el-icon>刷新
+      </el-button>
     </div>
-    <div v-if="$slots.default" class="toolbar-right"><slot /></div>
+    <div v-if="$slots.default" class="toolbar-right">
+      <slot />
+    </div>
   </div>
 </template>

@@ -21,7 +21,16 @@ from sqlalchemy.orm import Session, selectinload
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import Base, SessionLocal, engine, ensure_schema_compatibility, get_db
 from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
-from .schemas import BackupRestorePayload, LoginPayload, OrderPayload, PartPayload, ProductPayload, StockPayload
+from .schemas import (
+    BackupRestorePayload,
+    LoginPayload,
+    OrderPayload,
+    OrderStockPayload,
+    PartPayload,
+    ProductPayload,
+    SamplePayload,
+    StockPayload,
+)
 from .services import (
     create_transaction,
     ensure_sku_available,
@@ -139,21 +148,69 @@ def current_user():
 @app.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db)):
     active = InventoryItem.active.is_(True)
+    regular_inventory = InventoryItem.kind.in_(["PART", "PRODUCT"])
     part_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PART")) or 0
     product_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PRODUCT")) or 0
-    low_stock = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.stock_qty <= InventoryItem.min_stock)) or 0
+    low_stock = db.scalar(
+        select(func.count())
+        .select_from(InventoryItem)
+        .where(active, regular_inventory, InventoryItem.stock_qty <= InventoryItem.min_stock)
+    ) or 0
     pending_orders = db.scalar(select(func.count()).select_from(SalesOrder).where(SalesOrder.status.in_(["DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"]))) or 0
-    inventory_value = db.scalar(select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active)) or 0
+    inventory_value = db.scalar(
+        select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active, regular_inventory)
+    ) or 0
     recent_txs = db.scalars(
         select(StockTransaction)
         .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order))
         .order_by(StockTransaction.occurred_at.desc()).limit(6)
     ).all()
-    low_items = db.scalars(select(InventoryItem).where(active, InventoryItem.stock_qty <= InventoryItem.min_stock).order_by(InventoryItem.stock_qty)).all()
+    low_items = db.scalars(
+        select(InventoryItem)
+        .where(active, regular_inventory, InventoryItem.stock_qty <= InventoryItem.min_stock)
+        .order_by(InventoryItem.stock_qty)
+    ).all()
+    pending_order_rows = db.scalars(
+        select(SalesOrder)
+        .where(SalesOrder.status.in_(["CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"]))
+        .options(
+            selectinload(SalesOrder.items)
+            .selectinload(SalesOrderItem.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+        .order_by(SalesOrder.required_date, SalesOrder.order_date, SalesOrder.id)
+    ).all()
+    purchase_todos: list[dict] = []
+    production_todos: list[dict] = []
+    shipping_todos: list[dict] = []
+    for order in pending_order_rows:
+        workflow = order_workflow_dict(db, order)
+        todo = {
+            "order_id": order.id,
+            "order_no": order.order_no,
+            "customer_name": order.customer_name,
+            "required_date": (order.required_date or order.order_date).isoformat(),
+        }
+        shortages = [row for row in workflow["material_lines"] if row["shortage_quantity"] > 1e-9]
+        if workflow["next_action"] == "PURCHASE":
+            purchase_todos.append({**todo, "lines": shortages})
+        elif workflow["next_action"] == "PRODUCE":
+            production_todos.append(
+                {**todo, "lines": [row for row in workflow["product_lines"] if row["production_required"] > 1e-9]}
+            )
+        elif workflow["next_action"] == "SHIP":
+            shipping_todos.append({**todo, "lines": workflow["product_lines"]})
+
     return {
         "metrics": {"parts": part_count, "products": product_count, "low_stock": low_stock, "pending_orders": pending_orders, "inventory_value": inventory_value},
         "recent_transactions": [transaction_dict(tx) for tx in recent_txs],
         "low_stock_items": [item_dict(item) for item in low_items[:8]],
+        "todos": {
+            "purchase": purchase_todos,
+            "production": production_todos,
+            "shipping": shipping_todos,
+        },
     }
 
 
@@ -195,6 +252,70 @@ def delete_part(item_id: int, db: Session = Depends(get_db)):
     if db.scalar(select(ProductBomItem.id).where(ProductBomItem.part_id == item_id).limit(1)):
         raise HTTPException(409, "该零件已用于产品 BOM，不能停用")
     item.active = False
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/samples")
+def samples(keyword: str = "", db: Session = Depends(get_db)):
+    return list_items(db, "SAMPLE", keyword)
+
+
+def save_sample(
+    db: Session,
+    payload: SamplePayload,
+    sample: InventoryItem | None = None,
+) -> InventoryItem:
+    ensure_sku_available(db, payload.sku, sample.id if sample else None)
+    desired_stock = payload.stock_qty
+    values = payload.model_dump(exclude={"stock_qty"})
+    if sample is None:
+        sample = InventoryItem(
+            kind="SAMPLE",
+            stock_qty=0,
+            cost_price=0,
+            sale_price=0,
+            min_stock=0,
+            supply_mode="STOCK",
+            **values,
+        )
+        db.add(sample)
+        db.flush()
+    else:
+        for key, value in values.items():
+            setattr(sample, key, value)
+    sample.sku = sample.sku.upper()
+    stock_delta = desired_stock - int(round(sample.stock_qty))
+    if stock_delta:
+        create_transaction(
+            db,
+            "SAMPLE_ADJUST",
+            [(sample, stock_delta, 0)],
+            f"样品库存调整为 {desired_stock} {sample.unit}",
+        )
+    db.commit()
+    db.refresh(sample)
+    return sample
+
+
+@app.post("/api/samples", status_code=201)
+def create_sample(payload: SamplePayload, db: Session = Depends(get_db)):
+    return item_dict(save_sample(db, payload))
+
+
+@app.put("/api/samples/{item_id}")
+def update_sample(
+    item_id: int,
+    payload: SamplePayload,
+    db: Session = Depends(get_db),
+):
+    return item_dict(save_sample(db, payload, find_item(db, item_id, "SAMPLE")))
+
+
+@app.delete("/api/samples/{item_id}")
+def delete_sample(item_id: int, db: Session = Depends(get_db)):
+    sample = find_item(db, item_id, "SAMPLE")
+    sample.active = False
     db.commit()
     return {"ok": True}
 
@@ -266,7 +387,10 @@ def inventory(
     keyword: str = "",
     db: Session = Depends(get_db),
 ):
-    query = select(InventoryItem).where(InventoryItem.active.is_(True))
+    query = select(InventoryItem).where(
+        InventoryItem.active.is_(True),
+        InventoryItem.kind.in_(["PART", "PRODUCT"]),
+    )
     if kind in {"PART", "PRODUCT"}:
         query = query.where(InventoryItem.kind == kind)
     if stock_status == "LOW" or (stock_status is None and low_stock):
@@ -433,6 +557,48 @@ def order_availability(order_id: int, db: Session = Depends(get_db)):
 @app.post("/api/orders/{order_id}/prepare")
 def prepare_order(order_id: int, db: Session = Depends(get_db)):
     return prepare_order_stock(db, load_order(db, order_id))
+
+
+@app.post("/api/orders/{order_id}/receive-materials")
+def receive_order_materials(
+    order_id: int,
+    payload: OrderStockPayload,
+    db: Session = Depends(get_db),
+):
+    order = load_order(db, order_id)
+    if order.status not in {"CONFIRMED", "WAITING_MATERIALS"}:
+        raise HTTPException(409, "该客单当前不需要办理零件入库")
+    workflow = order_workflow_dict(db, order)
+    if workflow["next_action"] == "WAIT_PRIORITY":
+        raise HTTPException(409, "该客单正在等待更早交期客单，暂不采购或生产")
+    if workflow["next_action"] == "CONFIGURE_BOM":
+        raise HTTPException(409, "该客单产品尚未配置 BOM，请先完善产品组成")
+    shortages = [row for row in workflow["material_lines"] if row["shortage_quantity"] > 1e-9]
+    if not shortages:
+        return prepare_order_stock(db, order)
+
+    part_ids = [row["part_id"] for row in shortages]
+    parts = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem).where(InventoryItem.id.in_(part_ids), InventoryItem.kind == "PART")
+        ).all()
+    }
+    changes = [
+        (parts[row["part_id"]], row["shortage_quantity"], parts[row["part_id"]].cost_price)
+        for row in shortages
+    ]
+    transaction = create_transaction(
+        db,
+        "PURCHASE_IN",
+        changes,
+        payload.notes or f"客单 {order.order_no} 缺口零件入库",
+        order.id,
+    )
+    db.flush()
+    result = prepare_order_stock(db, order)
+    result["material_transaction_id"] = transaction.id
+    return result
 
 
 @app.post("/api/orders/{order_id}/fulfill")

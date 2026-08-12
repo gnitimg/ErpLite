@@ -209,6 +209,14 @@
 .stock-operation-preview > div:last-child { border-right: 0; }
 .stock-operation-preview span { color: var(--el-text-color-secondary); font-size: 11px; }
 .stock-operation-preview strong { font-size: 15px; }
+.operation-scope-switch { margin-bottom: 16px; }
+.drawer-alert { margin-bottom: 20px; }
+.order-operation-notes { margin-top: 18px; }
+.dashboard-todos { margin-bottom: 18px; }
+.todo-filter { display: flex; align-items: center; gap: 14px; }
+.due-cell { display: flex; align-items: center; gap: 8px; }
+.dashboard-lower-grid { margin-top: 0; }
+.dashboard-side-stack { display: flex; flex-direction: column; gap: 18px; }
 
 @media (max-width: 1100px) {
   .metric-grid { grid-template-columns: repeat(3, 1fr); }
