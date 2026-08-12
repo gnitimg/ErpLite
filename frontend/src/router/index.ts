@@ -104,15 +104,44 @@ const templateConstantRoutes: RouteRecordRaw[] = [
   {
     path: "/warehouse",
     component: Layouts,
-    redirect: "/warehouse/inventory",
+    redirect: "/warehouse/parts-inventory",
     name: "Warehouse",
-    meta: { title: "库存查询", elIcon: "DataAnalysis", alwaysShow: true },
+    meta: { title: "库存管理", elIcon: "House", alwaysShow: true },
     children: [
       {
-        path: "inventory",
+        path: "parts-inventory",
         component: () => import("@/pages/erp/inventory.vue"),
-        name: "Inventory",
-        meta: { title: "实时库存", elIcon: "DataAnalysis", keepAlive: true }
+        name: "PartsInventory",
+        meta: { title: "零件库存", elIcon: "Cpu", inventoryKind: "PART", keepAlive: true }
+      },
+      {
+        path: "products-inventory",
+        component: () => import("@/pages/erp/inventory.vue"),
+        name: "ProductsInventory",
+        meta: { title: "产品库存", elIcon: "Box", inventoryKind: "PRODUCT", keepAlive: true }
+      },
+      {
+        path: "production",
+        component: () => import("@/pages/erp/production.vue"),
+        name: "Production",
+        meta: { title: "产品生产", elIcon: "Tools", keepAlive: true }
+      },
+      {
+        path: "operations",
+        component: () => import("@/pages/erp/movements.vue"),
+        name: "StockOperations",
+        meta: { title: "出入库作业", elIcon: "Sort", stockView: "operations", keepAlive: true }
+      },
+      {
+        path: "movements",
+        component: () => import("@/pages/erp/movements.vue"),
+        name: "StockMovements",
+        meta: { title: "库存流水", elIcon: "List", stockView: "history", keepAlive: true }
+      },
+      {
+        path: "inventory",
+        redirect: "/warehouse/parts-inventory",
+        meta: { hidden: true }
       }
     ]
   },
@@ -135,9 +164,8 @@ const templateConstantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "movements",
-        component: () => import("@/pages/erp/movements.vue"),
-        name: "Movements",
-        meta: { title: "出入库作业", elIcon: "Sort", keepAlive: true }
+        redirect: "/warehouse/operations",
+        meta: { hidden: true }
       }
     ]
   },

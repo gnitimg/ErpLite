@@ -44,7 +44,7 @@ class ProductPayload(BaseModel):
     spec: str = Field(default="", max_length=200)
     cost_price: float = Field(default=0, ge=0)
     sale_price: float = Field(default=0, ge=0)
-    min_stock: float = Field(default=0, ge=0)
+    min_stock: int = Field(default=0, ge=0)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -71,10 +71,9 @@ class StockPayload(BaseModel):
     notes: str = Field(default="", max_length=500)
     consume_bom: bool = True
 
-
 class OrderLinePayload(BaseModel):
     product_id: int
-    quantity: float = Field(gt=0)
+    quantity: int = Field(gt=0)
     unit_price: float = Field(ge=0)
 
 

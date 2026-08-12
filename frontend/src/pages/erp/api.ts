@@ -25,6 +25,9 @@ export const money = (value: number | string = 0) =>
 export const qty = (value: number | string = 0) =>
   new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 }).format(Number(value))
 
+export const productQty = (value: number | string = 0) =>
+  new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(Number(value))
+
 export const formatTime = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
 
 export const txLabels: Record<string, string> = {

@@ -9,6 +9,7 @@ backups/
 .erp.pid
 .mysql-data/
 .mysql-undo/
+.mysql-undo-recovery-*/
 .mysql-initialized
 .mysql-local.ini
 .mysql-init.ini

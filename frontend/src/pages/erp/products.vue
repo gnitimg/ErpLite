@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { api, money, qty } from './api'
+import { api, money, productQty, qty } from './api'
 import ListToolbar from './components/ListToolbar.vue'
 
 const loading = ref(false)
@@ -75,7 +75,7 @@ onMounted(load)
         <el-table-column label="产品" min-width="190"><template #default="{ row }"><div class="sku-cell"><strong>{{ row.name }}</strong><span class="mono">{{ row.sku }} · {{ row.spec || '无规格' }}</span></div></template></el-table-column>
         <el-table-column label="BOM 组成" min-width="280"><template #default="{ row }"><div v-if="row.components.length" class="bom-summary"><el-tag v-for="line in row.components" :key="line.id" size="small" effect="plain">{{ line.part_name }} × {{ qty(line.quantity) }}</el-tag></div><span v-else class="muted">尚未配置</span></template></el-table-column>
         <el-table-column label="成本 / 售价" width="150" align="right"><template #default="{ row }"><div>{{ money(row.cost_price) }}</div><div class="muted">售 {{ money(row.sale_price) }}</div></template></el-table-column>
-        <el-table-column label="成品库存" width="115" align="right"><template #default="{ row }"><b :class="row.low_stock ? 'number-negative' : ''">{{ qty(row.stock_qty) }}</b> {{ row.unit }}</template></el-table-column>
+        <el-table-column label="成品库存" width="115" align="right"><template #default="{ row }"><b :class="row.low_stock ? 'number-negative' : ''">{{ productQty(row.stock_qty) }}</b> {{ row.unit }}</template></el-table-column>
         <el-table-column label="状态" width="85"><template #default="{ row }"><el-tag :type="row.low_stock ? 'danger' : 'success'" size="small">{{ row.low_stock ? '偏低' : '正常' }}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="130" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link type="danger" @click="remove(row)">停用</el-button></template></el-table-column>
       </el-table>
@@ -98,7 +98,7 @@ onMounted(load)
           <el-form-item label="计量单位"><el-input v-model="form.unit" /></el-form-item>
           <el-form-item label="参考成本"><el-input-number v-model="form.cost_price" :min="0" :precision="2" :controls="false" style="width:100%" /></el-form-item>
           <el-form-item label="销售单价"><el-input-number v-model="form.sale_price" :min="0" :precision="2" :controls="false" style="width:100%" /></el-form-item>
-          <el-form-item label="安全库存"><el-input-number v-model="form.min_stock" :min="0" :precision="2" :controls="false" style="width:100%" /></el-form-item>
+          <el-form-item label="安全库存"><el-input-number v-model="form.min_stock" :min="0" :step="1" step-strictly :precision="0" style="width:100%" /></el-form-item>
         </div>
         <div class="section-label"><span>BOM 零件清单</span><el-button size="small" plain @click="addComponent"><el-icon><Plus /></el-icon>添加一行</el-button></div>
         <el-table :data="form.components" border>

@@ -325,6 +325,8 @@ def stock_transactions(
 @app.post("/api/stock/inbound", status_code=201)
 def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
+    if item.kind == "PRODUCT" and not float(payload.quantity).is_integer():
+        raise HTTPException(422, "产品入库数量必须为正整数")
     changes: list[tuple[InventoryItem, float, float]] = []
     tx_type = "PURCHASE_IN" if item.kind == "PART" else "MANUAL_IN"
     if item.kind == "PRODUCT" and payload.consume_bom:
@@ -335,6 +337,9 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
         tx_type = "ASSEMBLY_IN"
     changes.append((item, payload.quantity, payload.unit_cost or item.cost_price))
     tx = create_transaction(db, tx_type, changes, payload.notes)
+    if tx_type == "ASSEMBLY_IN":
+        # Newly produced stock must immediately flow to confirmed orders by delivery priority.
+        rebalance_product_reservations(db, {item.id})
     db.commit()
     tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
     return transaction_dict(tx)
@@ -344,6 +349,8 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
 def outbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
     if item.kind == "PRODUCT":
+        if not float(payload.quantity).is_integer():
+            raise HTTPException(422, "产品出库数量必须为正整数")
         reserved = reserved_product_quantity(db, item.id)
         free_stock = max(float(item.stock_qty) - reserved, 0)
         if payload.quantity > free_stock + 1e-9:
