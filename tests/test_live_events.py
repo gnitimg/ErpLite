@@ -30,7 +30,14 @@ def make_request(method: str, path: str, client_id: str = "") -> Request:
     )
 
 
-def test_successful_write_broadcasts_source_and_path():
+def test_successful_write_broadcasts_source_and_path(monkeypatch):
+    class AuditSession:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def add(self, _row): pass
+        def commit(self): pass
+
+    monkeypatch.setattr("app.main.SessionLocal", AuditSession)
     queue = change_events.subscribe()
     try:
         async def call_next(_request):
@@ -50,7 +57,14 @@ def test_successful_write_broadcasts_source_and_path():
         change_events.unsubscribe(queue)
 
 
-def test_failed_or_login_write_does_not_broadcast():
+def test_failed_write_does_not_broadcast(monkeypatch):
+    class AuditSession:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def add(self, _row): pass
+        def commit(self): pass
+
+    monkeypatch.setattr("app.main.SessionLocal", AuditSession)
     queue = change_events.subscribe()
     try:
         async def call_next(_request):

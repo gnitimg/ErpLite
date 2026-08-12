@@ -101,9 +101,8 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "samples",
-        component: () => import("@/pages/erp/samples.vue"),
-        name: "Samples",
-        meta: { title: "样品库存", elIcon: "Present", keepAlive: true }
+        redirect: "/warehouse/samples",
+        meta: { hidden: true }
       }
     ]
   },
@@ -127,26 +126,29 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "产品库存", elIcon: "Box", inventoryKind: "PRODUCT", keepAlive: true }
       },
       {
-        path: "production",
-        component: () => import("@/pages/erp/production.vue"),
-        name: "Production",
-        meta: { title: "产品生产", elIcon: "Tools", keepAlive: true }
-      },
-      {
-        path: "operations",
-        component: () => import("@/pages/erp/movements.vue"),
-        name: "StockOperations",
-        meta: { title: "出入库作业", elIcon: "Sort", stockView: "operations", keepAlive: true }
-      },
-      {
-        path: "movements",
-        component: () => import("@/pages/erp/movements.vue"),
-        name: "StockMovements",
-        meta: { title: "库存流水", elIcon: "List", stockView: "history", keepAlive: true }
+        path: "samples",
+        component: () => import("@/pages/erp/samples.vue"),
+        name: "Samples",
+        meta: { title: "样品库存", elIcon: "Present", keepAlive: true }
       },
       {
         path: "inventory",
         redirect: "/warehouse/parts-inventory",
+        meta: { hidden: true }
+      },
+      {
+        path: "production",
+        redirect: "/operations/production",
+        meta: { hidden: true }
+      },
+      {
+        path: "operations",
+        redirect: "/operations/stock-operations",
+        meta: { hidden: true }
+      },
+      {
+        path: "movements",
+        redirect: "/logs/stock",
         meta: { hidden: true }
       }
     ]
@@ -169,9 +171,41 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "客户订单", elIcon: "Tickets", keepAlive: true }
       },
       {
-        path: "movements",
-        redirect: "/warehouse/operations",
-        meta: { hidden: true }
+        path: "production",
+        component: () => import("@/pages/erp/production.vue"),
+        name: "Production",
+        meta: { title: "产品生产", elIcon: "Tools", keepAlive: true }
+      },
+      {
+        path: "stock-operations",
+        component: () => import("@/pages/erp/movements.vue"),
+        name: "StockOperations",
+        meta: { title: "出入库作业", elIcon: "Sort", stockView: "operations", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/logs",
+    component: Layouts,
+    redirect: "/logs/stock",
+    name: "LogManagement",
+    meta: {
+      title: "操作日志",
+      elIcon: "Document",
+      alwaysShow: true
+    },
+    children: [
+      {
+        path: "stock",
+        component: () => import("@/pages/erp/movements.vue"),
+        name: "StockMovements",
+        meta: { title: "库存流水", elIcon: "List", stockView: "history", keepAlive: true }
+      },
+      {
+        path: "system",
+        component: () => import("@/pages/erp/operation-logs.vue"),
+        name: "OperationLogs",
+        meta: { title: "系统操作日志", elIcon: "Tickets", keepAlive: true }
       }
     ]
   },

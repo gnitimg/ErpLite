@@ -19,6 +19,7 @@ class InventoryItem(Base):
     sale_price: Mapped[float] = mapped_column(Float, default=0)
     min_stock: Mapped[float] = mapped_column(Float, default=0)
     stock_qty: Mapped[float] = mapped_column(Float, default=0)
+    sample_stock_qty: Mapped[int] = mapped_column(Integer, default=300)
     supply_mode: Mapped[str] = mapped_column(String(20), default="STOCK")  # STOCK / BUY_TO_ORDER（仅零件）
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

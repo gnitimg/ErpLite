@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import type { FormInstance, FormRules } from "element-plus"
-import { ElMessage, ElMessageBox } from "element-plus"
+import { ElMessage } from "element-plus"
 import { onMounted, reactive, ref } from "vue"
 import { api, productQty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
@@ -11,14 +10,9 @@ const saving = ref(false)
 const drawer = ref(false)
 const keyword = ref("")
 const rows = ref<any[]>([])
-const formRef = ref<FormInstance>()
-const editingId = ref<number | null>(null)
-const emptyForm = () => ({ sku: "", name: "", spec: "", unit: "件", stock_qty: 300 })
-const form = reactive(emptyForm())
-const rules: FormRules = {
-  sku: [{ required: true, message: "请输入样品编码", trigger: "blur" }],
-  name: [{ required: true, message: "请输入样品名称", trigger: "blur" }]
-}
+const editingId = ref<number>()
+const selectedProduct = ref<any>()
+const form = reactive({ stock_qty: 0 })
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -33,51 +27,31 @@ async function load(silent = false) {
   }
 }
 
-function openCreate() {
-  editingId.value = null
-  Object.assign(form, emptyForm())
-  drawer.value = true
-}
-
 function openEdit(row: any) {
   editingId.value = row.id
-  Object.assign(form, {
-    sku: row.sku,
-    name: row.name,
-    spec: row.spec,
-    unit: row.unit,
-    stock_qty: Math.max(Math.round(Number(row.stock_qty) || 0), 0)
-  })
+  selectedProduct.value = row
+  form.stock_qty = Math.max(
+    Math.round(Number(row.sample_stock_qty) || 0),
+    0
+  )
   drawer.value = true
 }
 
 async function save() {
-  if (!await formRef.value?.validate().catch(() => false)) return
+  if (!editingId.value) return
   saving.value = true
   try {
-    const path = editingId.value ? `/api/samples/${editingId.value}` : "/api/samples"
-    await api(path, {
-      method: editingId.value ? "PUT" : "POST",
-      body: JSON.stringify(form)
+    await api(`/api/samples/${editingId.value}`, {
+      method: "PUT",
+      body: JSON.stringify({ stock_qty: form.stock_qty })
     })
-    ElMessage.success(editingId.value ? "样品已更新" : "样品已创建，默认库存已登记")
+    ElMessage.success("样品库存已更新")
     drawer.value = false
     await load()
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
     saving.value = false
-  }
-}
-
-async function remove(row: any) {
-  try {
-    await ElMessageBox.confirm(`确定停用“${row.name}”吗？`, "停用样品", { type: "warning" })
-    await api(`/api/samples/${row.id}`, { method: "DELETE" })
-    ElMessage.success("样品已停用")
-    await load()
-  } catch (error: any) {
-    if (error !== "cancel") ElMessage.error(error.message)
   }
 }
 
@@ -89,30 +63,27 @@ useLiveRefresh(() => load(true))
   <div class="erp-page">
     <ListToolbar
       v-model="keyword"
-      placeholder="搜索样品编码、名称或规格"
+      placeholder="搜索产品编码、名称或规格"
       :loading="loading"
       :show-filter="false"
       @search="load"
       @refresh="load"
-    >
-      <el-button type="primary" @click="openCreate">
-        <el-icon><Plus /></el-icon>新建样品
-      </el-button>
-    </ListToolbar>
+    />
 
     <div class="content-card">
       <div class="card-head">
         <div>
           <h3>样品库存</h3>
-          <span>新建时默认 300 件，可按实际结存直接调整</span>
+          <span>跟随产品目录自动生成；新产品默认 300，无样品时仍显示为 0</span>
         </div>
         <span>共 {{ rows.length }} 项</span>
       </div>
       <el-table v-loading="loading" :data="rows">
-        <el-table-column label="样品" min-width="210">
+        <el-table-column label="产品" min-width="210">
           <template #default="{ row }">
             <div class="sku-cell">
-              <strong>{{ row.name }}</strong><span class="mono">{{ row.sku }}</span>
+              <strong>{{ row.name }}</strong>
+              <span class="mono">{{ row.sku }}</span>
             </div>
           </template>
         </el-table-column>
@@ -122,18 +93,20 @@ useLiveRefresh(() => load(true))
           </template>
         </el-table-column>
         <el-table-column label="单位" prop="unit" width="90" />
-        <el-table-column label="当前库存" width="170" align="right">
+        <el-table-column label="样品结存" width="170" align="right">
           <template #default="{ row }">
-            <strong>{{ productQty(row.stock_qty) }}</strong> {{ row.unit }}
+            <strong
+              :class="{ 'number-negative': Number(row.sample_stock_qty) === 0 }"
+            >
+              {{ productQty(row.sample_stock_qty) }}
+            </strong>
+            {{ row.unit }}
           </template>
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">
-              编辑
-            </el-button>
-            <el-button link type="danger" @click="remove(row)">
-              停用
+              调整库存
             </el-button>
           </template>
         </el-table-column>
@@ -142,36 +115,43 @@ useLiveRefresh(() => load(true))
 
     <el-drawer
       v-model="drawer"
-      :title="editingId ? '编辑样品与库存' : '新建样品'"
+      title="调整样品库存"
       size="min(520px, 92vw)"
     >
-      <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
-        <div class="form-grid">
-          <el-form-item label="样品编码" prop="sku">
-            <el-input v-model="form.sku" placeholder="例如 SAMPLE-001" />
-          </el-form-item>
-          <el-form-item label="样品名称" prop="name">
-            <el-input v-model="form.name" placeholder="请输入名称" />
-          </el-form-item>
-          <el-form-item label="规格型号">
-            <el-input v-model="form.spec" placeholder="颜色、尺寸或版本等" />
-          </el-form-item>
-          <el-form-item label="计量单位">
-            <el-input v-model="form.unit" placeholder="件" />
-          </el-form-item>
-          <el-form-item class="span-2" label="样品库存">
-            <QuantityInput v-model="form.stock_qty" integer :min="0" />
-            <div class="form-help">
-              新建样品默认 300 件；修改数量会自动生成“样品调整”库存流水，原始记录不会被覆盖。
-            </div>
-          </el-form-item>
-        </div>
+      <el-form :model="form" label-position="top">
+        <el-descriptions
+          v-if="selectedProduct"
+          :column="1"
+          border
+          class="drawer-summary"
+        >
+          <el-descriptions-item label="产品">
+            {{ selectedProduct.name }}
+          </el-descriptions-item>
+          <el-descriptions-item label="产品编码">
+            {{ selectedProduct.sku }}
+          </el-descriptions-item>
+          <el-descriptions-item label="规格">
+            {{ selectedProduct.spec || '-' }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-form-item label="样品结存" style="margin-top: 18px">
+          <QuantityInput
+            v-model="form.stock_qty"
+            integer
+            :min="0"
+            :unit="selectedProduct?.unit"
+          />
+          <div class="form-help">
+            数量为 0 时仍会保留在列表中并以红色提示；修改不会影响产品库存。
+          </div>
+        </el-form-item>
         <div class="drawer-footer">
           <el-button @click="drawer = false">
             取消
           </el-button>
           <el-button type="primary" :loading="saving" @click="save">
-            保存样品
+            保存库存
           </el-button>
         </div>
       </el-form>

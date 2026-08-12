@@ -47,6 +47,10 @@ def ensure_schema_compatibility() -> None:
             "supply_mode",
             "ALTER TABLE inventory_items ADD COLUMN supply_mode VARCHAR(20) NOT NULL DEFAULT 'STOCK'",
         ),
+        "inventory_items.sample_stock_qty": (
+            "sample_stock_qty",
+            "ALTER TABLE inventory_items ADD COLUMN sample_stock_qty INT NOT NULL DEFAULT 300",
+        ),
         "sales_order_items": (
             "reserved_quantity",
             "ALTER TABLE sales_order_items ADD COLUMN reserved_quantity FLOAT NOT NULL DEFAULT 0",
@@ -70,6 +74,11 @@ def ensure_schema_compatibility() -> None:
                 connection.execute(text(statement))
         if "sales_orders" in tables:
             connection.execute(text("UPDATE sales_orders SET required_date = order_date WHERE required_date IS NULL"))
+        if "inventory_items" in tables:
+            connection.execute(text(
+                "ALTER TABLE inventory_items "
+                "ALTER COLUMN sample_stock_qty SET DEFAULT 300"
+            ))
         if "sales_order_items" in tables and "inventory_items" in tables:
             if engine.dialect.name == "mysql":
                 connection.execute(text(

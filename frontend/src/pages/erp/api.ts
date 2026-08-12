@@ -1,6 +1,7 @@
 import { onActivated, onBeforeUnmount, onDeactivated, onMounted } from "vue"
 
 const clientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
+const operator = "仓库管理员"
 
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -8,6 +9,7 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     headers: {
       "Content-Type": "application/json",
       "X-ERP-Client-ID": clientId,
+      "X-ERP-Operator": operator,
       ...(options.headers || {})
     }
   })

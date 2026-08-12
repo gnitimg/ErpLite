@@ -14,10 +14,12 @@
 - 零件默认采用库存备料，少数零件可标记为“按单即买”，并在客单缺料明细中区分显示。
 - 客单列表支持按客单号、客户名称/电话模糊搜索，并可在筛选侧栏按状态和日期范围过滤。
 - 实时库存、低库存预警、库存成本与完整流水。
-- 库存管理按零件库存、产品库存、产品生产、出入库作业和库存流水拆分；流水摘要留在表格，完整字段在右侧详情栏查看。
+- 库存管理按零件库存、产品库存和样品库存拆分；库存流水归入日志分组，摘要留在表格，完整字段在右侧详情栏查看。
 - 产品数量统一为正整数（客单、生产和产品出入库均进行前后端校验），BOM 零件用量仍支持小数。
 - 出入库作业支持按单个零件/产品办理，也支持按客户订单自动补齐缺口零件或将已预留产品一次性出库。
-- 侧栏“物料目录”包含零件目录、产品目录、样品库存；样品新建时默认 300 件，可编辑，库存变更会保留为“样品调整”流水。
+- 样品库存归入“库存管理”并跟随产品目录自动生成；每个有效产品始终显示一行，新产品默认 300 件，结存可独立调整，为 0 时红色提示且不影响产品库存；每次变化会写入样品调整流水。
+- 产品生产和出入库作业归入“业务处理”；库存流水与覆盖所有写操作的系统操作日志统一归入独立“操作日志”分组。
+- 按物料出入库使用两段式选择：先选零件/产品类型，再按对应物料编码或名称检索。
 - 工作台使用“备货任务”统一展示待采购、待生产和待出库任务，并可在卡片右上角按任务类型或逾期状态筛选。
 - 所有业务写入会通过 SSE 通知其他在线设备，当前打开的数据页会在后台无感刷新；发起写入的页面继续沿用自身即时更新。
 - 工作台集中显示待购买零件、待生产产品、待出库客单和库存预警。
@@ -146,12 +148,13 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 |---|---|
 | 登录 | `POST /api/v1/auth/login` |
 | 工作台 | `GET /api/dashboard` |
-| 样品库存 | `GET/POST /api/samples`、`PUT/DELETE /api/samples/{id}` |
+| 样品库存 | `GET /api/samples`、`PUT /api/samples/{product_id}` |
 | 零件 | `GET/POST /api/parts`、`PUT/DELETE /api/parts/{id}` |
 | 产品/BOM | `GET/POST /api/products`、`PUT/DELETE /api/products/{id}` |
 | 库存 | `GET /api/inventory` |
 | 出入库 | `POST /api/stock/inbound`、`POST /api/stock/outbound` |
 | 流水 | `GET /api/stock/transactions` |
+| 操作日志 | `GET /api/operation-logs`、`GET /api/operation-logs/actions` |
 | 客单 | `GET/POST /api/orders`，以及 `confirm/fulfill/cancel` 动作 |
 | 数据备份 | `GET/POST /api/backups`、`GET /api/backups/{filename}/download`、`POST /api/backups/{filename}/restore` |
 

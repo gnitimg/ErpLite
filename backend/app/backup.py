@@ -14,7 +14,7 @@ from .models import InventoryItem, OperationLog, ProductBomItem, SalesOrder, Sal
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 3
+BACKUP_SCHEMA_VERSION = 4
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -72,7 +72,7 @@ def _load_archive(path: Path) -> dict[str, Any]:
         raise BackupError("备份文件已损坏或格式不正确") from error
 
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, BACKUP_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, BACKUP_SCHEMA_VERSION}:
         raise BackupError("备份版本与当前系统不兼容")
     if not isinstance(payload.get("created_at"), str):
         raise BackupError("备份缺少有效的创建时间")
@@ -82,10 +82,11 @@ def _load_archive(path: Path) -> dict[str, Any]:
     if not isinstance(tables, dict):
         raise BackupError("备份缺少数据表内容")
     # 兼容流程改造前生成的 v1/v2 快照，并为新增字段提供安全默认值。
-    if schema_version in {1, 2}:
+    if schema_version in {1, 2, 3}:
         tables.setdefault("operation_logs", [])
         for row in tables.get("inventory_items", []):
             row.setdefault("supply_mode", "STOCK")
+            row.setdefault("sample_stock_qty", 0)
         for row in tables.get("sales_orders", []):
             row.setdefault("required_date", row.get("order_date"))
         reference_prices = {

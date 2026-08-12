@@ -33,19 +33,7 @@ class PartPayload(BaseModel):
 
 
 class SamplePayload(BaseModel):
-    sku: str = Field(min_length=1, max_length=50)
-    name: str = Field(min_length=1, max_length=120)
-    unit: str = Field(default="件", max_length=20)
-    spec: str = Field(default="", max_length=200)
-    stock_qty: int = Field(default=300, ge=0)
-
-    @field_validator("sku", "name")
-    @classmethod
-    def strip_required(cls, value: str):
-        value = value.strip()
-        if not value:
-            raise ValueError("不能为空")
-        return value
+    stock_qty: int = Field(ge=0)
 
 
 class BomLinePayload(BaseModel):

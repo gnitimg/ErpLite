@@ -27,6 +27,7 @@ const detailDrawer = ref(false)
 const filterDrawer = ref(false)
 const direction = ref<Direction>("inbound")
 const operationScope = ref<OperationScope>("item")
+const itemKind = ref<"PART" | "PRODUCT">("PART")
 const items = ref<any[]>([])
 const orders = ref<any[]>([])
 const rows = ref<any[]>([])
@@ -47,6 +48,7 @@ const orderForm = reactive({
 
 const isHistory = computed(() => route.meta.stockView === "history")
 const selectedItem = computed(() => items.value.find(item => item.id === itemForm.item_id))
+const filteredItems = computed(() => items.value.filter(item => item.kind === itemKind.value))
 const selectedOrder = computed(() => orders.value.find(order => order.id === orderForm.order_id))
 const activeFilterCount = computed(
   () => Number(Boolean(filters.transactionType)) + Number(filters.dateRange.length === 2)
@@ -57,7 +59,10 @@ const candidateOrders = computed(() => orders.value.filter((order) => {
 }))
 
 function quantityText(item: any, value: number) {
-  return stockQty(value, item?.kind === "PRODUCT")
+  return stockQty(
+    value,
+    item?.kind === "PRODUCT" || item?.inventory_scope === "SAMPLE"
+  )
 }
 
 async function load(silent = false) {
@@ -101,6 +106,7 @@ function chooseDirection(value: Direction) {
 
 function openItemOperation(value: Direction, item?: any) {
   direction.value = value
+  itemKind.value = item?.kind === "PRODUCT" ? "PRODUCT" : "PART"
   Object.assign(itemForm, {
     item_id: item?.id,
     quantity: 1,
@@ -108,6 +114,12 @@ function openItemOperation(value: Direction, item?: any) {
     notes: ""
   })
   itemDrawer.value = true
+}
+
+function onItemKindChange() {
+  itemForm.item_id = undefined
+  itemForm.quantity = 1
+  itemForm.unit_cost = 0
 }
 
 function openOrderOperation(value: Direction) {
@@ -250,11 +262,6 @@ watch(() => route.name, () => load())
       <div class="content-card">
         <div class="card-head">
           <h3>{{ operationScope === 'item' ? '当前物料库存' : '待处理客户订单' }}</h3>
-          <span>
-            {{ operationScope === 'item'
-              ? '库存不足用红色显示，不出现负库存'
-              : '客单按照要求交期由近到远排列' }}
-          </span>
         </div>
         <el-table v-if="operationScope === 'item'" v-loading="loading" :data="items" height="420">
           <el-table-column label="物料" min-width="230">
@@ -463,30 +470,32 @@ watch(() => route.name, () => load())
           class="drawer-alert"
         />
         <el-form-item label="物料" required>
-          <el-select
-            v-model="itemForm.item_id"
-            filterable
-            placeholder="按编码或名称选择物料"
-            style="width: 100%"
-            @change="onItemChange"
-          >
-            <el-option-group label="零件">
+          <div class="material-picker-row">
+            <el-select
+              v-model="itemKind"
+              class="material-kind-select"
+              @change="onItemKindChange"
+            >
+              <el-option label="零件" value="PART" />
+              <el-option label="产品" value="PRODUCT" />
+            </el-select>
+            <el-select
+              v-model="itemForm.item_id"
+              filterable
+              class="material-item-select"
+              placeholder="按物料编码或名称搜索"
+              @change="onItemChange"
+            >
               <el-option
-                v-for="item in items.filter(row => row.kind === 'PART')"
+                v-for="item in filteredItems"
                 :key="item.id"
-                :label="`${item.sku} · ${item.name}（库存 ${qty(item.stock_qty)}）`"
+                :label="item.kind === 'PART'
+                  ? `${item.sku} · ${item.name}（库存 ${qty(item.stock_qty)}）`
+                  : `${item.sku} · ${item.name}（可用 ${productQty(item.available_qty)}）`"
                 :value="item.id"
               />
-            </el-option-group>
-            <el-option-group label="产品">
-              <el-option
-                v-for="item in items.filter(row => row.kind === 'PRODUCT')"
-                :key="item.id"
-                :label="`${item.sku} · ${item.name}（可用 ${productQty(item.available_qty)}）`"
-                :value="item.id"
-              />
-            </el-option-group>
-          </el-select>
+            </el-select>
+          </div>
         </el-form-item>
         <div class="form-grid">
           <el-form-item :label="`作业数量${selectedItem ? `（${selectedItem.unit}）` : ''}`" required>

@@ -93,6 +93,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "sale_price": item.sale_price,
         "min_stock": item.min_stock,
         "stock_qty": item.stock_qty,
+        "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
         "active": item.active,
         "low_stock": item.stock_qty <= item.min_stock,
@@ -164,6 +165,9 @@ def transaction_dict(tx: StockTransaction) -> dict:
                 "name": line.item.name,
                 "kind": line.item.kind,
                 "unit": line.item.unit,
+                "inventory_scope": (
+                    "SAMPLE" if tx.transaction_type == "SAMPLE_ADJUST" else line.item.kind
+                ),
                 "quantity_change": line.quantity_change,
                 "unit_cost": line.unit_cost,
             }

@@ -22,7 +22,15 @@ from sqlalchemy.orm import Session, selectinload
 
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import Base, SessionLocal, engine, ensure_schema_compatibility, get_db
-from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
+from .models import (
+    InventoryItem,
+    OperationLog,
+    ProductBomItem,
+    SalesOrder,
+    SalesOrderItem,
+    StockTransaction,
+    StockTransactionItem,
+)
 from .schemas import (
     BackupRestorePayload,
     LoginPayload,
@@ -35,9 +43,11 @@ from .schemas import (
 )
 from .services import (
     create_transaction,
+    client_ip,
     ensure_sku_available,
     item_dict,
     load_order,
+    operation_log_dict,
     order_dict,
     order_workflow_dict,
     prepare_order_stock,
@@ -119,17 +129,123 @@ change_events = ChangeEventHub()
 
 @app.middleware("http")
 async def broadcast_successful_writes(request: Request, call_next):
-    response = await call_next(request)
+    response = None
+    error = None
+    try:
+        response = await call_next(request)
+    except Exception as caught:
+        error = caught
     is_write = request.method in {"POST", "PUT", "PATCH", "DELETE"}
     is_business_api = request.url.path.startswith("/api/")
+    is_log_api = request.url.path.startswith("/api/operation-logs")
     is_login = request.url.path == "/api/v1/auth/login"
-    if is_write and is_business_api and not is_login and response.status_code < 400:
-        change_events.publish(
-            path=request.url.path,
-            method=request.method,
-            source=request.headers.get("x-erp-client-id", ""),
-        )
+    if is_write and is_business_api and not is_log_api:
+        status_code = response.status_code if response else 500
+        try:
+            with SessionLocal() as audit_db:
+                audit_db.add(OperationLog(
+                    username=request.headers.get("x-erp-operator", "仓库管理员")[:120],
+                    action=operation_action(request.url.path, request.method),
+                    target=request.url.path[:255],
+                    method=request.method,
+                    path=request.url.path[:255],
+                    ip_address=client_ip(request)[:64],
+                    status="SUCCESS" if status_code < 400 else "FAILED",
+                    detail=f"HTTP {status_code}",
+                ))
+                audit_db.commit()
+        except Exception as audit_error:
+            logging.getLogger("uvicorn.error").warning("记录操作日志失败: %s", audit_error)
+        if status_code < 400 and not is_login:
+            change_events.publish(
+                path=request.url.path,
+                method=request.method,
+                source=request.headers.get("x-erp-client-id", ""),
+            )
+    if error:
+        raise error
     return response
+
+
+def operation_action(path: str, method: str) -> str:
+    if path == "/api/v1/auth/login":
+        return "登录"
+    if path == "/api/stock/inbound":
+        return "物料入库"
+    if path == "/api/stock/outbound":
+        return "物料出库"
+    if path.startswith("/api/orders"):
+        if path.endswith("/confirm"):
+            return "确认客单"
+        if path.endswith("/prepare"):
+            return "客单备货"
+        if path.endswith("/receive-materials"):
+            return "客单补料"
+        if path.endswith("/fulfill"):
+            return "客单出库"
+        if path.endswith("/cancel"):
+            return "取消客单"
+        return "新建客单"
+    if path.startswith("/api/parts"):
+        return {"POST": "新建零件", "PUT": "编辑零件", "DELETE": "停用零件"}.get(
+            method, "零件目录"
+        )
+    if path.startswith("/api/products"):
+        return {"POST": "新建产品", "PUT": "编辑产品", "DELETE": "停用产品"}.get(
+            method, "产品目录"
+        )
+    if path.startswith("/api/samples"):
+        return "调整样品库存"
+    if path.startswith("/api/backups"):
+        return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
+    return f"{method} 操作"
+
+
+@app.get("/api/operation-logs")
+def operation_logs(
+    keyword: str = "",
+    username: str = "",
+    action: str = "",
+    status: str = "",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    query = select(OperationLog)
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(
+            OperationLog.action.ilike(token),
+            OperationLog.target.ilike(token),
+            OperationLog.detail.ilike(token),
+            OperationLog.path.ilike(token),
+        ))
+    if username.strip():
+        query = query.where(OperationLog.username == username.strip())
+    if action.strip():
+        query = query.where(OperationLog.action == action.strip())
+    if status.strip():
+        query = query.where(OperationLog.status == status.strip())
+    if start_date:
+        query = query.where(OperationLog.created_at >= datetime.combine(start_date, time.min))
+    if end_date:
+        query = query.where(OperationLog.created_at <= datetime.combine(end_date, time.max))
+    rows = db.scalars(
+        query.order_by(OperationLog.created_at.desc(), OperationLog.id.desc()).limit(limit)
+    ).all()
+    return [operation_log_dict(row) for row in rows]
+
+
+@app.get("/api/operation-logs/actions")
+def operation_log_actions(db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(OperationLog.action)
+        .where(OperationLog.action != "")
+        .distinct()
+        .order_by(OperationLog.action)
+    ).all()
+    return list(rows)
 
 
 @app.exception_handler(SQLAlchemyError)
@@ -237,7 +353,13 @@ def dashboard(db: Session = Depends(get_db)):
         .select_from(InventoryItem)
         .where(active, regular_inventory, InventoryItem.stock_qty <= InventoryItem.min_stock)
     ) or 0
-    pending_orders = db.scalar(select(func.count()).select_from(SalesOrder).where(SalesOrder.status.in_(["DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"]))) or 0
+    pending_orders = db.scalar(
+        select(func.count())
+        .select_from(SalesOrder)
+        .where(SalesOrder.status.in_([
+            "DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"
+        ]))
+    ) or 0
     inventory_value = db.scalar(
         select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active, regular_inventory)
     ) or 0
@@ -284,7 +406,13 @@ def dashboard(db: Session = Depends(get_db)):
             shipping_todos.append({**todo, "lines": workflow["product_lines"]})
 
     return {
-        "metrics": {"parts": part_count, "products": product_count, "low_stock": low_stock, "pending_orders": pending_orders, "inventory_value": inventory_value},
+        "metrics": {
+            "parts": part_count,
+            "products": product_count,
+            "low_stock": low_stock,
+            "pending_orders": pending_orders,
+            "inventory_value": inventory_value,
+        },
         "recent_transactions": [transaction_dict(tx) for tx in recent_txs],
         "low_stock_items": [item_dict(item) for item in low_items[:8]],
         "todos": {
@@ -339,49 +467,21 @@ def delete_part(item_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/samples")
 def samples(keyword: str = "", db: Session = Depends(get_db)):
-    return list_items(db, "SAMPLE", keyword)
-
-
-def save_sample(
-    db: Session,
-    payload: SamplePayload,
-    sample: InventoryItem | None = None,
-) -> InventoryItem:
-    ensure_sku_available(db, payload.sku, sample.id if sample else None)
-    desired_stock = payload.stock_qty
-    values = payload.model_dump(exclude={"stock_qty"})
-    if sample is None:
-        sample = InventoryItem(
-            kind="SAMPLE",
-            stock_qty=0,
-            cost_price=0,
-            sale_price=0,
-            min_stock=0,
-            supply_mode="STOCK",
-            **values,
+    query = select(InventoryItem).where(
+        InventoryItem.kind == "PRODUCT",
+        InventoryItem.active.is_(True),
+    )
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(
+            or_(
+                InventoryItem.sku.ilike(token),
+                InventoryItem.name.ilike(token),
+                InventoryItem.spec.ilike(token),
+            )
         )
-        db.add(sample)
-        db.flush()
-    else:
-        for key, value in values.items():
-            setattr(sample, key, value)
-    sample.sku = sample.sku.upper()
-    stock_delta = desired_stock - int(round(sample.stock_qty))
-    if stock_delta:
-        create_transaction(
-            db,
-            "SAMPLE_ADJUST",
-            [(sample, stock_delta, 0)],
-            f"样品库存调整为 {desired_stock} {sample.unit}",
-        )
-    db.commit()
-    db.refresh(sample)
-    return sample
-
-
-@app.post("/api/samples", status_code=201)
-def create_sample(payload: SamplePayload, db: Session = Depends(get_db)):
-    return item_dict(save_sample(db, payload))
+    products = db.scalars(query.order_by(InventoryItem.sku)).all()
+    return [item_dict(product) for product in products]
 
 
 @app.put("/api/samples/{item_id}")
@@ -390,15 +490,26 @@ def update_sample(
     payload: SamplePayload,
     db: Session = Depends(get_db),
 ):
-    return item_dict(save_sample(db, payload, find_item(db, item_id, "SAMPLE")))
-
-
-@app.delete("/api/samples/{item_id}")
-def delete_sample(item_id: int, db: Session = Depends(get_db)):
-    sample = find_item(db, item_id, "SAMPLE")
-    sample.active = False
+    product = find_item(db, item_id, "PRODUCT")
+    stock_delta = payload.stock_qty - int(product.sample_stock_qty or 0)
+    product.sample_stock_qty = payload.stock_qty
+    if stock_delta:
+        transaction = StockTransaction(
+            transaction_no=serial("ST"),
+            transaction_type="SAMPLE_ADJUST",
+            notes=f"{product.name} 样品库存调整为 {payload.stock_qty} {product.unit}",
+        )
+        db.add(transaction)
+        db.flush()
+        db.add(StockTransactionItem(
+            transaction_id=transaction.id,
+            item_id=product.id,
+            quantity_change=stock_delta,
+            unit_cost=0,
+        ))
     db.commit()
-    return {"ok": True}
+    db.refresh(product)
+    return item_dict(product)
 
 
 @app.get("/api/products")
@@ -414,7 +525,16 @@ def products(
 def save_product(db: Session, payload: ProductPayload, product: InventoryItem | None = None) -> InventoryItem:
     ensure_sku_available(db, payload.sku, product.id if product else None)
     part_ids = [line.part_id for line in payload.components]
-    parts = {part.id: part for part in db.scalars(select(InventoryItem).where(InventoryItem.id.in_(part_ids), InventoryItem.kind == "PART", InventoryItem.active.is_(True))).all()} if part_ids else {}
+    parts = {
+        part.id: part
+        for part in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(part_ids),
+                InventoryItem.kind == "PART",
+                InventoryItem.active.is_(True),
+            )
+        ).all()
+    } if part_ids else {}
     if len(parts) != len(part_ids):
         raise HTTPException(400, "BOM 中包含无效零件")
     values = payload.model_dump(exclude={"components"})
@@ -428,9 +548,19 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
         product.bom_components.clear()
         db.flush()
     product.sku = product.sku.upper()
-    product.bom_components = [ProductBomItem(part_id=line.part_id, quantity=line.quantity) for line in payload.components]
+    product.bom_components = [
+        ProductBomItem(part_id=line.part_id, quantity=line.quantity)
+        for line in payload.components
+    ]
     db.commit()
-    return db.scalar(select(InventoryItem).where(InventoryItem.id == product.id).options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part)))
+    return db.scalar(
+        select(InventoryItem)
+        .where(InventoryItem.id == product.id)
+        .options(
+            selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+    )
 
 
 @app.post("/api/products", status_code=201)
@@ -535,7 +665,14 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     changes: list[tuple[InventoryItem, float, float]] = []
     tx_type = "PURCHASE_IN" if item.kind == "PART" else "MANUAL_IN"
     if item.kind == "PRODUCT" and payload.consume_bom:
-        product = db.scalar(select(InventoryItem).where(InventoryItem.id == item.id).options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part)))
+        product = db.scalar(
+            select(InventoryItem)
+            .where(InventoryItem.id == item.id)
+            .options(
+                selectinload(InventoryItem.bom_components)
+                .selectinload(ProductBomItem.part)
+            )
+        )
         if not product.bom_components:
             raise HTTPException(409, "产品还没有 BOM，不能按 BOM 生产入库")
         changes.extend((line.part, -line.quantity * payload.quantity, line.part.cost_price) for line in product.bom_components)
@@ -546,7 +683,14 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
         # Newly produced stock must immediately flow to confirmed orders by delivery priority.
         rebalance_product_reservations(db, {item.id})
     db.commit()
-    tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
     return transaction_dict(tx)
 
 
@@ -562,7 +706,14 @@ def outbound(payload: StockPayload, db: Session = Depends(get_db)):
             raise HTTPException(409, f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留")
     tx = create_transaction(db, "MANUAL_OUT", [(item, -payload.quantity, item.cost_price)], payload.notes)
     db.commit()
-    tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
     return transaction_dict(tx)
 
 
@@ -591,7 +742,16 @@ def orders(
 @app.post("/api/orders", status_code=201)
 def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
     ids = [line.product_id for line in payload.items]
-    products = {item.id: item for item in db.scalars(select(InventoryItem).where(InventoryItem.id.in_(ids), InventoryItem.kind == "PRODUCT", InventoryItem.active.is_(True))).all()}
+    products = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(ids),
+                InventoryItem.kind == "PRODUCT",
+                InventoryItem.active.is_(True),
+            )
+        ).all()
+    }
     if len(products) != len(ids):
         raise HTTPException(400, "客单中包含无效产品")
     order = SalesOrder(
@@ -690,7 +850,16 @@ def fulfill_order(order_id: int, db: Session = Depends(get_db)):
     if any(float(line.reserved_quantity or 0) + 1e-9 < float(line.quantity) for line in order.items):
         raise HTTPException(409, "客单产品预留数量不足，请重新执行备货检查")
     product_ids = {line.product_id for line in order.items}
-    tx = create_transaction(db, "SALE_OUT", [(line.product, -line.quantity, line.product.cost_price) for line in order.items], f"客单 {order.order_no} 出库", order.id)
+    tx = create_transaction(
+        db,
+        "SALE_OUT",
+        [
+            (line.product, -line.quantity, line.product.cost_price)
+            for line in order.items
+        ],
+        f"客单 {order.order_no} 出库",
+        order.id,
+    )
     release_order_reservations(order)
     order.status = "FULFILLED"
     rebalance_product_reservations(db, product_ids)

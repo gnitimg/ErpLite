@@ -164,6 +164,8 @@
 }
 .filter-drawer-footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 12px; }
 .form-help { width: 100%; margin-top: 7px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.6; }
+.material-picker-row { width: 100%; display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 10px; }
+.material-kind-select, .material-item-select { width: 100%; }
 .workflow-panel { padding: 18px; background: var(--el-fill-color-lighter); border-radius: 8px; }
 .workflow-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
 .workflow-step { padding: 9px 7px; color: var(--el-text-color-secondary); text-align: center; font-size: 11px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; background: var(--el-bg-color); }
@@ -243,6 +245,7 @@
 @media (max-width: 760px) {
   .erp-page { padding: 12px; }
   .content-card { --erp-card-inline-padding: 14px; }
+  .material-picker-row { grid-template-columns: 112px minmax(0, 1fr); gap: 8px; }
   .metric-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 10px; }
   .metric-card { min-height: 104px; padding: 15px; }
   .metric-value { font-size: 21px; }

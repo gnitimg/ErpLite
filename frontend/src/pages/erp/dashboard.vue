@@ -68,7 +68,7 @@ function dueMeta(value: string) {
 }
 
 function todoRoute(row: any) {
-  return row.taskType === "production" ? "/warehouse/production" : "/warehouse/operations"
+  return row.taskType === "production" ? "/operations/production" : "/operations/stock-operations"
 }
 
 onMounted(load)
@@ -157,7 +157,7 @@ useLiveRefresh(() => load(true))
       <div class="content-card">
         <div class="card-head">
           <h3>最近库存动态</h3>
-          <router-link to="/warehouse/movements">
+          <router-link to="/logs/stock">
             查看全部
           </router-link>
         </div>
@@ -201,10 +201,10 @@ useLiveRefresh(() => load(true))
             <h3>快捷入口</h3><span>常用操作</span>
           </div>
           <div class="card-body quick-actions">
-            <router-link class="quick-action" to="/warehouse/operations">
+            <router-link class="quick-action" to="/operations/stock-operations">
               <strong>出入库作业</strong><span>按物料或按客单办理</span>
             </router-link>
-            <router-link class="quick-action" to="/warehouse/production">
+            <router-link class="quick-action" to="/operations/production">
               <strong>产品生产</strong><span>按 BOM 领料并入库</span>
             </router-link>
             <router-link class="quick-action" to="/operations/orders">
