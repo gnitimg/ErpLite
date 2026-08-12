@@ -2,7 +2,7 @@
 import type { FormInstance, FormRules } from "element-plus"
 import { ElMessage, ElMessageBox } from "element-plus"
 import { onMounted, reactive, ref } from "vue"
-import { api, productQty } from "./api"
+import { api, productQty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -20,8 +20,8 @@ const rules: FormRules = {
   name: [{ required: true, message: "请输入样品名称", trigger: "blur" }]
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   try {
@@ -29,7 +29,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -82,6 +82,7 @@ async function remove(row: any) {
 }
 
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>

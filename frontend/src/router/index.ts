@@ -10,7 +10,7 @@ const Layouts = () => import("@/layouts/index.vue")
  * @name 常驻路由
  * @description 除了 redirect/403/404/login 等隐藏页面，其他页面建议设置唯一的 Name 属性
  */
-const templateConstantRoutes: RouteRecordRaw[] = [
+export const constantRoutes: RouteRecordRaw[] = [
   {
     path: REDIRECT_PATH,
     component: Layouts,
@@ -97,7 +97,7 @@ const templateConstantRoutes: RouteRecordRaw[] = [
         path: "products",
         component: () => import("@/pages/erp/products.vue"),
         name: "Products",
-        meta: { title: "产品与 BOM", elIcon: "Box", keepAlive: true }
+        meta: { title: "产品目录", elIcon: "Box", keepAlive: true }
       },
       {
         path: "samples",
@@ -191,181 +191,6 @@ const templateConstantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/backups.vue"),
         name: "Backups",
         meta: { title: "数据备份", elIcon: "RefreshLeft" }
-      }
-    ]
-  },
-  {
-    path: "/demo",
-    component: Layouts,
-    redirect: "/demo/unocss",
-    name: "Demo",
-    meta: {
-      title: "示例集合",
-      elIcon: "DataBoard"
-    },
-    children: [
-      {
-        path: "unocss",
-        component: () => import("@/pages/demo/unocss/index.vue"),
-        name: "UnoCSS",
-        meta: {
-          title: "UnoCSS"
-        }
-      },
-      {
-        path: "element-plus",
-        component: () => import("@/pages/demo/element-plus/index.vue"),
-        name: "ElementPlus",
-        meta: {
-          title: "Element Plus",
-          keepAlive: true
-        }
-      },
-      {
-        path: "vxe-table",
-        component: () => import("@/pages/demo/vxe-table/index.vue"),
-        name: "VxeTable",
-        meta: {
-          title: "Vxe Table",
-          keepAlive: true
-        }
-      },
-      {
-        path: "level2",
-        component: () => import("@/pages/demo/level2/index.vue"),
-        redirect: "/demo/level2/level3",
-        name: "Level2",
-        meta: {
-          title: "二级路由",
-          alwaysShow: true
-        },
-        children: [
-          {
-            path: "level3",
-            component: () => import("@/pages/demo/level2/level3/index.vue"),
-            name: "Level3",
-            meta: {
-              title: "三级路由",
-              keepAlive: true
-            }
-          }
-        ]
-      },
-      {
-        path: "composable-demo",
-        redirect: "/demo/composable-demo/use-fetch-select",
-        name: "ComposableDemo",
-        meta: {
-          title: "组合式函数"
-        },
-        children: [
-          {
-            path: "use-fetch-select",
-            component: () => import("@/pages/demo/composable-demo/use-fetch-select.vue"),
-            name: "UseFetchSelect",
-            meta: {
-              title: "useFetchSelect"
-            }
-          },
-          {
-            path: "use-fullscreen-loading",
-            component: () => import("@/pages/demo/composable-demo/use-fullscreen-loading.vue"),
-            name: "UseFullscreenLoading",
-            meta: {
-              title: "useFullscreenLoading"
-            }
-          },
-          {
-            path: "use-watermark",
-            component: () => import("@/pages/demo/composable-demo/use-watermark.vue"),
-            name: "UseWatermark",
-            meta: {
-              title: "useWatermark"
-            }
-          }
-        ]
-      }
-    ]
-  },
-  {
-    path: "/link",
-    meta: {
-      title: "文档链接",
-      elIcon: "Link"
-    },
-    children: [
-      {
-        path: "https://juejin.cn/post/7445151895121543209",
-        component: () => {},
-        name: "Link1",
-        meta: {
-          title: "中文文档"
-        }
-      },
-      {
-        path: "https://juejin.cn/column/7207659644487139387",
-        component: () => {},
-        name: "Link2",
-        meta: {
-          title: "新手教程"
-        }
-      },
-      {
-        path: "https://juejin.cn/column/7046214632771420196",
-        component: () => {},
-        name: "Link3",
-        meta: {
-          title: "周边资讯"
-        }
-      }
-    ]
-  }
-]
-
-/** 模板演示与文档路由保留在源码中，但不注册到 ERP 菜单。 */
-const disabledConstantPaths = new Set(["/demo", "/link"])
-export const constantRoutes: RouteRecordRaw[] = templateConstantRoutes.filter(route => !disabledConstantPaths.has(route.path))
-
-/**
- * @name 动态路由
- * @description 用来放置有权限 (roles / permissions 属性) 的路由
- * @description 必须带有唯一的 Name 属性
- */
-export const disabledDynamicRoutes: RouteRecordRaw[] = [
-  {
-    path: "/permission",
-    component: Layouts,
-    redirect: "/permission/page-level",
-    name: "Permission",
-    meta: {
-      title: "权限演示",
-      elIcon: "Lock",
-      alwaysShow: true
-    },
-    children: [
-      {
-        path: "page-level",
-        component: () => import("@/pages/demo/permission/page-level.vue"),
-        name: "PermissionPageLevel",
-        meta: {
-          title: "页面级",
-          // 在路由中设置角色来控制访问
-          roles: ["admin"],
-          // 在路由中设置权限标识字符来控制访问
-          permissions: ["permission:page-level"]
-        }
-      },
-      {
-        path: "button-level",
-        component: () => import("@/pages/demo/permission/button-level.vue"),
-        name: "PermissionButtonLevel",
-        meta: {
-          title: "按钮级",
-          // 如果未设置，则不限制该页面的访问
-          roles: undefined,
-          // 在路由中设置权限标识字符来控制访问
-          permissions: ["permission:button-level"]
-        }
       }
     ]
   }

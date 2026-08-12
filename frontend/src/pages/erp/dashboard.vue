@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
 import { computed, onMounted, ref } from "vue"
-import { api, formatTime, money, productQty, qty, stockQty, txLabels } from "./api"
+import { api, formatTime, money, productQty, qty, stockQty, txLabels, useLiveRefresh } from "./api"
 
 const loading = ref(true)
 const data = ref<any>({
@@ -36,14 +36,14 @@ const activeTodoRows = computed(() => allTodoRows.value.filter((row: any) => {
   return row.taskType === todoFilter.value
 }))
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     data.value = await api("/api/dashboard")
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -72,6 +72,7 @@ function todoRoute(row: any) {
 }
 
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>
@@ -99,7 +100,6 @@ onMounted(load)
       <div class="card-head">
         <div>
           <h3>备货任务</h3>
-          <span>按客单交付顺序安排采购、生产和出库</span>
         </div>
         <div class="todo-filter">
           <el-select v-model="todoFilter" aria-label="筛选备货任务" style="width: 150px">

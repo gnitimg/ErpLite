@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime } from "./api"
+import { api, formatTime, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 
 interface BackupRow {
@@ -42,14 +42,14 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     rows.value = await api("/api/backups")
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -107,6 +107,7 @@ function resetFilters() {
 }
 
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>

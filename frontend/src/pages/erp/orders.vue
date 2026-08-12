@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, money, productQty, qty, statusMap } from "./api"
+import { api, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -46,8 +46,8 @@ const workflowNextAction = computed(() => {
 })
 const orderedQuantity = computed(() => activeOrder.value?.items?.reduce((sum: number, line: any) => sum + Number(line.quantity || 0), 0) || 0)
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.status) params.set("status", filters.status)
@@ -60,7 +60,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 function applyFilters() {
@@ -130,6 +130,10 @@ async function action(row: any, type: "confirm" | "prepare" | "fulfill" | "cance
   }
 }
 onMounted(load)
+useLiveRefresh(async () => {
+  await load(true)
+  if (workflowDrawer.value && activeOrder.value) await openWorkflow(activeOrder.value)
+})
 </script>
 
 <template>
@@ -436,7 +440,7 @@ onMounted(load)
               <el-alert v-if="workflow.next_action === 'PURCHASE'" title="存在零件缺口：按单采购零件应优先采购，其余零件办理常规入库后可重新检查。" type="warning" :closable="false" show-icon />
               <el-alert
                 v-else-if="workflow.next_action === 'CONFIGURE_BOM'"
-                title="缺货产品尚未配置 BOM，请先前往产品与 BOM 页面补充零件组成。"
+                title="缺货产品尚未配置 BOM，请先前往产品目录页面补充零件组成。"
                 type="error"
                 :closable="false"
                 show-icon

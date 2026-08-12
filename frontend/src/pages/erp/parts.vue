@@ -2,7 +2,7 @@
 import type { FormInstance, FormRules } from "element-plus"
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, money, qty } from "./api"
+import { api, money, qty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 
 const loading = ref(false)
@@ -22,8 +22,8 @@ const rules: FormRules = {
   name: [{ required: true, message: "请输入零件名称", trigger: "blur" }]
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.stockStatus) params.set("stock_status", filters.stockStatus)
@@ -33,7 +33,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 function applyFilters() {
@@ -88,6 +88,7 @@ async function remove(row: any) {
   }
 }
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>

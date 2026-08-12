@@ -9,7 +9,8 @@ import {
   productQty,
   qty,
   stockQty,
-  txLabels
+  txLabels,
+  useLiveRefresh
 } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
@@ -59,8 +60,8 @@ function quantityText(item: any, value: number) {
   return stockQty(value, item?.kind === "PRODUCT")
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.transactionType) params.set("transaction_type", filters.transactionType)
@@ -77,7 +78,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -197,7 +198,8 @@ async function saveOrderOperation() {
 }
 
 onMounted(load)
-watch(() => route.name, load)
+useLiveRefresh(() => load(true))
+watch(() => route.name, () => load())
 </script>
 
 <template>

@@ -6,7 +6,6 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DataDir = Join-Path $ProjectDir ".mysql-data"
-$UndoDir = Join-Path $ProjectDir ".mysql-undo"
 $InitializedFile = Join-Path $ProjectDir ".mysql-initialized"
 $LogDir = Join-Path $ProjectDir "logs"
 $ErrorLog = Join-Path $LogDir "mysql.err.log"
@@ -33,6 +32,11 @@ function Wait-ForMySql {
   throw "Local MySQL did not start. Check $ErrorLog"
 }
 
+function Repair-UndoFiles {
+  Get-ChildItem -LiteralPath $DataDir -Filter "undo_*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 switch ($Action) {
   "start" {
     $running = Get-LocalMySqlProcess
@@ -43,10 +47,10 @@ switch ($Action) {
       "[mysqld]",
       "basedir=$($BaseDir.Replace('\', '/'))",
       "datadir=$($DataDir.Replace('\', '/'))",
-      "innodb-undo-directory=$($UndoDir.Replace('\', '/'))",
       "port=$Port",
       "bind-address=127.0.0.1",
       "mysqlx=0",
+      "innodb_undo_log_truncate=OFF",
       "character-set-server=utf8mb4",
       "collation-server=utf8mb4_0900_ai_ci",
       "pid-file=$($PidFile.Replace('\', '/'))",
@@ -56,16 +60,16 @@ switch ($Action) {
       "[mysqld]",
       "basedir=$($BaseDir.Replace('\', '/'))",
       "datadir=$($DataDir.Replace('\', '/'))",
-      "innodb-undo-directory=$($UndoDir.Replace('\', '/'))"
+      "innodb_undo_log_truncate=OFF"
     ) | Set-Content -LiteralPath $InitConfigFile -Encoding Ascii
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "mysql"))) {
       New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-      New-Item -ItemType Directory -Path $UndoDir -Force | Out-Null
       & $MysqldExe "--defaults-file=$InitConfigFile" --initialize-insecure
       if ($LASTEXITCODE -ne 0) { throw "MySQL data directory initialization failed." }
     }
 
     $arguments = @("--defaults-file=$ConfigFile")
+    Repair-UndoFiles
     Start-Process -FilePath $MysqldExe -ArgumentList $arguments -WorkingDirectory $ProjectDir -WindowStyle Hidden | Out-Null
     Wait-ForMySql
 

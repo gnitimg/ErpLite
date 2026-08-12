@@ -1,8 +1,13 @@
+import { onActivated, onBeforeUnmount, onDeactivated, onMounted } from "vue"
+
+const clientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
+
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
+      "X-ERP-Client-ID": clientId,
       ...(options.headers || {})
     }
   })
@@ -17,6 +22,87 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     throw new Error(message)
   }
   return response.status === 204 ? (undefined as T) : response.json()
+}
+
+export interface DataChangeEvent {
+  id: number
+  path: string
+  method: string
+  source: string
+  occurred_at: string
+}
+
+const liveRefreshSubscribers = new Set<(event: DataChangeEvent) => void>()
+let sharedEventSource: EventSource | undefined
+
+function startEventSource() {
+  if (sharedEventSource || !liveRefreshSubscribers.size) return
+  sharedEventSource = new EventSource("/api/events")
+  sharedEventSource.addEventListener("data-change", (message) => {
+    const event = JSON.parse((message as MessageEvent).data) as DataChangeEvent
+    if (event.source === clientId) return
+    liveRefreshSubscribers.forEach(subscriber => subscriber(event))
+  })
+}
+
+function stopEventSourceIfIdle() {
+  if (liveRefreshSubscribers.size) return
+  sharedEventSource?.close()
+  sharedEventSource = undefined
+}
+
+export function useLiveRefresh(
+  refresh: () => void | Promise<void>,
+  accepts: (event: DataChangeEvent) => boolean = () => true
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let refreshing = false
+  let pending = false
+
+  const scheduleRefresh = () => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(async () => {
+      if (refreshing) {
+        pending = true
+        return
+      }
+      refreshing = true
+      try {
+        await refresh()
+      } finally {
+        refreshing = false
+        if (pending) {
+          pending = false
+          scheduleRefresh()
+        }
+      }
+    }, 250)
+  }
+
+  const subscriber = (event: DataChangeEvent) => {
+    if (accepts(event)) scheduleRefresh()
+  }
+  let subscribed = false
+  const subscribe = () => {
+    if (subscribed) return
+    subscribed = true
+    liveRefreshSubscribers.add(subscriber)
+    startEventSource()
+  }
+  const unsubscribe = () => {
+    if (!subscribed) return
+    subscribed = false
+    liveRefreshSubscribers.delete(subscriber)
+    stopEventSourceIfIdle()
+  }
+
+  onBeforeUnmount(() => {
+    if (timer) clearTimeout(timer)
+    unsubscribe()
+  })
+  onMounted(subscribe)
+  onActivated(subscribe)
+  onDeactivated(unsubscribe)
 }
 
 export function money(value: number | string = 0) {

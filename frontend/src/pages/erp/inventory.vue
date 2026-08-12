@@ -2,7 +2,7 @@
 import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref, watch } from "vue"
 import { useRoute } from "vue-router"
-import { api, money, productQty, stockQty } from "./api"
+import { api, money, productQty, stockQty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 
 const loading = ref(false)
@@ -17,8 +17,8 @@ const pageNote = computed(() => kind.value === "PRODUCT" ? "成品结存包含�
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   params.set("kind", kind.value)
   if (filters.stockStatus) params.set("stock_status", filters.stockStatus)
@@ -28,7 +28,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 function applyFilters() {
@@ -40,7 +40,8 @@ function resetFilters() {
   applyFilters()
 }
 onMounted(load)
-watch(() => route.name, load)
+watch(() => route.name, () => load())
+useLiveRefresh(() => load(true))
 </script>
 
 <template>

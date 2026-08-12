@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime } from "./api"
+import { api, formatTime, useLiveRefresh } from "./api"
 
 const loading = ref(false)
 const rows = ref<any[]>([])
@@ -20,8 +20,8 @@ function statusTag(row: any): { label: string, type: TagType } {
   return statusMeta[row.status] || { label: row.status, type: "info" }
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.action) params.set("action", filters.action)
@@ -35,7 +35,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 async function loadActions() {
@@ -59,13 +59,14 @@ onMounted(() => {
   loadActions()
   load()
 })
+useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page">
     <div class="page-toolbar">
       <div class="toolbar-group list-actions">
-        <el-input v-model="keyword" clearable class="list-search" placeholder="搜索操作、对象、路径或详情" @keyup.enter="load" @clear="load">
+        <el-input v-model="keyword" clearable class="list-search" placeholder="搜索操作、对象、路径或详情" @keyup.enter="load()" @clear="load()">
           <template #prefix>
             <el-icon><Search /></el-icon>
           </template>
@@ -75,7 +76,7 @@ onMounted(() => {
             <el-icon><Filter /></el-icon>筛选
           </el-button>
         </el-badge>
-        <el-button @click="load">
+        <el-button @click="load()">
           <el-icon><Refresh /></el-icon>刷新
         </el-button>
       </div>

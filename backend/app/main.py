@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import date, datetime, time
+import json
 import logging
 import os
 from pathlib import Path
@@ -10,9 +12,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "app"
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -76,6 +78,60 @@ app.add_middleware(
 )
 
 
+class ChangeEventHub:
+    """向当前进程中的浏览器连接广播轻量数据变更事件。"""
+
+    def __init__(self) -> None:
+        self._queues: set[asyncio.Queue[str]] = set()
+        self._sequence = 0
+
+    def subscribe(self) -> asyncio.Queue[str]:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=20)
+        self._queues.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
+        self._queues.discard(queue)
+
+    def publish(self, *, path: str, method: str, source: str) -> None:
+        self._sequence += 1
+        payload = json.dumps(
+            {
+                "id": self._sequence,
+                "path": path,
+                "method": method,
+                "source": source,
+                "occurred_at": datetime.now().isoformat(),
+            },
+            ensure_ascii=False,
+        )
+        for queue in tuple(self._queues):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(payload)
+
+
+change_events = ChangeEventHub()
+
+
+@app.middleware("http")
+async def broadcast_successful_writes(request: Request, call_next):
+    response = await call_next(request)
+    is_write = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+    is_business_api = request.url.path.startswith("/api/")
+    is_login = request.url.path == "/api/v1/auth/login"
+    if is_write and is_business_api and not is_login and response.status_code < 400:
+        change_events.publish(
+            path=request.url.path,
+            method=request.method,
+            source=request.headers.get("x-erp-client-id", ""),
+        )
+    return response
+
+
 @app.exception_handler(SQLAlchemyError)
 async def database_error_handler(_request, _error):
     return JSONResponse(status_code=503, content={"detail": "MySQL 数据库尚未就绪，请先启动本机数据库"})
@@ -129,6 +185,31 @@ def list_items(
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "lite-erp", "database": "ready" if getattr(app.state, "database_ready", False) else "unavailable"}
+
+
+@app.get("/api/events")
+async def data_change_events(request: Request):
+    async def stream():
+        queue = change_events.subscribe()
+        try:
+            yield "retry: 3000\n\n"
+            while not await request.is_disconnected():
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    yield f"event: data-change\ndata: {payload}\n\n"
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            change_events.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/v1/auth/login")

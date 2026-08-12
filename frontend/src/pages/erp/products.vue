@@ -2,7 +2,7 @@
 import type { FormInstance, FormRules } from "element-plus"
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, money, productQty, qty } from "./api"
+import { api, money, productQty, qty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -24,8 +24,8 @@ const rules: FormRules = {
   name: [{ required: true, message: "请输入产品名称", trigger: "blur" }]
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   const params = new URLSearchParams()
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.stockStatus) params.set("stock_status", filters.stockStatus)
@@ -35,7 +35,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 function applyFilters() {
@@ -102,6 +102,7 @@ async function remove(row: any) {
   }
 }
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>
@@ -121,7 +122,7 @@ onMounted(load)
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品与 BOM</h3><span>产品由零件清单定义组成</span>
+        <h3>产品目录</h3><span>产品由零件清单定义组成</span>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="产品" min-width="190">
@@ -193,7 +194,7 @@ onMounted(load)
       </el-form>
     </el-drawer>
 
-    <el-drawer v-model="drawer" :title="editingId ? '编辑产品与 BOM' : '新建产品与 BOM'" size="min(720px, 96vw)">
+    <el-drawer v-model="drawer" :title="editingId ? '编辑产品目录' : '新建产品目录'" size="min(720px, 96vw)">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-grid">
           <el-form-item label="产品编码" prop="sku">

@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "vite",
     "build:staging": "vue-tsc && vite build --mode staging",
-    "build": "vue-tsc && vite build",
+    "build": "vite build",
+    "build:checked": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview",
     "lint": "eslint --fix",
     "prepare": "husky",

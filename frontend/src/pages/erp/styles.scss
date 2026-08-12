@@ -25,7 +25,9 @@
 .toolbar-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 
 .content-card {
+  --erp-card-inline-padding: 20px;
   overflow: hidden;
+  padding: 0 var(--erp-card-inline-padding) var(--erp-card-inline-padding);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px;
   background: var(--el-bg-color);
@@ -34,22 +36,31 @@
 
 .card-head {
   min-height: 58px;
-  padding: 0 20px;
+  margin: 0 calc(var(--erp-card-inline-padding) * -1) var(--erp-card-inline-padding);
+  padding: 0 var(--erp-card-inline-padding);
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--el-border-color-lighter);
-  h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  h3 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; }
   span, a { color: var(--el-text-color-secondary); font-size: 12px; }
   a { color: var(--el-color-primary); text-decoration: none; }
 }
 
-.card-body { padding: 18px; }
+.erp-page .el-drawer__title,
+.erp-page .detail-section-head strong,
+.erp-page .section-label {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.card-body { padding: 0; }
 .muted { color: var(--el-text-color-secondary); }
 .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 .number-positive { color: var(--el-color-success); font-weight: 600; }
 .number-negative { color: var(--el-color-danger); font-weight: 600; }
-.empty-state { padding: 48px 20px; text-align: center; color: var(--el-text-color-secondary); }
+.empty-state { padding: 32px 0; text-align: center; color: var(--el-text-color-secondary); }
 
 .sku-cell {
   display: flex;
@@ -145,6 +156,12 @@
 .list-page-alert { margin-bottom: 16px; }
 .filter-badge .el-badge__content { top: 2px; right: 5px; }
 .content-card .el-table__empty-block { min-height: 220px; }
+.content-card > .el-table,
+.content-card > .el-tabs,
+.content-card > .el-alert,
+.content-card > .workflow-panel {
+  width: 100%;
+}
 .filter-drawer-footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 12px; }
 .form-help { width: 100%; margin-top: 7px; color: var(--el-text-color-secondary); font-size: 11px; line-height: 1.6; }
 .workflow-panel { padding: 18px; background: var(--el-fill-color-lighter); border-radius: 8px; }
@@ -191,7 +208,7 @@
 .order-detail-tabs .el-alert + .el-table { margin-top: 16px; }
 .production-history { margin-top: 18px; }
 .stock-operation-hero { margin-bottom: 18px; padding: 22px 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid var(--el-border-color-lighter); border-radius: 10px; background: var(--el-bg-color); }
-.stock-operation-hero h2 { margin: 0; font-size: 18px; }
+.stock-operation-hero h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; }
 .stock-operation-hero p { margin: 7px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .stock-operation-grid { margin-bottom: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .stock-operation-card { min-height: 108px; padding: 20px; display: flex; align-items: center; gap: 16px; color: var(--el-text-color-primary); text-align: left; border: 1px solid var(--el-border-color-lighter); border-radius: 10px; background: var(--el-bg-color); cursor: pointer; transition: .18s ease; }
@@ -225,6 +242,7 @@
 
 @media (max-width: 760px) {
   .erp-page { padding: 12px; }
+  .content-card { --erp-card-inline-padding: 14px; }
   .metric-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 10px; }
   .metric-card { min-height: 104px; padding: 15px; }
   .metric-value { font-size: 21px; }

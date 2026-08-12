@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime, money, productQty, qty } from "./api"
+import { api, formatTime, money, productQty, qty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -28,8 +28,8 @@ const materialPreview = computed(() => selected.value?.components?.map((line: an
 })) || [])
 const canProduce = computed(() => selected.value?.components?.length && materialPreview.value.every((line: any) => line.remaining >= -1e-9))
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     [products.value, recentRows.value] = await Promise.all([
       api("/api/products"),
@@ -38,7 +38,7 @@ async function load() {
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 function openProduction(product?: any) {
@@ -68,6 +68,7 @@ async function save() {
   }
 }
 onMounted(load)
+useLiveRefresh(() => load(true))
 </script>
 
 <template>
@@ -228,7 +229,7 @@ onMounted(load)
         </el-table>
         <el-alert
           v-if="selected && !selected.components.length"
-          title="该产品未配置 BOM，请先到“产品与 BOM”页面维护组成零件。"
+          title="该产品未配置 BOM，请先到“产品目录”页面维护组成零件。"
           type="error"
           :closable="false"
           show-icon
