@@ -18,6 +18,15 @@ function Get-ErpProcess {
   return Get-Process -Id $savedPid -ErrorAction SilentlyContinue
 }
 
+function Stop-ErpProcessTree {
+  param([int]$ProcessId)
+  if ($IsWindows -or $env:OS -eq "Windows_NT") {
+    & taskkill.exe /PID $ProcessId /T /F | Out-Null
+  } else {
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
 switch ($Action) {
   "start" {
     $running = Get-ErpProcess
@@ -34,7 +43,7 @@ switch ($Action) {
   }
   "stop" {
     $running = Get-ErpProcess
-    if ($running) { Stop-Process -Id $running.Id; Write-Host "ERP stopped." -ForegroundColor Yellow }
+    if ($running) { Stop-ErpProcessTree -ProcessId $running.Id; Write-Host "ERP stopped." -ForegroundColor Yellow }
     else { Write-Host "ERP is not running." }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     & (Join-Path $ProjectDir "mysql-local.ps1") stop
