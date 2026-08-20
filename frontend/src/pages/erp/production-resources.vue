@@ -120,7 +120,6 @@ useLiveRefresh(() => load(true))
     <div class="content-card">
       <div class="card-head">
         <h3>生产能力</h3>
-        <span>按产品维护单线日产量，排产时自动套用全局并行产线数</span>
       </div>
       <el-table
         v-loading="loading"

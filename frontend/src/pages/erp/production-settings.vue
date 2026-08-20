@@ -61,10 +61,9 @@ useLiveRefresh(() => load(true))
     <div class="content-card settings-card" v-loading="loading">
       <div class="card-head">
         <h3>生产设置</h3>
-        <span>全局参数会影响全部产品和未完成客单的预计完成时间</span>
       </div>
       <el-form label-position="top" class="settings-form">
-        <el-form-item label="并行生产线数量" required>
+        <el-form-item label="并行作业数" required>
           <el-input-number
             v-model="form.line_count"
             :min="1"
@@ -72,25 +71,7 @@ useLiveRefresh(() => load(true))
             :precision="0"
             style="width: 220px"
           />
-          <div class="field-help">
-            表示同一时刻最多可安排多少个生产任务；实际并行数还会受产品模具数量限制。
-          </div>
         </el-form-item>
-        <div class="slot-preview">
-          <div class="preview-label">排产槽位预览</div>
-          <div class="slot-list">
-            <el-tag
-              v-for="slot in form.line_count"
-              :key="slot"
-              effect="plain"
-            >
-              生产位 {{ slot }}
-            </el-tag>
-          </div>
-        </div>
-        <div v-if="form.updated_at" class="updated-at">
-          最近更新：{{ formatTime(form.updated_at) }}
-        </div>
       </el-form>
     </div>
   </div>

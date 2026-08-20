@@ -139,7 +139,7 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品生产</h3><span>计划按同产品合批，生产位和产品模具位不会重复占用</span>
+        <h3>产品生产</h3>
       </div>
       <el-tabs v-model="activeTab">
         <el-tab-pane name="plan" label="生产计划">
@@ -268,7 +268,7 @@ useLiveRefresh(() => load(true))
     </div>
     <div class="content-card production-history">
       <div class="card-head">
-        <h3>最近生产记录</h3><span>最近 {{ recentRows.length }} 条生产入库流水</span>
+        <h3>最近生产记录</h3>
       </div>
       <el-table :data="recentRows" empty-text="暂无生产记录">
         <el-table-column label="生产流水" min-width="190">

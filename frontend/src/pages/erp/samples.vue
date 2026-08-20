@@ -74,7 +74,6 @@ useLiveRefresh(() => load(true))
       <div class="card-head">
         <div>
           <h3>样品库存</h3>
-          <span>跟随产品目录自动生成；新产品默认 300，无样品时仍显示为 0</span>
         </div>
         <span>共 {{ rows.length }} 项</span>
       </div>

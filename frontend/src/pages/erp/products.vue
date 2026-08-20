@@ -123,7 +123,7 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品目录</h3><span>产品由零件清单定义组成</span>
+        <h3>产品目录</h3>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="产品" min-width="190">

@@ -13,7 +13,6 @@ const keyword = ref("")
 const filters = reactive({ stockStatus: "" })
 const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" : "PART")
 const pageTitle = computed(() => kind.value === "PRODUCT" ? "产品库存" : "零件库存")
-const pageNote = computed(() => kind.value === "PRODUCT" ? "成品结存包含客单预留与可用数量" : "零件结存用于采购、领用和产品生产")
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
 
@@ -57,7 +56,7 @@ useLiveRefresh(() => load(true))
     />
     <div class="content-card">
       <div class="card-head">
-        <h3>{{ pageTitle }}</h3><span>{{ pageNote }}</span>
+        <h3>{{ pageTitle }}</h3>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="物料" min-width="210">

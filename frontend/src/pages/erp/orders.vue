@@ -153,7 +153,7 @@ useLiveRefresh(async () => {
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>客户订单</h3><span>出库后自动写入库存流水</span>
+        <h3>客户订单</h3>
       </div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无符合条件的客户订单">
         <el-table-column label="客单号" min-width="185">
