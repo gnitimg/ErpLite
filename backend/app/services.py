@@ -102,6 +102,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "sale_price": item.sale_price,
         "min_stock": item.min_stock,
         "daily_capacity": item.daily_capacity,
+        "mold_count": max(int(item.mold_count or 0), 1) if item.kind == "PRODUCT" else 0,
         "stock_qty": item.stock_qty,
         "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",

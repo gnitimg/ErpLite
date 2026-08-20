@@ -139,21 +139,79 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品生产</h3><span>计划按同产品合批，生产线和模具占用不会重叠</span>
+        <h3>产品生产</h3><span>计划按同产品合批，生产位和产品模具位不会重复占用</span>
       </div>
       <el-tabs v-model="activeTab">
         <el-tab-pane name="plan" label="生产计划">
           <el-table v-loading="loading" :data="productionRuns" empty-text="暂无生产计划；请先确认客单并维护生产资源">
             <el-table-column label="批次 / 产品" min-width="210">
-              <template #default="{ row }"><div class="sku-cell"><strong>{{ row.product_name }}</strong><span class="mono">{{ row.run_no }} · {{ row.product_sku }}</span></div></template>
+              <template #default="{ row }">
+                <div class="sku-cell">
+                  <strong>{{ row.product_name }}</strong>
+                  <span class="mono">{{ row.run_no }} · {{ row.product_sku }}</span>
+                </div>
+              </template>
             </el-table-column>
-            <el-table-column label="资源" min-width="190"><template #default="{ row }"><div class="sku-cell"><strong>{{ row.line_code }} · {{ row.line_name }}</strong><span>{{ row.mold_code }} · {{ row.mold_name }} · 有效日产 {{ productQty(row.effective_daily_capacity) }}</span></div></template></el-table-column>
-            <el-table-column label="计划数量" width="115" align="right"><template #default="{ row }"><b>{{ productQty(row.planned_quantity) }}</b> {{ row.unit }}</template></el-table-column>
-            <el-table-column label="预计开始" width="170"><template #default="{ row }">{{ formatTime(row.planned_start_at) }}</template></el-table-column>
-            <el-table-column label="预计完成" width="170"><template #default="{ row }">{{ formatTime(row.planned_end_at) }}</template></el-table-column>
-            <el-table-column label="订单分配" min-width="210"><template #default="{ row }"><div class="tx-lines"><el-tag v-for="allocation in row.allocations" :key="allocation.id" size="small" effect="plain">{{ allocation.order_no }} · {{ productQty(allocation.quantity) }}</el-tag></div></template></el-table-column>
-            <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="row.status === 'RUNNING' ? 'warning' : row.status === 'COMPLETED' ? 'success' : row.status === 'CANCELLED' ? 'info' : 'primary'" size="small">{{ runStatusMap[row.status] || row.status }}</el-tag></template></el-table-column>
-            <el-table-column label="操作" width="170" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'PLANNED'" link type="primary" @click="startRun(row)">开始</el-button><el-button v-if="row.status === 'RUNNING'" link type="success" @click="completeRun(row)">完成入库</el-button><el-button v-if="['PLANNED', 'RUNNING'].includes(row.status)" link type="danger" @click="cancelRun(row)">取消</el-button><span v-if="['COMPLETED', 'CANCELLED'].includes(row.status)" class="muted">已结束</span></template></el-table-column>
+            <el-table-column label="资源" min-width="210">
+              <template #default="{ row }">
+                <div class="sku-cell">
+                  <strong>生产位 {{ row.line_slot }}</strong>
+                  <span>
+                    模具位 {{ row.mold_slot }} / {{ row.mold_count }} ·
+                    有效日产 {{ productQty(row.effective_daily_capacity) }}
+                  </span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="计划数量" width="115" align="right">
+              <template #default="{ row }"><b>{{ productQty(row.planned_quantity) }}</b> {{ row.unit }}</template>
+            </el-table-column>
+            <el-table-column label="预计开始" width="170">
+              <template #default="{ row }">{{ formatTime(row.planned_start_at) }}</template>
+            </el-table-column>
+            <el-table-column label="预计完成" width="170">
+              <template #default="{ row }">{{ formatTime(row.planned_end_at) }}</template>
+            </el-table-column>
+            <el-table-column label="订单分配" min-width="210">
+              <template #default="{ row }">
+                <div class="tx-lines">
+                  <el-tag
+                    v-for="allocation in row.allocations"
+                    :key="allocation.id"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ allocation.order_no }} · {{ productQty(allocation.quantity) }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag
+                  :type="row.status === 'RUNNING' ? 'warning' : row.status === 'COMPLETED'
+                    ? 'success' : row.status === 'CANCELLED' ? 'info' : 'primary'"
+                  size="small"
+                >
+                  {{ runStatusMap[row.status] || row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="170" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.status === 'PLANNED'" link type="primary" @click="startRun(row)">开始</el-button>
+                <el-button v-if="row.status === 'RUNNING'" link type="success" @click="completeRun(row)">完成入库</el-button>
+                <el-button
+                  v-if="['PLANNED', 'RUNNING'].includes(row.status)"
+                  link
+                  type="danger"
+                  @click="cancelRun(row)"
+                >
+                  取消
+                </el-button>
+                <span v-if="['COMPLETED', 'CANCELLED'].includes(row.status)" class="muted">已结束</span>
+              </template>
+            </el-table-column>
           </el-table>
         </el-tab-pane>
         <el-tab-pane name="manual" label="产品与 BOM">
@@ -259,7 +317,14 @@ useLiveRefresh(() => load(true))
     <el-drawer v-model="drawer" :title="form.production_run_id ? '完成排产批次并入库' : '新建手工生产作业'" size="min(720px, 96vw)">
       <el-form label-position="top">
         <el-form-item label="生产产品" required>
-          <el-select v-model="form.item_id" filterable :disabled="Boolean(form.production_run_id)" placeholder="选择已配置 BOM 的产品" style="width:100%" @change="productChanged">
+          <el-select
+            v-model="form.item_id"
+            filterable
+            :disabled="Boolean(form.production_run_id)"
+            placeholder="选择已配置 BOM 的产品"
+            style="width:100%"
+            @change="productChanged"
+          >
             <el-option
               v-for="product in products"
               :key="product.id"

@@ -9,11 +9,10 @@ from sqlalchemy.orm import Session, selectinload
 
 from .models import (
     InventoryItem,
-    Mold,
     ProductionAllocation,
     ProductionCapability,
-    ProductionLine,
     ProductionRun,
+    ProductionSetting,
     ProductBomItem,
     SalesOrder,
     SalesOrderItem,
@@ -47,12 +46,9 @@ def _run_dict(run: ProductionRun) -> dict:
         "product_sku": run.product.sku,
         "product_name": run.product.name,
         "unit": run.product.unit,
-        "line_id": run.line_id,
-        "line_code": run.line.code,
-        "line_name": run.line.name,
-        "mold_id": run.mold_id,
-        "mold_code": run.mold.code,
-        "mold_name": run.mold.name,
+        "line_slot": run.line_slot,
+        "mold_slot": run.mold_slot,
+        "mold_count": max(int(run.product.mold_count or 1), 1),
         "planned_quantity": run.planned_quantity,
         "produced_quantity": run.produced_quantity,
         "planned_start_at": run.planned_start_at.isoformat(),
@@ -83,8 +79,6 @@ def _run_dict(run: ProductionRun) -> dict:
 def list_production_runs(db: Session, status: str | None = None) -> list[dict]:
     query = select(ProductionRun).options(
         selectinload(ProductionRun.product),
-        selectinload(ProductionRun.line),
-        selectinload(ProductionRun.mold),
         selectinload(ProductionRun.allocations)
         .selectinload(ProductionAllocation.order_item)
         .selectinload(SalesOrderItem.order),
@@ -120,7 +114,9 @@ def _choose_resources(
     quantity: float,
     now: datetime,
     line_available: dict[int, datetime],
-    mold_available: dict[int, datetime],
+    mold_available: dict[tuple[int, int], datetime],
+    mold_count: int,
+    line_count: int,
 ) -> tuple[list[dict], datetime] | None:
     candidates = []
     for capability in capabilities:
@@ -129,32 +125,35 @@ def _choose_resources(
         )
         if effective_capacity <= 0:
             continue
-        start = max(
-            now,
-            line_available.get(capability.line_id, now),
-            mold_available.get(capability.mold_id, now),
-        )
         rate = effective_capacity / SECONDS_PER_DAY
-        candidates.append({
-            "capability": capability,
-            "start": start,
-            "rate": rate,
-            "effective_capacity": effective_capacity,
-        })
+        for line_slot in range(1, max(int(line_count), 1) + 1):
+            for mold_slot in range(1, max(int(mold_count), 1) + 1):
+                start = max(
+                    now,
+                    line_available.get(line_slot, now),
+                    mold_available.get((capability.product_id, mold_slot), now),
+                )
+                candidates.append({
+                    "capability": capability,
+                    "line_slot": line_slot,
+                    "mold_slot": mold_slot,
+                    "start": start,
+                    "rate": rate,
+                    "effective_capacity": effective_capacity,
+                })
     if not candidates:
         return None
 
     candidates.sort(key=lambda row: row["start"] + timedelta(seconds=quantity / row["rate"]))
     selected = [candidates[0]]
     current_finish = _finish_for_resources(selected, quantity)
-    used_lines = {candidates[0]["capability"].line_id}
-    used_molds = {candidates[0]["capability"].mold_id}
+    used_lines = {candidates[0]["line_slot"]}
+    used_mold_slots = {candidates[0]["mold_slot"]}
     while True:
         best_candidate = None
         best_finish = current_finish
         for candidate in candidates[1:]:
-            capability = candidate["capability"]
-            if capability.line_id in used_lines or capability.mold_id in used_molds:
+            if candidate["line_slot"] in used_lines or candidate["mold_slot"] in used_mold_slots:
                 continue
             trial_finish = _finish_for_resources(selected + [candidate], quantity)
             if trial_finish < best_finish:
@@ -167,8 +166,8 @@ def _choose_resources(
         if improvement < PARALLEL_IMPROVEMENT_THRESHOLD:
             break
         selected.append(best_candidate)
-        used_lines.add(best_candidate["capability"].line_id)
-        used_molds.add(best_candidate["capability"].mold_id)
+        used_lines.add(best_candidate["line_slot"])
+        used_mold_slots.add(best_candidate["mold_slot"])
         current_finish = best_finish
     return selected, current_finish
 
@@ -236,13 +235,15 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
     """按 FCFS、最早完成资源组合和同产品合批，重算全部未完结客单 ETA。"""
     now = now or datetime.now()
     db.flush()
+    settings_query = select(ProductionSetting).where(ProductionSetting.id == 1)
     if db.bind and db.bind.dialect.name != "sqlite":
-        # 所有排产都锁定同一组资源主记录，避免局域网并发请求重复生成计划。
-        db.scalars(
-            select(ProductionLine.id)
-            .order_by(ProductionLine.id)
-            .with_for_update()
-        ).all()
+        settings_query = settings_query.with_for_update()
+    settings = db.scalar(settings_query)
+    if settings is None:
+        settings = ProductionSetting(id=1, line_count=1)
+        db.add(settings)
+        db.flush()
+    line_count = max(int(settings.line_count or 1), 1)
     active_orders = db.scalars(
         select(SalesOrder)
         .where(SalesOrder.status.in_(RESERVATION_STATUSES))
@@ -322,24 +323,16 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
             })
 
     line_available: dict[int, datetime] = defaultdict(lambda: now)
-    mold_available: dict[int, datetime] = defaultdict(lambda: now)
+    mold_available: dict[tuple[int, int], datetime] = defaultdict(lambda: now)
     for run in fixed_runs:
-        line_available[run.line_id] = max(line_available[run.line_id], run.planned_end_at)
-        mold_available[run.mold_id] = max(mold_available[run.mold_id], run.planned_end_at)
+        line_slot = max(int(run.line_slot or 1), 1)
+        line_available[line_slot] = max(line_available[line_slot], run.planned_end_at)
+        mold_key = (run.product_id, max(int(run.mold_slot or 1), 1))
+        mold_available[mold_key] = max(mold_available[mold_key], run.planned_end_at)
 
     capabilities = db.scalars(
         select(ProductionCapability)
-        .join(ProductionLine, ProductionLine.id == ProductionCapability.line_id)
-        .join(Mold, Mold.id == ProductionCapability.mold_id)
-        .where(
-            ProductionCapability.active.is_(True),
-            ProductionLine.active.is_(True),
-            Mold.active.is_(True),
-        )
-        .options(
-            selectinload(ProductionCapability.line),
-            selectinload(ProductionCapability.mold),
-        )
+        .where(ProductionCapability.active.is_(True))
     ).all()
     capabilities_by_product: dict[int, list[ProductionCapability]] = defaultdict(list)
     for capability in capabilities:
@@ -382,11 +375,13 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
             now,
             line_available,
             mold_available,
+            max(int(demands[0]["line"].product.mold_count or 1), 1),
+            line_count,
         )
         if choice is None:
             unavailable_products.append(product_id)
             for demand in demands:
-                demand["line"].eta_note = "未配置可用的产品 × 产线 × 模具日产能力"
+                demand["line"].eta_note = "未配置可用的产品日产能力"
             continue
         resources, common_finish = choice
         runs: list[ProductionRun] = []
@@ -406,8 +401,10 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
             run = ProductionRun(
                 run_no=serial("PR"),
                 product_id=product_id,
-                line_id=capability.line_id,
-                mold_id=capability.mold_id,
+                line_id=None,
+                line_slot=resource["line_slot"],
+                mold_id=None,
+                mold_slot=resource["mold_slot"],
                 planned_quantity=planned_quantity,
                 produced_quantity=0,
                 planned_start_at=resource["start"],
@@ -418,8 +415,8 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
             db.add(run)
             runs.append(run)
             created_runs.append(run)
-            line_available[capability.line_id] = common_finish
-            mold_available[capability.mold_id] = common_finish
+            line_available[resource["line_slot"]] = common_finish
+            mold_available[(product_id, resource["mold_slot"])] = common_finish
         db.flush()
         _allocate_supply(db, runs, demands)
         reliable = (

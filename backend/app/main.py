@@ -25,12 +25,10 @@ from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
     InventoryItem,
     OperationLog,
-    Mold,
     ProductBomItem,
-    ProductMold,
     ProductionCapability,
-    ProductionLine,
     ProductionRun,
+    ProductionSetting,
     SalesOrder,
     SalesOrderItem,
     StockTransaction,
@@ -43,10 +41,9 @@ from .schemas import (
     OrderStockPayload,
     PartPayload,
     ProductPayload,
-    MoldPayload,
     ProductionCapabilityPayload,
-    ProductionLinePayload,
     ProductionRunStatusPayload,
+    ProductionSettingsPayload,
     SamplePayload,
     StockPayload,
 )
@@ -209,10 +206,8 @@ def operation_action(path: str, method: str) -> str:
         return "重算生产计划"
     if path.startswith("/api/production/runs"):
         return "更新生产批次"
-    if path.startswith("/api/production/lines"):
-        return "维护生产线"
-    if path.startswith("/api/production/molds"):
-        return "维护模具"
+    if path.startswith("/api/system/production-settings"):
+        return "修改生产设置"
     if path.startswith("/api/production/capabilities"):
         return "维护生产能力"
     if path.startswith("/api/backups"):
@@ -571,6 +566,8 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
         ProductBomItem(part_id=line.part_id, quantity=line.quantity)
         for line in payload.components
     ]
+    db.flush()
+    recalculate_production_plan(db)
     db.commit()
     return db.scalar(
         select(InventoryItem)
@@ -609,25 +606,10 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-def production_line_dict(line: ProductionLine) -> dict:
+def production_settings_dict(settings: ProductionSetting) -> dict:
     return {
-        "id": line.id,
-        "code": line.code,
-        "name": line.name,
-        "active": line.active,
-        "created_at": line.created_at.isoformat(),
-        "updated_at": line.updated_at.isoformat(),
-    }
-
-
-def mold_dict(mold: Mold) -> dict:
-    return {
-        "id": mold.id,
-        "code": mold.code,
-        "name": mold.name,
-        "active": mold.active,
-        "created_at": mold.created_at.isoformat(),
-        "updated_at": mold.updated_at.isoformat(),
+        "line_count": settings.line_count,
+        "updated_at": settings.updated_at.isoformat(),
     }
 
 
@@ -637,12 +619,7 @@ def capability_dict(capability: ProductionCapability) -> dict:
         "product_id": capability.product_id,
         "product_sku": capability.product.sku,
         "product_name": capability.product.name,
-        "line_id": capability.line_id,
-        "line_code": capability.line.code,
-        "line_name": capability.line.name,
-        "mold_id": capability.mold_id,
-        "mold_code": capability.mold.code,
-        "mold_name": capability.mold.name,
+        "mold_count": max(int(capability.product.mold_count or 1), 1),
         "nominal_daily_capacity": capability.nominal_daily_capacity,
         "safety_factor": capability.safety_factor,
         "effective_daily_capacity": round(
@@ -652,78 +629,32 @@ def capability_dict(capability: ProductionCapability) -> dict:
     }
 
 
-@app.get("/api/production/lines")
-def production_lines(db: Session = Depends(get_db)):
-    return [
-        production_line_dict(row)
-        for row in db.scalars(select(ProductionLine).order_by(ProductionLine.code)).all()
-    ]
+@app.get("/api/system/production-settings")
+def production_settings(db: Session = Depends(get_db)):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1, line_count=1)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return production_settings_dict(row)
 
 
-@app.post("/api/production/lines", status_code=201)
-def create_production_line(payload: ProductionLinePayload, db: Session = Depends(get_db)):
-    code = payload.code.upper()
-    if db.scalar(select(ProductionLine.id).where(ProductionLine.code == code)):
-        raise HTTPException(409, "生产线编码已存在")
-    row = ProductionLine(code=code, name=payload.name, active=payload.active)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return production_line_dict(row)
-
-
-@app.put("/api/production/lines/{line_id}")
-def update_production_line(
-    line_id: int,
-    payload: ProductionLinePayload,
+@app.put("/api/system/production-settings")
+def update_production_settings(
+    payload: ProductionSettingsPayload,
     db: Session = Depends(get_db),
 ):
-    row = db.get(ProductionLine, line_id)
-    if not row:
-        raise HTTPException(404, "生产线不存在")
-    code = payload.code.upper()
-    duplicate = db.scalar(select(ProductionLine.id).where(
-        ProductionLine.code == code,
-        ProductionLine.id != line_id,
-    ))
-    if duplicate:
-        raise HTTPException(409, "生产线编码已存在")
-    row.code, row.name, row.active = code, payload.name, payload.active
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+    row.line_count = payload.line_count
+    db.flush()
     recalculate_production_plan(db)
-    db.commit()
-    return production_line_dict(row)
-
-
-@app.get("/api/production/molds")
-def molds(db: Session = Depends(get_db)):
-    return [mold_dict(row) for row in db.scalars(select(Mold).order_by(Mold.code)).all()]
-
-
-@app.post("/api/production/molds", status_code=201)
-def create_mold(payload: MoldPayload, db: Session = Depends(get_db)):
-    code = payload.code.upper()
-    if db.scalar(select(Mold.id).where(Mold.code == code)):
-        raise HTTPException(409, "模具编码已存在")
-    row = Mold(code=code, name=payload.name, active=payload.active)
-    db.add(row)
     db.commit()
     db.refresh(row)
-    return mold_dict(row)
-
-
-@app.put("/api/production/molds/{mold_id}")
-def update_mold(mold_id: int, payload: MoldPayload, db: Session = Depends(get_db)):
-    row = db.get(Mold, mold_id)
-    if not row:
-        raise HTTPException(404, "模具不存在")
-    code = payload.code.upper()
-    duplicate = db.scalar(select(Mold.id).where(Mold.code == code, Mold.id != mold_id))
-    if duplicate:
-        raise HTTPException(409, "模具编码已存在")
-    row.code, row.name, row.active = code, payload.name, payload.active
-    recalculate_production_plan(db)
-    db.commit()
-    return mold_dict(row)
+    return production_settings_dict(row)
 
 
 def load_capability(db: Session, capability_id: int) -> ProductionCapability:
@@ -732,8 +663,6 @@ def load_capability(db: Session, capability_id: int) -> ProductionCapability:
         .where(ProductionCapability.id == capability_id)
         .options(
             selectinload(ProductionCapability.product),
-            selectinload(ProductionCapability.line),
-            selectinload(ProductionCapability.mold),
         )
     )
     if not row:
@@ -747,8 +676,6 @@ def production_capabilities(db: Session = Depends(get_db)):
         select(ProductionCapability)
         .options(
             selectinload(ProductionCapability.product),
-            selectinload(ProductionCapability.line),
-            selectinload(ProductionCapability.mold),
         )
         .order_by(ProductionCapability.product_id, ProductionCapability.id)
     ).all()
@@ -761,34 +688,22 @@ def save_capability(
     row: ProductionCapability | None = None,
 ) -> ProductionCapability:
     product = find_item(db, payload.product_id, "PRODUCT")
-    line = db.get(ProductionLine, payload.line_id)
-    mold = db.get(Mold, payload.mold_id)
-    if not line or not mold:
-        raise HTTPException(400, "生产线或模具不存在")
     duplicate = select(ProductionCapability.id).where(
         ProductionCapability.product_id == product.id,
-        ProductionCapability.line_id == line.id,
-        ProductionCapability.mold_id == mold.id,
     )
     if row:
         duplicate = duplicate.where(ProductionCapability.id != row.id)
     if db.scalar(duplicate):
-        raise HTTPException(409, "该产品、生产线和模具的能力配置已存在")
-    association = db.scalar(select(ProductMold).where(
-        ProductMold.product_id == product.id,
-        ProductMold.mold_id == mold.id,
-    ))
-    if association is None:
-        db.add(ProductMold(product_id=product.id, mold_id=mold.id, active=True))
-    else:
-        association.active = True
+        raise HTTPException(409, "该产品的生产能力配置已存在")
     values = payload.model_dump()
     if row is None:
-        row = ProductionCapability(**values)
+        row = ProductionCapability(**values, line_id=None, mold_id=None)
         db.add(row)
     else:
         for key, value in values.items():
             setattr(row, key, value)
+        row.line_id = None
+        row.mold_id = None
     db.flush()
     recalculate_production_plan(db)
     db.commit()

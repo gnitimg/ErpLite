@@ -30,17 +30,17 @@
 
 已确认客单的成品库存预留。`inventory_items.stock_qty` 继续表示物理结存，预留不直接扣减它。可承诺库存等于物理结存减去其他有效预留；每条客单明细最多一条权威预留记录。
 
-### `production_lines` / `molds` / `product_molds`
+### 产品模具数量 / `production_settings`
 
-生产线和模具是独立物理资源。`product_molds` 表达产品可使用的多套模具；同一模具同一时刻只能被一个生产批次占用。
+`inventory_items.mold_count` 直接保存产品拥有的模具套数，产品表单中维护，零件为 0。排产时为每套模具建立产品内的逻辑 `mold_slot`，同一模具位同一时刻只能被一个生产批次占用。`production_settings` 是单例全局设置，`line_count` 表示系统允许同时运行的生产任务数；系统据此生成逻辑生产位，不维护产线编号、名称或独立档案。`molds`、`product_molds` 与 `production_lines` 仅为旧版数据和备份兼容保留。
 
 ### `production_capabilities`
 
-按 `product_id + line_id + mold_id` 联合唯一，保存标称日产和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，产品表遗留的 `daily_capacity` 不参与排产。
+每个产品维护一条标称单线日产和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，产品表遗留的 `daily_capacity` 不参与排产；实际并行数不超过全局 `line_count` 和该产品 `mold_count` 中的较小值。`line_id` 仅为兼容旧数据保留，新记录固定为空。
 
 ### `production_runs`
 
-按产品合并后的连续生产段，保存产品、生产线、模具、计划/实际数量、计划/实际时间和执行状态。它不直接归属于客单；生产线与模具的占用时间轴由运行中的批次和模拟计划共同形成。
+按产品合并后的连续生产段，保存产品、逻辑 `line_slot`、`mold_slot`、计划/实际数量、计划/实际时间和执行状态。它不直接归属于客单；生产位与产品模具位的占用时间轴由运行中的批次和模拟计划共同形成。`line_id` 仅为兼容旧批次保留，新记录固定为空。
 
 ### `production_allocations`
 

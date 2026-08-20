@@ -11,12 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.database import Base
 from app.models import (
     InventoryItem,
-    Mold,
     ProductBomItem,
     ProductionCapability,
     ProductionAllocation,
-    ProductionLine,
     ProductionRun,
+    ProductionSetting,
     SalesOrder,
     SalesOrderItem,
 )
@@ -58,23 +57,12 @@ def add_order(
 def add_capability(
     db: Session,
     product: InventoryItem,
-    line_code: str,
-    mold_code: str,
     daily_capacity: float,
 ) -> ProductionCapability:
-    line = db.query(ProductionLine).filter_by(code=line_code).one_or_none()
-    if line is None:
-        line = ProductionLine(code=line_code, name=line_code)
-        db.add(line)
-    mold = db.query(Mold).filter_by(code=mold_code).one_or_none()
-    if mold is None:
-        mold = Mold(code=mold_code, name=mold_code)
-        db.add(mold)
-    db.flush()
     capability = ProductionCapability(
         product_id=product.id,
-        line_id=line.id,
-        mold_id=mold.id,
+        line_id=None,
+        mold_id=None,
         nominal_daily_capacity=daily_capacity,
         safety_factor=1,
     )
@@ -83,8 +71,24 @@ def add_capability(
     return capability
 
 
-def make_product(db: Session, sku: str, stock: int = 0) -> InventoryItem:
-    product = InventoryItem(sku=sku, name=sku, kind="PRODUCT", stock_qty=stock)
+def set_line_count(db: Session, line_count: int) -> None:
+    db.add(ProductionSetting(id=1, line_count=line_count))
+    db.flush()
+
+
+def make_product(
+    db: Session,
+    sku: str,
+    stock: int = 0,
+    mold_count: int = 1,
+) -> InventoryItem:
+    product = InventoryItem(
+        sku=sku,
+        name=sku,
+        kind="PRODUCT",
+        stock_qty=stock,
+        mold_count=mold_count,
+    )
     db.add(product)
     db.flush()
     return product
@@ -96,8 +100,9 @@ def test_single_line_eta_and_two_products_run_in_parallel():
     with Session(engine) as db:
         first = make_product(db, "P01")
         second = make_product(db, "P02")
-        add_capability(db, first, "L01", "M01", 10000)
-        add_capability(db, second, "L02", "M02", 5000)
+        set_line_count(db, 2)
+        add_capability(db, first, 10000)
+        add_capability(db, second, 5000)
         order = add_order(db, "SO-1", [(first, 10000), (second, 10000)])
         recalculate_production_plan(db, NOW)
 
@@ -112,7 +117,7 @@ def test_same_product_orders_merge_and_receive_different_eta():
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         product = make_product(db, "P01")
-        add_capability(db, product, "L01", "M01", 10000)
+        add_capability(db, product, 10000)
         short = add_order(db, "SO-B", [(product, 2000)], days_until_due=1)
         long = add_order(db, "SO-A", [(product, 8000)], days_until_due=2)
         recalculate_production_plan(db, NOW)
@@ -129,8 +134,8 @@ def test_single_mold_prevents_parallel_and_two_molds_allow_parallel():
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         single = make_product(db, "SINGLE")
-        add_capability(db, single, "L01", "M01", 10000)
-        add_capability(db, single, "L02", "M01", 10000)
+        set_line_count(db, 2)
+        add_capability(db, single, 10000)
         add_order(db, "SO-S", [(single, 20000)])
         recalculate_production_plan(db, NOW)
         single_runs = db.query(ProductionRun).filter_by(product_id=single.id).all()
@@ -139,13 +144,14 @@ def test_single_mold_prevents_parallel_and_two_molds_allow_parallel():
 
         for row in db.query(SalesOrder).all():
             row.status = "CANCELLED"
-        parallel = make_product(db, "PARALLEL")
-        add_capability(db, parallel, "L01", "M02", 10000)
-        add_capability(db, parallel, "L02", "M03", 10000)
+        parallel = make_product(db, "PARALLEL", mold_count=2)
+        add_capability(db, parallel, 10000)
         add_order(db, "SO-P", [(parallel, 20000)])
         recalculate_production_plan(db, NOW)
         parallel_runs = db.query(ProductionRun).filter_by(product_id=parallel.id).all()
         assert len(parallel_runs) == 2
+        assert {run.line_slot for run in parallel_runs} == {1, 2}
+        assert {run.mold_slot for run in parallel_runs} == {1, 2}
         assert {run.planned_end_at for run in parallel_runs} == {NOW + timedelta(days=1)}
 
 
@@ -158,7 +164,7 @@ def test_inventory_is_not_promised_twice_and_bom_shortage_marks_eta_unreliable()
         db.add(part)
         db.flush()
         db.add(ProductBomItem(product_id=product.id, part_id=part.id, quantity=1))
-        add_capability(db, product, "L01", "M01", 1000)
+        add_capability(db, product, 1000)
         first = add_order(db, "SO-A", [(product, 800)], days_until_due=1)
         second = add_order(db, "SO-B", [(product, 800)], days_until_due=2)
         result = recalculate_production_plan(db, NOW)
@@ -178,12 +184,14 @@ def test_existing_running_resource_pushes_new_plan_start():
     with Session(engine) as db:
         old_product = make_product(db, "OLD")
         product = make_product(db, "NEW")
-        capability = add_capability(db, product, "L01", "M01", 10000)
+        add_capability(db, product, 10000)
         db.add(ProductionRun(
             run_no="RUNNING-1",
             product_id=old_product.id,
-            line_id=capability.line_id,
-            mold_id=capability.mold_id,
+            line_id=None,
+            line_slot=1,
+            mold_id=None,
+            mold_slot=1,
             planned_quantity=10000,
             produced_quantity=0,
             planned_start_at=NOW,
@@ -204,13 +212,15 @@ def test_running_allocation_is_not_scheduled_twice():
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         product = make_product(db, "P01")
-        capability = add_capability(db, product, "L01", "M01", 10000)
+        add_capability(db, product, 10000)
         order = add_order(db, "SO-1", [(product, 10000)])
         run = ProductionRun(
             run_no="RUNNING-1",
             product_id=product.id,
-            line_id=capability.line_id,
-            mold_id=capability.mold_id,
+            line_id=None,
+            line_slot=1,
+            mold_id=None,
+            mold_slot=1,
             planned_quantity=10000,
             produced_quantity=0,
             planned_start_at=NOW,

@@ -103,7 +103,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "production-resources",
         component: () => import("@/pages/erp/production-resources.vue"),
         name: "ProductionResources",
-        meta: { title: "生产资源", elIcon: "SetUp", keepAlive: true }
+        meta: { title: "生产能力", elIcon: "SetUp", keepAlive: true }
       },
       {
         path: "samples",
@@ -226,6 +226,12 @@ export const constantRoutes: RouteRecordRaw[] = [
       alwaysShow: true
     },
     children: [
+      {
+        path: "production",
+        component: () => import("@/pages/erp/production-settings.vue"),
+        name: "ProductionSettings",
+        meta: { title: "生产设置", elIcon: "SetUp", keepAlive: true }
+      },
       {
         path: "backups",
         component: () => import("@/pages/erp/backups.vue"),

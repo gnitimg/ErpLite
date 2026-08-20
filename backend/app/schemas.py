@@ -49,6 +49,7 @@ class ProductPayload(BaseModel):
     cost_price: float = Field(default=0, ge=0)
     sale_price: float = Field(default=0, ge=0)
     min_stock: int = Field(default=0, ge=0)
+    mold_count: int = Field(default=1, ge=1)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -121,38 +122,12 @@ class OrderPayload(BaseModel):
         return value
 
 
-class ProductionLinePayload(BaseModel):
-    code: str = Field(min_length=1, max_length=50)
-    name: str = Field(min_length=1, max_length=120)
-    active: bool = True
-
-    @field_validator("code", "name")
-    @classmethod
-    def strip_line_text(cls, value: str):
-        value = value.strip()
-        if not value:
-            raise ValueError("不能为空")
-        return value
-
-
-class MoldPayload(BaseModel):
-    code: str = Field(min_length=1, max_length=50)
-    name: str = Field(min_length=1, max_length=120)
-    active: bool = True
-
-    @field_validator("code", "name")
-    @classmethod
-    def strip_mold_text(cls, value: str):
-        value = value.strip()
-        if not value:
-            raise ValueError("不能为空")
-        return value
+class ProductionSettingsPayload(BaseModel):
+    line_count: int = Field(default=1, ge=1, le=100)
 
 
 class ProductionCapabilityPayload(BaseModel):
     product_id: int
-    line_id: int
-    mold_id: int
     nominal_daily_capacity: int = Field(gt=0)
     safety_factor: float = Field(default=0.85, gt=0, le=1)
     active: bool = True

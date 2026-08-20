@@ -19,6 +19,7 @@ class InventoryItem(Base):
     sale_price: Mapped[float] = mapped_column(Float, default=0)
     min_stock: Mapped[float] = mapped_column(Float, default=0)
     daily_capacity: Mapped[float] = mapped_column(Float, default=0)  # 兼容旧库；ETA 不读取此字段
+    mold_count: Mapped[int] = mapped_column(Integer, default=0)
     stock_qty: Mapped[float] = mapped_column(Float, default=0)
     sample_stock_qty: Mapped[int] = mapped_column(Integer, default=300)
     supply_mode: Mapped[str] = mapped_column(String(20), default="STOCK")  # STOCK / BUY_TO_ORDER（仅零件）
@@ -114,6 +115,8 @@ class StockReservation(Base):
 
 
 class ProductionLine(Base):
+    """旧版产线档案，仅为历史批次和旧备份兼容保留。"""
+
     __tablename__ = "production_lines"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -121,6 +124,16 @@ class ProductionLine(Base):
     name: Mapped[str] = mapped_column(String(120))
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class ProductionSetting(Base):
+    """全局生产设置；当前系统固定只使用 id=1 的单例记录。"""
+
+    __tablename__ = "production_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    line_count: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -140,7 +153,9 @@ class ProductMold(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="CASCADE"), index=True)
-    mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id", ondelete="RESTRICT"), index=True)
+    mold_id: Mapped[int] = mapped_column(
+        ForeignKey("molds.id", ondelete="RESTRICT"), index=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     product: Mapped[InventoryItem] = relationship()
@@ -154,8 +169,12 @@ class ProductionCapability(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="CASCADE"), index=True)
-    line_id: Mapped[int] = mapped_column(ForeignKey("production_lines.id", ondelete="RESTRICT"), index=True)
-    mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id", ondelete="RESTRICT"), index=True)
+    line_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_lines.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    mold_id: Mapped[int | None] = mapped_column(
+        ForeignKey("molds.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     nominal_daily_capacity: Mapped[int] = mapped_column(Integer)
     safety_factor: Mapped[float] = mapped_column(Float, default=0.85)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -163,12 +182,13 @@ class ProductionCapability(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     product: Mapped[InventoryItem] = relationship()
-    line: Mapped[ProductionLine] = relationship()
-    mold: Mapped[Mold] = relationship()
+    line: Mapped[ProductionLine | None] = relationship()
+    mold: Mapped[Mold | None] = relationship()
 
     __table_args__ = (
         UniqueConstraint("product_id", "line_id", "mold_id", name="uq_production_capability"),
         Index("ix_capability_product_active", "product_id", "active"),
+        Index("ix_capability_product_line", "product_id", "line_id"),
     )
 
 
@@ -178,8 +198,14 @@ class ProductionRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
-    line_id: Mapped[int] = mapped_column(ForeignKey("production_lines.id", ondelete="RESTRICT"), index=True)
-    mold_id: Mapped[int] = mapped_column(ForeignKey("molds.id", ondelete="RESTRICT"), index=True)
+    line_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_lines.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    line_slot: Mapped[int] = mapped_column(Integer, default=1)
+    mold_id: Mapped[int | None] = mapped_column(
+        ForeignKey("molds.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    mold_slot: Mapped[int] = mapped_column(Integer, default=1)
     planned_quantity: Mapped[int] = mapped_column(Integer)
     produced_quantity: Mapped[int] = mapped_column(Integer, default=0)
     planned_start_at: Mapped[datetime] = mapped_column(DateTime, index=True)
@@ -192,15 +218,22 @@ class ProductionRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     product: Mapped[InventoryItem] = relationship()
-    line: Mapped[ProductionLine] = relationship()
-    mold: Mapped[Mold] = relationship()
+    line: Mapped[ProductionLine | None] = relationship()
+    mold: Mapped[Mold | None] = relationship()
     allocations: Mapped[list["ProductionAllocation"]] = relationship(
         cascade="all, delete-orphan", back_populates="production_run"
     )
 
     __table_args__ = (
         Index("ix_runs_line_status_start", "line_id", "status", "planned_start_at"),
+        Index("ix_runs_line_slot_status_start", "line_slot", "status", "planned_start_at"),
         Index("ix_runs_mold_status_start", "mold_id", "status", "planned_start_at"),
+        Index(
+            "ix_runs_product_mold_slot_status",
+            "product_id",
+            "mold_slot",
+            "status",
+        ),
     )
 
 

@@ -20,6 +20,7 @@ from .models import (
     ProductionCapability,
     ProductionLine,
     ProductionRun,
+    ProductionSetting,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
@@ -29,13 +30,14 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 5
+BACKUP_SCHEMA_VERSION = 7
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
     ProductBomItem.__table__,
     SalesOrderItem.__table__,
     ProductionLine.__table__,
+    ProductionSetting.__table__,
     Mold.__table__,
     ProductMold.__table__,
     ProductionCapability.__table__,
@@ -53,6 +55,7 @@ DELETE_TABLES = (
     StockReservation.__table__,
     ProductionRun.__table__,
     ProductionCapability.__table__,
+    ProductionSetting.__table__,
     ProductMold.__table__,
     ProductBomItem.__table__,
     SalesOrderItem.__table__,
@@ -101,7 +104,7 @@ def _load_archive(path: Path) -> dict[str, Any]:
         raise BackupError("备份文件已损坏或格式不正确") from error
 
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3, 4, BACKUP_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, 4, 5, 6, BACKUP_SCHEMA_VERSION}:
         raise BackupError("备份版本与当前系统不兼容")
     if not isinstance(payload.get("created_at"), str):
         raise BackupError("备份缺少有效的创建时间")
@@ -111,12 +114,13 @@ def _load_archive(path: Path) -> dict[str, Any]:
     if not isinstance(tables, dict):
         raise BackupError("备份缺少数据表内容")
     # 兼容流程和 ETA 改造前的快照，并为新增字段提供安全默认值。
-    if schema_version in {1, 2, 3, 4}:
+    if schema_version in {1, 2, 3, 4, 5}:
         tables.setdefault("operation_logs", [])
         for row in tables.get("inventory_items", []):
             row.setdefault("supply_mode", "STOCK")
             row.setdefault("sample_stock_qty", 0)
             row.setdefault("daily_capacity", 0)
+            row.setdefault("mold_count", 1 if row.get("kind") == "PRODUCT" else 0)
         for row in tables.get("sales_orders", []):
             row.setdefault("required_date", row.get("order_date"))
             row.setdefault("estimated_completion_at", None)
@@ -139,6 +143,8 @@ def _load_archive(path: Path) -> dict[str, Any]:
         tables.setdefault("production_capabilities", [])
         tables.setdefault("production_runs", [])
         tables.setdefault("production_allocations", [])
+        for row in tables["production_runs"]:
+            row.setdefault("mold_slot", 1)
         if "stock_reservations" not in tables:
             tables["stock_reservations"] = [
                 {
@@ -152,6 +158,39 @@ def _load_archive(path: Path) -> dict[str, Any]:
                 }
                 for index, row in enumerate(tables.get("sales_order_items", []))
             ]
+    if schema_version in {1, 2, 3, 4, 5, 6}:
+        legacy_lines = sorted(
+            tables.get("production_lines", []),
+            key=lambda row: row.get("id", 0),
+        )
+        line_slots = {
+            row.get("id"): index + 1 for index, row in enumerate(legacy_lines)
+        }
+        active_line_count = sum(bool(row.get("active", True)) for row in legacy_lines)
+        tables["production_settings"] = [{
+            "id": 1,
+            "line_count": max(active_line_count, 1),
+            "updated_at": payload["created_at"],
+        }]
+        selected_capabilities: dict[int, dict[str, Any]] = {}
+        for row in tables.get("production_capabilities", []):
+            row["line_id"] = None
+            product_id = row.get("product_id")
+            current = selected_capabilities.get(product_id)
+            row_capacity = float(row.get("nominal_daily_capacity", 0)) * float(
+                row.get("safety_factor", 0)
+            )
+            current_capacity = (
+                float(current.get("nominal_daily_capacity", 0))
+                * float(current.get("safety_factor", 0))
+                if current else -1
+            )
+            if current is None or row_capacity > current_capacity:
+                selected_capabilities[product_id] = row
+        tables["production_capabilities"] = list(selected_capabilities.values())
+        for row in tables.get("production_runs", []):
+            row.setdefault("line_slot", line_slots.get(row.get("line_id"), 1))
+            row["line_id"] = None
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:
