@@ -132,6 +132,25 @@ const templateConstantRoutes: RouteRecordRaw[] = [
     ]
   },
   {
+    path: "/system",
+    component: Layouts,
+    redirect: "/system/backups",
+    name: "SystemManagement",
+    meta: {
+      title: "系统管理",
+      elIcon: "Setting",
+      alwaysShow: true
+    },
+    children: [
+      {
+        path: "backups",
+        component: () => import("@/pages/erp/backups.vue"),
+        name: "Backups",
+        meta: { title: "数据备份", elIcon: "RefreshLeft" }
+      }
+    ]
+  },
+  {
     path: "/demo",
     component: Layouts,
     redirect: "/demo/unocss",

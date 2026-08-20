@@ -103,3 +103,18 @@ class StockTransactionItem(Base):
     transaction: Mapped[StockTransaction] = relationship(back_populates="lines")
     item: Mapped[InventoryItem] = relationship()
 
+
+class OperationLog(Base):
+    __tablename__ = "operation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(120), default="", index=True)
+    action: Mapped[str] = mapped_column(String(60), default="", index=True)
+    target: Mapped[str] = mapped_column(String(255), default="")
+    method: Mapped[str] = mapped_column(String(10), default="")
+    path: Mapped[str] = mapped_column(String(255), default="", index=True)
+    ip_address: Mapped[str] = mapped_column(String(64), default="", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="SUCCESS", index=True)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+

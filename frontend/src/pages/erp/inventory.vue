@@ -1,26 +1,30 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, money, qty } from './api'
+import ListToolbar from './components/ListToolbar.vue'
 
 const loading = ref(false)
 const rows = ref<any[]>([])
-const kind = ref('')
-const lowStock = ref(false)
+const filterDrawer = ref(false)
 const keyword = ref('')
+const filters = reactive({ kind: '', stockStatus: '' })
 const totalValue = computed(() => rows.value.reduce((sum, row) => sum + row.stock_qty * row.cost_price, 0))
 const lowCount = computed(() => rows.value.filter(row => row.low_stock).length)
+const activeFilterCount = computed(() => Number(Boolean(filters.kind)) + Number(Boolean(filters.stockStatus)))
 
 async function load() {
   loading.value = true
   const params = new URLSearchParams()
-  if (kind.value) params.set('kind', kind.value)
-  if (lowStock.value) params.set('low_stock', 'true')
-  if (keyword.value) params.set('keyword', keyword.value)
+  if (filters.kind) params.set('kind', filters.kind)
+  if (filters.stockStatus) params.set('stock_status', filters.stockStatus)
+  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
   try { rows.value = await api(`/api/inventory?${params}`) }
   catch (error: any) { ElMessage.error(error.message) }
   finally { loading.value = false }
 }
+function applyFilters() { filterDrawer.value = false; load() }
+function resetFilters() { filters.kind = ''; filters.stockStatus = ''; applyFilters() }
 onMounted(load)
 </script>
 
@@ -31,15 +35,7 @@ onMounted(load)
       <div class="metric-card"><div><div class="metric-label">库存预警</div><div class="metric-value">{{ lowCount }}</div><div class="metric-note">结存小于或等于安全线</div></div><div class="metric-icon"><el-icon><Warning /></el-icon></div></div>
       <div class="metric-card"><div><div class="metric-label">库存成本</div><div class="metric-value">{{ money(totalValue) }}</div><div class="metric-note">按最新参考成本计算</div></div><div class="metric-icon"><el-icon><Wallet /></el-icon></div></div>
     </div>
-    <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-input v-model="keyword" clearable placeholder="搜索物料" style="width:230px" @keyup.enter="load" @clear="load"><template #prefix><el-icon><Search /></el-icon></template></el-input>
-        <el-select v-model="kind" placeholder="全部类型" clearable style="width:130px" @change="load"><el-option label="零件" value="PART" /><el-option label="产品" value="PRODUCT" /></el-select>
-        <el-checkbox v-model="lowStock" border @change="load">只看预警</el-checkbox>
-        <el-button @click="load">查询</el-button>
-      </div>
-      <el-button @click="load"><el-icon><Refresh /></el-icon>刷新库存</el-button>
-    </div>
+    <ListToolbar v-model="keyword" placeholder="搜索物料编码、名称或规格" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load" />
     <div class="content-card">
       <div class="card-head"><h3>库存台账</h3><span>实时结存来自库存流水</span></div>
       <el-table v-loading="loading" :data="rows">
@@ -52,5 +48,13 @@ onMounted(load)
         <el-table-column label="库存金额" width="125" align="right"><template #default="{ row }"><strong>{{ money(row.stock_qty * row.cost_price) }}</strong></template></el-table-column>
       </el-table>
     </div>
+
+    <el-drawer v-model="filterDrawer" title="筛选库存" size="min(420px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="物料类型"><el-select v-model="filters.kind" clearable placeholder="全部类型" style="width:100%"><el-option label="零件" value="PART" /><el-option label="产品" value="PRODUCT" /></el-select></el-form-item>
+        <el-form-item label="库存状态"><el-select v-model="filters.stockStatus" clearable placeholder="全部状态" style="width:100%"><el-option label="库存预警" value="LOW" /><el-option label="库存正常" value="NORMAL" /></el-select></el-form-item>
+        <div class="filter-drawer-footer"><el-button @click="resetFilters">重置</el-button><el-button type="primary" @click="applyFilters">应用筛选</el-button></div>
+      </el-form>
+    </el-drawer>
   </div>
 </template>

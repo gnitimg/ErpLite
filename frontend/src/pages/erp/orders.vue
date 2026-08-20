@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, money, qty, statusMap } from './api'
+import ListToolbar from './components/ListToolbar.vue'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -60,14 +61,9 @@ onMounted(load)
 
 <template>
   <div class="erp-page orders-page">
-    <div class="page-toolbar">
-      <div class="toolbar-group list-actions">
-        <el-input v-model="keyword" clearable class="list-search" placeholder="搜索客单号、客户名称或电话" @keyup.enter="load" @clear="load"><template #prefix><el-icon><Search /></el-icon></template></el-input>
-        <el-badge :value="activeFilterCount" :hidden="!activeFilterCount" class="filter-badge"><el-button @click="filterDrawer=true"><el-icon><Filter /></el-icon>筛选</el-button></el-badge>
-        <el-button @click="load"><el-icon><Refresh /></el-icon>刷新</el-button>
-      </div>
+    <ListToolbar v-model="keyword" placeholder="搜索客单号、客户名称或电话" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load">
       <el-button type="primary" @click="openCreate"><el-icon><Plus /></el-icon>新建客单</el-button>
-    </div>
+    </ListToolbar>
     <div class="content-card">
       <div class="card-head"><h3>客户订单</h3><span>出库后自动写入库存流水</span></div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无符合条件的客户订单">

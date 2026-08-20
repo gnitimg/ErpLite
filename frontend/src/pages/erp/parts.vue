@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { api, money, qty } from './api'
+import ListToolbar from './components/ListToolbar.vue'
 
 const loading = ref(false)
 const saving = ref(false)
 const drawer = ref(false)
+const filterDrawer = ref(false)
 const keyword = ref('')
 const rows = ref<any[]>([])
+const filters = reactive({ stockStatus: '' })
+const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const formRef = ref<FormInstance>()
 const editingId = ref<number | null>(null)
 const emptyForm = () => ({ sku: '', name: '', unit: '件', spec: '', cost_price: 0, min_stock: 0 })
@@ -19,10 +23,15 @@ const rules: FormRules = {
 
 async function load() {
   loading.value = true
-  try { rows.value = await api(`/api/parts?keyword=${encodeURIComponent(keyword.value)}`) }
+  const params = new URLSearchParams()
+  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
+  if (filters.stockStatus) params.set('stock_status', filters.stockStatus)
+  try { rows.value = await api(`/api/parts?${params}`) }
   catch (error: any) { ElMessage.error(error.message) }
   finally { loading.value = false }
 }
+function applyFilters() { filterDrawer.value = false; load() }
+function resetFilters() { filters.stockStatus = ''; applyFilters() }
 function openCreate() {
   editingId.value = null
   Object.assign(form, emptyForm())
@@ -57,13 +66,9 @@ onMounted(load)
 
 <template>
   <div class="erp-page">
-    <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-input v-model="keyword" clearable placeholder="搜索编码或名称" style="width:260px" @keyup.enter="load" @clear="load"><template #prefix><el-icon><Search /></el-icon></template></el-input>
-        <el-button @click="load">查询</el-button>
-      </div>
+    <ListToolbar v-model="keyword" placeholder="搜索零件编码或名称" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load">
       <el-button type="primary" @click="openCreate"><el-icon><Plus /></el-icon>新建零件</el-button>
-    </div>
+    </ListToolbar>
     <div class="content-card">
       <div class="card-head"><h3>零件档案</h3><span>共 {{ rows.length }} 项</span></div>
       <el-table v-loading="loading" :data="rows">
@@ -77,6 +82,13 @@ onMounted(load)
         <el-table-column label="操作" width="130" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link type="danger" @click="remove(row)">停用</el-button></template></el-table-column>
       </el-table>
     </div>
+
+    <el-drawer v-model="filterDrawer" title="筛选零件" size="min(420px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="库存状态"><el-select v-model="filters.stockStatus" clearable placeholder="全部状态" style="width:100%"><el-option label="需要补货" value="LOW" /><el-option label="库存正常" value="NORMAL" /></el-select></el-form-item>
+        <div class="filter-drawer-footer"><el-button @click="resetFilters">重置</el-button><el-button type="primary" @click="applyFilters">应用筛选</el-button></div>
+      </el-form>
+    </el-drawer>
 
     <el-drawer v-model="drawer" :title="editingId ? '编辑零件' : '新建零件'" size="min(520px, 92vw)">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">

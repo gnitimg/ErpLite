@@ -9,6 +9,10 @@ class LoginPayload(BaseModel):
     code: str = ""
 
 
+class BackupRestorePayload(BaseModel):
+    confirm_filename: str = Field(min_length=1, max_length=255)
+
+
 class PartPayload(BaseModel):
     sku: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=120)
