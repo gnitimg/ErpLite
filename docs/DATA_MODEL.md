@@ -8,8 +8,9 @@
 2. 产品组成由 `product_bom_items` 保存；每行表示生产 1 单位产品所需的零件数量。
 3. `inventory_items.stock_qty` 是快速读取的实时结存，但任何修改必须和 `stock_transactions`、`stock_transaction_items` 流水在同一数据库事务中完成。
 4. 产品生产入库是一笔复合流水：成品为正数，BOM 零件按“入库数量 × 单台用量”为负数；任何零件不足时整笔失败。
-5. 客单确认不占用库存；点击“出库”时才统一校验并扣减成品，成功后客单进入 `FULFILLED`。
+5. 客单确认后按要求交期预留成品库存；点击“出库”时统一校验并扣减已预留成品，成功后客单进入 `FULFILLED`。
 6. 当前版本禁止负库存。已产生业务历史的物料采用停用而非物理删除。
+7. 同一笔库存业务涉及的全部物料按 ID 固定顺序加行锁，结存和流水在同一事务中写入。
 
 ## 表结构
 
@@ -23,11 +24,11 @@
 
 ### `sales_orders` / `sales_order_items`
 
-客户订单头与产品明细。状态流转为 `DRAFT → CONFIRMED → FULFILLED`，草稿或确认状态也可转为 `CANCELLED`。
+客户订单头与产品明细。状态流转为 `DRAFT → CONFIRMED / WAITING_MATERIALS → READY_TO_SHIP → FULFILLED`，未完结状态可转为 `CANCELLED`。明细保存参考价、本单成交价和预留数量。
 
 ### `stock_transactions` / `stock_transaction_items`
 
-库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。一笔生产入库可以同时记录成品增加与多个零件减少。
+库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。一笔期初盘点可包含多种物料；一笔生产入库可以同时记录成品增加与多个零件减少。普通结存可由全部非样品流水汇总复核。
 
 ## 后续扩展位置
 

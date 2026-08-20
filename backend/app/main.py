@@ -69,8 +69,9 @@ async def lifespan(_app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
         ensure_schema_compatibility()
-        with SessionLocal() as db:
-            seed_demo(db)
+        if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
+            with SessionLocal() as db:
+                seed_demo(db)
         _app.state.database_ready = True
     except SQLAlchemyError as error:
         _app.state.database_ready = False

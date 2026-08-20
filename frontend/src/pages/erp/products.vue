@@ -17,7 +17,7 @@ const filters = reactive({ stockStatus: "", bomStatus: "" })
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)) + Number(Boolean(filters.bomStatus)))
 const editingId = ref<number | null>(null)
 const formRef = ref<FormInstance>()
-const emptyForm = () => ({ sku: "", name: "", unit: "台", spec: "", cost_price: 0, sale_price: 0, min_stock: 0, components: [] as any[] })
+const emptyForm = () => ({ sku: "", name: "", unit: "台", spec: "", cost_price: 0, sale_price: 0, daily_capacity: 0, min_stock: 0, components: [] as any[] })
 const form = reactive(emptyForm())
 const rules: FormRules = {
   sku: [{ required: true, message: "请输入产品编码", trigger: "blur" }],
@@ -63,6 +63,7 @@ function openEdit(row: any) {
     cost_price: row.cost_price,
     sale_price: row.sale_price,
     min_stock: row.min_stock,
+    daily_capacity: row.daily_capacity,
     components: row.components.map((line: any) => ({
       part_id: line.part_id,
       quantity: line.quantity
@@ -217,6 +218,9 @@ useLiveRefresh(() => load(true))
           </el-form-item>
           <el-form-item label="安全库存">
             <QuantityInput v-model="form.min_stock" integer :min="0" :unit="form.unit" />
+          </el-form-item>
+          <el-form-item label="单日产量（典型）">
+            <QuantityInput v-model="form.daily_capacity" integer :min="0" :unit="form.unit" />
           </el-form-item>
         </div>
         <div class="section-label">

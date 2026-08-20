@@ -14,3 +14,5 @@ backups/
 .mysql-local.ini
 .mysql-init.ini
 .DS_Store
+.codeartsdoer/
+.pytest_cache/

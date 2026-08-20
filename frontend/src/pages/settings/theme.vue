@@ -38,14 +38,14 @@ function resetTheme() {
 <template>
   <div class="erp-page theme-page">
     <div class="theme-heading">
-      <div><h2>主题设置</h2><p>所有更改都会即时应用并自动保存在当前浏览器。</p></div>
+      <div><h2>主题设置</h2></div>
       <el-button @click="$router.back()"><el-icon><ArrowLeft /></el-icon>返回</el-button>
     </div>
 
     <div class="theme-layout">
       <div class="theme-settings">
         <section class="content-card theme-section">
-          <div class="card-head"><h3>外观主题</h3><span>选择系统整体明暗与导航色调</span></div>
+          <div class="card-head"><h3>外观主题</h3></div>
           <div class="theme-options">
             <button v-for="theme in themeList" :key="theme.name" class="theme-option" :class="{ active: activeThemeName === theme.name }" @click="chooseTheme($event, theme.name)">
               <span class="theme-swatch" :style="{ background: themeMeta[theme.name].surface }"><i :style="{ background: themeMeta[theme.name].sidebar }" /><b :style="{ background: themeMeta[theme.name].primary }" /></span>
@@ -55,7 +55,7 @@ function resetTheme() {
         </section>
 
         <section class="content-card theme-section">
-          <div class="card-head"><h3>导航布局</h3><span>按日常操作习惯选择菜单位置</span></div>
+          <div class="card-head"><h3>导航布局</h3></div>
           <el-radio-group v-model="settingsStore.layoutMode" class="layout-choices">
             <el-radio-button :value="LayoutModeEnum.Left">左侧导航</el-radio-button>
             <el-radio-button :value="LayoutModeEnum.Top">顶部导航</el-radio-button>
@@ -64,19 +64,18 @@ function resetTheme() {
         </section>
 
         <section class="content-card theme-section">
-          <div class="card-head"><h3>界面元素</h3><span>精简或保留常用辅助入口</span></div>
+          <div class="card-head"><h3>界面元素</h3></div>
           <div class="theme-switches"><label v-for="item in switches" :key="item.key"><span>{{ item.label }}</span><el-switch v-model="settingsStore[item.key]" /></label></div>
           <el-button class="reset-theme" plain type="danger" @click="resetTheme"><el-icon><RefreshLeft /></el-icon>恢复默认设置</el-button>
         </section>
       </div>
 
       <aside class="content-card theme-preview-card">
-        <div class="card-head"><h3>实时预览</h3><span>示意当前主题和布局</span></div>
+        <div class="card-head"><h3>实时预览</h3></div>
         <div class="theme-preview" :class="`layout-${settingsStore.layoutMode}`" :style="{ '--preview-sidebar': themeMeta[activeThemeName].sidebar, '--preview-surface': themeMeta[activeThemeName].surface, '--preview-primary': themeMeta[activeThemeName].primary }">
           <div class="preview-top"><i /><span /><span /><b /></div>
           <div class="preview-body"><nav><strong>ErpLite</strong><i class="active" /><i /><i /><i /></nav><main><div class="preview-title"><span /><button /></div><div class="preview-metrics"><i /><i /><i /></div><div class="preview-table"><b /><span v-for="n in 5" :key="n" /></div></main></div>
         </div>
-        <p class="preview-note">实际页面会同步应用此处的选择；主题设置页本身不会显示在左侧菜单。</p>
       </aside>
     </div>
   </div>

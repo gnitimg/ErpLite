@@ -51,6 +51,10 @@ def ensure_schema_compatibility() -> None:
             "sample_stock_qty",
             "ALTER TABLE inventory_items ADD COLUMN sample_stock_qty INT NOT NULL DEFAULT 300",
         ),
+        "inventory_items.daily_capacity": (
+            "daily_capacity",
+            "ALTER TABLE inventory_items ADD COLUMN daily_capacity FLOAT NOT NULL DEFAULT 0",
+        ),
         "sales_order_items": (
             "reserved_quantity",
             "ALTER TABLE sales_order_items ADD COLUMN reserved_quantity FLOAT NOT NULL DEFAULT 0",

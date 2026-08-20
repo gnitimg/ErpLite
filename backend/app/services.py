@@ -92,6 +92,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "cost_price": item.cost_price,
         "sale_price": item.sale_price,
         "min_stock": item.min_stock,
+        "daily_capacity": item.daily_capacity,
         "stock_qty": item.stock_qty,
         "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
@@ -183,7 +184,47 @@ def create_transaction(
     notes: str = "",
     related_order_id: int | None = None,
 ) -> StockTransaction:
-    for item, delta, _unit_cost in changes:
+    if not changes:
+        raise HTTPException(400, "库存流水至少需要一项物料变化")
+
+    change_map: dict[int, list] = {}
+    for item, delta, unit_cost in changes:
+        if abs(float(delta)) <= 1e-9:
+            continue
+        entry = change_map.setdefault(item.id, [item, 0.0, float(unit_cost)])
+        entry[1] += float(delta)
+        if delta > 0 and unit_cost > 0:
+            entry[2] = float(unit_cost)
+    change_map = {
+        item_id: entry for item_id, entry in change_map.items()
+        if abs(entry[1]) > 1e-9
+    }
+    if not change_map:
+        raise HTTPException(400, "库存变化不能全部为零")
+
+    # 对同一笔流水涉及的物料按固定顺序加行锁，避免局域网内多个用户并发
+    # 出入库时发生丢失更新或把库存扣成负数。SQLite 测试环境不支持 FOR UPDATE。
+    db.flush()
+    db.expire_all()
+    locked_items = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem)
+            .where(InventoryItem.id.in_(sorted(change_map)))
+            .order_by(InventoryItem.id)
+            .with_for_update()
+        ).all()
+    } if db.bind and db.bind.dialect.name != "sqlite" else {
+        item_id: entry[0] for item_id, entry in change_map.items()
+    }
+    if len(locked_items) != len(change_map):
+        raise HTTPException(409, "库存物料已被停用或删除，请刷新后重试")
+
+    normalized_changes = [
+        (locked_items[item_id], round(entry[1], 6), entry[2])
+        for item_id, entry in sorted(change_map.items())
+    ]
+    for item, delta, _unit_cost in normalized_changes:
         if item.stock_qty + delta < -1e-9:
             raise HTTPException(409, f"{item.name} 库存不足，当前 {item.stock_qty:g} {item.unit}")
 
@@ -192,7 +233,7 @@ def create_transaction(
     )
     db.add(tx)
     db.flush()
-    for item, delta, unit_cost in changes:
+    for item, delta, unit_cost in normalized_changes:
         item.stock_qty = round(item.stock_qty + delta, 6)
         if delta > 0 and unit_cost > 0:
             item.cost_price = unit_cost

@@ -372,7 +372,7 @@ watch(() => route.name, () => load())
       <div class="content-card">
         <div class="card-head">
           <h3>库存流水</h3>
-          <span>最近 {{ rows.length }} 条 · 点击详情查看完整信息</span>
+          <span>共 {{ rows.length }} 条</span>
         </div>
         <el-table v-loading="loading" :data="rows">
           <el-table-column label="流水号" min-width="190">

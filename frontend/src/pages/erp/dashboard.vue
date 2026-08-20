@@ -71,6 +71,16 @@ function todoRoute(row: any) {
   return row.taskType === "production" ? "/operations/production" : "/operations/stock-operations"
 }
 
+function transactionSummary(row: any) {
+  if (!row.lines?.length) return "暂无物料变化"
+  const first = row.lines[0]
+  const direction = first.quantity_change > 0 ? "入库" : "出库"
+  const quantity = first.kind === "PRODUCT"
+    ? productQty(Math.abs(first.quantity_change))
+    : qty(Math.abs(first.quantity_change))
+  return `${first.name} ${direction} ${quantity}${row.lines.length > 1 ? ` 等 ${row.lines.length} 项` : ""}`
+}
+
 onMounted(load)
 useLiveRefresh(() => load(true))
 </script>
@@ -176,15 +186,7 @@ useLiveRefresh(() => load(true))
           </el-table-column>
           <el-table-column label="物料变化" min-width="230">
             <template #default="{ row }">
-              <div class="tx-lines">
-                <span v-for="line in row.lines" :key="line.id" class="tx-line">
-                  {{ line.name }}
-                  <b>{{ line.quantity_change > 0 ? '入库' : '出库' }}</b>
-                  {{ line.kind === 'PRODUCT'
-                    ? productQty(Math.abs(line.quantity_change))
-                    : qty(Math.abs(line.quantity_change)) }}
-                </span>
-              </div>
+              <span>{{ transactionSummary(row) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="时间" width="165">

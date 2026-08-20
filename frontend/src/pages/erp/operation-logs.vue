@@ -80,7 +80,7 @@ useLiveRefresh(() => load(true))
           <el-icon><Refresh /></el-icon>刷新
         </el-button>
       </div>
-      <el-alert title="系统自动记录登录及各类业务操作的发起用户、客户端 IP 与请求路径。" type="info" :closable="false" show-icon style="flex:1;max-width:420px" />
+      <!-- <el-alert title="系统自动记录登录及各类业务操作的发起用户、客户端 IP 与请求路径。" type="info" :closable="false" show-icon style="flex:1;max-width:420px" /> -->
     </div>
     <div class="content-card">
       <div class="card-head">

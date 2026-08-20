@@ -49,6 +49,7 @@ class ProductPayload(BaseModel):
     cost_price: float = Field(default=0, ge=0)
     sale_price: float = Field(default=0, ge=0)
     min_stock: int = Field(default=0, ge=0)
+    daily_capacity: int = Field(default=0, ge=0)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
