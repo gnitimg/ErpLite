@@ -6,7 +6,16 @@ from fastapi import HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .models import InventoryItem, OperationLog, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
+from .models import (
+    InventoryItem,
+    OperationLog,
+    ProductBomItem,
+    SalesOrder,
+    SalesOrderItem,
+    StockReservation,
+    StockTransaction,
+    StockTransactionItem,
+)
 
 
 _logger = logging.getLogger("uvicorn.error")
@@ -128,6 +137,12 @@ def order_dict(order: SalesOrder) -> dict:
         "order_date": order.order_date.isoformat(),
         "required_date": (order.required_date or order.order_date).isoformat(),
         "total_amount": order.total_amount,
+        "estimated_completion_at": (
+            order.estimated_completion_at.isoformat() if order.estimated_completion_at else None
+        ),
+        "eta_calculated_at": order.eta_calculated_at.isoformat() if order.eta_calculated_at else None,
+        "eta_reliable": order.eta_reliable,
+        "eta_note": order.eta_note,
         "notes": order.notes,
         "created_at": order.created_at.isoformat(),
         "items": [
@@ -141,6 +156,12 @@ def order_dict(order: SalesOrder) -> dict:
                 "reference_price": line.reference_price,
                 "unit_price": line.unit_price,
                 "line_total": line.line_total,
+                "production_required_quantity": line.production_required_quantity or 0,
+                "estimated_completion_at": (
+                    line.estimated_completion_at.isoformat() if line.estimated_completion_at else None
+                ),
+                "eta_reliable": line.eta_reliable,
+                "eta_note": line.eta_note,
                 "discount_rate": round((line.unit_price / line.reference_price * 100) if line.reference_price else 100, 2),
                 "discount_amount": round(max(line.reference_price - line.unit_price, 0) * line.quantity, 2),
             }
@@ -263,6 +284,20 @@ RESERVATION_STATUSES = ("CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP")
 
 def rebalance_product_reservations(db: Session, product_ids: set[int] | None = None) -> None:
     """按要求交期、订单日期、订单号的顺序，将现有成品库存分配给所有活动客单。"""
+    if product_ids is None:
+        product_ids = set(db.scalars(
+            select(SalesOrderItem.product_id)
+            .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+            .where(SalesOrder.status.in_(RESERVATION_STATUSES))
+            .distinct()
+        ).all())
+    if product_ids and db.bind and db.bind.dialect.name != "sqlite":
+        db.scalars(
+            select(InventoryItem)
+            .where(InventoryItem.id.in_(sorted(product_ids)))
+            .order_by(InventoryItem.id)
+            .with_for_update()
+        ).all()
     query = (
         select(SalesOrderItem)
         .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
@@ -272,11 +307,30 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
     )
     if product_ids:
         query = query.where(SalesOrderItem.product_id.in_(product_ids))
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
     lines = db.scalars(query).all()
+    line_ids = [line.id for line in lines]
+    reservations = {
+        reservation.order_item_id: reservation
+        for reservation in db.scalars(
+            select(StockReservation).where(StockReservation.order_item_id.in_(line_ids))
+        ).all()
+    } if line_ids else {}
     remaining: dict[int, float] = {}
     for line in lines:
         available = remaining.setdefault(line.product_id, float(line.product.stock_qty))
-        line.reserved_quantity = round(min(float(line.quantity), max(available, 0)), 6)
+        reserved_quantity = int(min(int(line.quantity), max(available, 0)))
+        line.reserved_quantity = reserved_quantity
+        reservation = reservations.get(line.id)
+        if reservation is None:
+            reservation = StockReservation(
+                order_item_id=line.id,
+                product_id=line.product_id,
+            )
+            db.add(reservation)
+        reservation.quantity = reserved_quantity
+        reservation.status = "ACTIVE" if reserved_quantity > 1e-9 else "RELEASED"
         remaining[line.product_id] = available - line.reserved_quantity
     affected_orders = {line.order_id for line in lines}
     if product_ids:
@@ -299,9 +353,14 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
 
 def reserved_product_quantity(db: Session, product_id: int, exclude_order_id: int | None = None) -> float:
     query = (
-        select(func.coalesce(func.sum(SalesOrderItem.reserved_quantity), 0))
+        select(func.coalesce(func.sum(StockReservation.quantity), 0))
+        .join(SalesOrderItem, SalesOrderItem.id == StockReservation.order_item_id)
         .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
-        .where(SalesOrderItem.product_id == product_id, SalesOrder.status.in_(RESERVATION_STATUSES))
+        .where(
+            StockReservation.product_id == product_id,
+            StockReservation.status == "ACTIVE",
+            SalesOrder.status.in_(RESERVATION_STATUSES),
+        )
     )
     if exclude_order_id is not None:
         query = query.where(SalesOrderItem.order_id != exclude_order_id)
@@ -339,6 +398,11 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
             "priority_rank": priority_rank,
             "priority_total": len(priority_rows),
             "waiting_for_earlier_orders": priority_rank > 1 and production_required > 1e-9,
+            "estimated_completion_at": (
+                line.estimated_completion_at.isoformat() if line.estimated_completion_at else None
+            ),
+            "eta_reliable": line.eta_reliable,
+            "eta_note": line.eta_note,
         })
         if production_required <= 1e-9:
             continue
@@ -399,6 +463,12 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
         "product_lines": product_lines,
         "material_lines": material_lines,
         "missing_bom": missing_bom,
+        "estimated_completion_at": (
+            order.estimated_completion_at.isoformat() if order.estimated_completion_at else None
+        ),
+        "eta_calculated_at": order.eta_calculated_at.isoformat() if order.eta_calculated_at else None,
+        "eta_reliable": order.eta_reliable,
+        "eta_note": order.eta_note,
     }
 
 
@@ -465,7 +535,15 @@ def prepare_order_stock(db: Session, order: SalesOrder) -> dict:
     }
 
 
-def release_order_reservations(order: SalesOrder) -> None:
+def release_order_reservations(db: Session, order: SalesOrder) -> None:
+    line_ids = [line.id for line in order.items]
+    if line_ids:
+        reservations = db.scalars(
+            select(StockReservation).where(StockReservation.order_item_id.in_(line_ids))
+        ).all()
+        for reservation in reservations:
+            reservation.quantity = 0
+            reservation.status = "RELEASED"
     for line in order.items:
         line.reserved_quantity = 0
 

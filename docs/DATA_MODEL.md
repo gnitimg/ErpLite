@@ -8,7 +8,7 @@
 2. 产品组成由 `product_bom_items` 保存；每行表示生产 1 单位产品所需的零件数量。
 3. `inventory_items.stock_qty` 是快速读取的实时结存，但任何修改必须和 `stock_transactions`、`stock_transaction_items` 流水在同一数据库事务中完成。
 4. 产品生产入库是一笔复合流水：成品为正数，BOM 零件按“入库数量 × 单台用量”为负数；任何零件不足时整笔失败。
-5. 客单确认后按要求交期预留成品库存；点击“出库”时统一校验并扣减已预留成品，成功后客单进入 `FULFILLED`。
+5. 客单确认后按要求交期创建 `stock_reservations` 成品预留；点击“出库”时统一校验并扣减已预留成品，成功后客单进入 `FULFILLED`。
 6. 当前版本禁止负库存。已产生业务历史的物料采用停用而非物理删除。
 7. 同一笔库存业务涉及的全部物料按 ID 固定顺序加行锁，结存和流水在同一事务中写入。
 
@@ -24,7 +24,27 @@
 
 ### `sales_orders` / `sales_order_items`
 
-客户订单头与产品明细。状态流转为 `DRAFT → CONFIRMED / WAITING_MATERIALS → READY_TO_SHIP → FULFILLED`，未完结状态可转为 `CANCELLED`。明细保存参考价、本单成交价和预留数量。
+客户订单头与产品明细。状态流转为 `DRAFT → CONFIRMED / WAITING_MATERIALS → READY_TO_SHIP → FULFILLED`，未完结状态可转为 `CANCELLED`。订单和明细缓存预计完成时间、计算时间、可靠性和原因；缓存可由生产计划重建。
+
+### `stock_reservations`
+
+已确认客单的成品库存预留。`inventory_items.stock_qty` 继续表示物理结存，预留不直接扣减它。可承诺库存等于物理结存减去其他有效预留；每条客单明细最多一条权威预留记录。
+
+### `production_lines` / `molds` / `product_molds`
+
+生产线和模具是独立物理资源。`product_molds` 表达产品可使用的多套模具；同一模具同一时刻只能被一个生产批次占用。
+
+### `production_capabilities`
+
+按 `product_id + line_id + mold_id` 联合唯一，保存标称日产和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，产品表遗留的 `daily_capacity` 不参与排产。
+
+### `production_runs`
+
+按产品合并后的连续生产段，保存产品、生产线、模具、计划/实际数量、计划/实际时间和执行状态。它不直接归属于客单；生产线与模具的占用时间轴由运行中的批次和模拟计划共同形成。
+
+### `production_allocations`
+
+把 `production_runs` 的产量分配到 `sales_order_items`。同一连续批次可以服务多个客单，`sequence` 表示累计产出优先满足顺序，明细 ETA 是累计供给达到该订单所需数量的时刻，而不是统一使用批次结束时间。
 
 ### `stock_transactions` / `stock_transaction_items`
 
@@ -35,5 +55,5 @@
 - 多仓库：增加 `warehouses`，将 `stock_qty` 拆到 `stock_balances(item_id, warehouse_id)`。
 - 批次/序列号：在流水明细增加批次或序列号维度。
 - 采购管理：新增供应商、采购单，入库流水关联采购单。
-- 预占库存：为已确认客单增加 reservation 表，区分账面库存和可用库存。
+- 智能排产：在保留现有可解释启发式的基础上，可后续增加插单阈值、换模时间和 OR-Tools 优化器。
 - 多实例与云数据库：调整 `.env` 中的 MySQL 主机、端口与账号即可，业务 API 不变。

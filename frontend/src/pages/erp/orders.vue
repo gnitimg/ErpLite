@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
+import { api, formatTime, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -118,7 +118,7 @@ async function openWorkflow(row: any) {
   }
 }
 async function action(row: any, type: "confirm" | "prepare" | "fulfill" | "cancel") {
-  const labels = { confirm: "确认客单并检查库存", prepare: "重新检查零件并完成生产备货", fulfill: "确认产品出库", cancel: "取消客单" }
+  const labels = { confirm: "确认客单、预留库存并计算 ETA", prepare: "重新计算生产计划", fulfill: "确认产品出库", cancel: "取消客单" }
   try {
     await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, "客单操作", { type: type === "cancel" ? "warning" : "info" })
     await api(`/api/orders/${row.id}/${type}`, { method: "POST" })
@@ -170,6 +170,14 @@ useLiveRefresh(async () => {
         </el-table-column>
         <el-table-column prop="order_date" label="订单日期" width="115" />
         <el-table-column prop="required_date" label="要求交期" width="115" />
+        <el-table-column label="预计完成" width="170">
+          <template #default="{ row }">
+            <div v-if="row.estimated_completion_at" class="sku-cell">
+              <strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatTime(row.estimated_completion_at) }}</strong>
+              <span>{{ row.eta_reliable ? '当前可承诺' : '仅机器排程参考' }}</span>
+            </div><span v-else class="muted">待确认 / 待配置产能</span>
+          </template>
+        </el-table-column>
         <el-table-column label="产品数" width="90" align="right">
           <template #default="{ row }">
             {{ row.items.length }} 项
@@ -247,10 +255,10 @@ useLiveRefresh(async () => {
           </div>
           <div v-if="activeOrder" class="order-workspace-actions">
             <el-button v-if="activeOrder.status === 'DRAFT'" type="primary" @click="action(activeOrder, 'confirm')">
-              确认并检查库存
+              确认并计算 ETA
             </el-button>
             <el-button v-if="activeOrder.status === 'WAITING_MATERIALS'" type="primary" @click="action(activeOrder, 'prepare')">
-              重新检查并生产
+              重算生产计划
             </el-button>
             <el-button v-if="activeOrder.status === 'READY_TO_SHIP'" type="success" @click="action(activeOrder, 'fulfill')">
               确认产品出库
@@ -274,6 +282,10 @@ useLiveRefresh(async () => {
                   <strong>{{ statusMap[activeOrder.status]?.label || activeOrder.status }}</strong>
                 </div>
                 <div><span>要求交期</span><strong>{{ activeOrder.required_date }}</strong></div>
+                <div>
+                  <span>预计完成</span>
+                  <strong :class="workflow?.eta_reliable ? '' : 'number-negative'">{{ formatTime(workflow?.estimated_completion_at) }}</strong>
+                </div>
                 <div><span>产品数量</span><strong>{{ productQty(orderedQuantity) }}</strong></div>
                 <div><span>订单金额</span><strong>{{ money(activeOrder.total_amount) }}</strong></div>
               </div>
@@ -298,6 +310,13 @@ useLiveRefresh(async () => {
               <div v-if="workflow" class="detail-section-head">
                 <strong>当前处理建议</strong><span>根据库存、交期和 BOM 自动判断</span>
               </div>
+              <el-alert
+                v-if="workflow && !workflow.eta_reliable"
+                :title="workflow.eta_note || '当前预计完成时间缺少可靠生产条件，仅供内部参考。'"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
               <div v-if="workflow" class="next-action-card">
                 <div class="next-action-icon">
                   <el-icon><Guide /></el-icon>
@@ -424,6 +443,10 @@ useLiveRefresh(async () => {
                 </el-table-column><el-table-column label="需生产" width="120" align="right">
                   <template #default="{ row }">
                     <b :class="row.production_required ? 'number-negative' : ''">{{ productQty(row.production_required) }}</b>
+                  </template>
+                </el-table-column><el-table-column label="预计满足" width="170">
+                  <template #default="{ row }">
+                    <div class="sku-cell"><strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatTime(row.estimated_completion_at) }}</strong><span>{{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}</span></div>
                   </template>
                 </el-table-column>
               </el-table>

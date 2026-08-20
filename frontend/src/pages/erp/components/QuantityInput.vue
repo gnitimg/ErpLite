@@ -1,33 +1,35 @@
 <script setup lang="ts">
-import { ref, watch } from "vue"
-import { compactQty } from "../api"
+import { ref, watch } from 'vue'
+import { compactQty } from '../api'
 
 const props = withDefaults(defineProps<{
   modelValue: number
   integer?: boolean
   min?: number
   unit?: string
+  disabled?: boolean
 }>(), {
   integer: false,
   min: 0,
-  unit: ""
+  unit: '',
+  disabled: false,
 })
 
 const emit = defineEmits<{
-  "update:modelValue": [value: number]
+  'update:modelValue': [value: number]
 }>()
 
 const focused = ref(false)
-const displayValue = ref("")
+const displayValue = ref('')
 
 function format(value: number) {
   return compactQty(value, props.integer ? 0 : 3)
 }
 
 function parse(value: string) {
-  const text = value.trim().replaceAll(",", "").replaceAll("，", "")
-  const multiplier = text.endsWith("万") ? 10000 : 1
-  const number = Number(text.replace(/万$/, "")) * multiplier
+  const text = value.trim().replaceAll(',', '').replaceAll('，', '')
+  const multiplier = text.endsWith('万') ? 10000 : 1
+  const number = Number(text.replace(/万$/, '')) * multiplier
   if (!Number.isFinite(number)) return props.modelValue
   const normalized = props.integer ? Math.round(number) : Math.round(number * 1000) / 1000
   return Math.max(normalized, props.min)
@@ -39,7 +41,7 @@ function syncDisplay() {
 
 function onInput(value: string) {
   displayValue.value = value
-  emit("update:modelValue", parse(value))
+  emit('update:modelValue', parse(value))
 }
 
 function onFocus() {
@@ -50,7 +52,7 @@ function onFocus() {
 function onBlur() {
   focused.value = false
   const value = parse(displayValue.value)
-  emit("update:modelValue", value)
+  emit('update:modelValue', value)
   displayValue.value = format(value)
 }
 
@@ -59,20 +61,19 @@ watch(
   () => {
     if (!focused.value) syncDisplay()
   },
-  { immediate: true }
+  { immediate: true },
 )
 </script>
 
 <template>
   <el-input
     :model-value="displayValue"
+    :disabled="disabled"
     inputmode="decimal"
     @blur="onBlur"
     @focus="onFocus"
     @update:model-value="onInput"
   >
-    <template v-if="unit" #append>
-      {{ unit }}
-    </template>
+    <template v-if="unit" #append>{{ unit }}</template>
   </el-input>
 </template>

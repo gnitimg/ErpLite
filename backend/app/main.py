@@ -21,11 +21,16 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
-from .database import Base, SessionLocal, engine, ensure_schema_compatibility, get_db
+from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
     InventoryItem,
     OperationLog,
+    Mold,
     ProductBomItem,
+    ProductMold,
+    ProductionCapability,
+    ProductionLine,
+    ProductionRun,
     SalesOrder,
     SalesOrderItem,
     StockTransaction,
@@ -38,9 +43,14 @@ from .schemas import (
     OrderStockPayload,
     PartPayload,
     ProductPayload,
+    MoldPayload,
+    ProductionCapabilityPayload,
+    ProductionLinePayload,
+    ProductionRunStatusPayload,
     SamplePayload,
     StockPayload,
 )
+from .planning import list_production_runs, recalculate_production_plan
 from .services import (
     create_transaction,
     client_ip,
@@ -50,7 +60,6 @@ from .services import (
     operation_log_dict,
     order_dict,
     order_workflow_dict,
-    prepare_order_stock,
     rebalance_product_reservations,
     release_order_reservations,
     reserved_product_quantity,
@@ -67,8 +76,7 @@ BomStatus = Literal["CONFIGURED", "EMPTY"]
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     try:
-        Base.metadata.create_all(bind=engine)
-        ensure_schema_compatibility()
+        run_migrations()
         if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
             with SessionLocal() as db:
                 seed_demo(db)
@@ -197,6 +205,16 @@ def operation_action(path: str, method: str) -> str:
         )
     if path.startswith("/api/samples"):
         return "调整样品库存"
+    if path.startswith("/api/production/plan"):
+        return "重算生产计划"
+    if path.startswith("/api/production/runs"):
+        return "更新生产批次"
+    if path.startswith("/api/production/lines"):
+        return "维护生产线"
+    if path.startswith("/api/production/molds"):
+        return "维护模具"
+    if path.startswith("/api/production/capabilities"):
+        return "维护生产能力"
     if path.startswith("/api/backups"):
         return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
     return f"{method} 操作"
@@ -591,6 +609,247 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+def production_line_dict(line: ProductionLine) -> dict:
+    return {
+        "id": line.id,
+        "code": line.code,
+        "name": line.name,
+        "active": line.active,
+        "created_at": line.created_at.isoformat(),
+        "updated_at": line.updated_at.isoformat(),
+    }
+
+
+def mold_dict(mold: Mold) -> dict:
+    return {
+        "id": mold.id,
+        "code": mold.code,
+        "name": mold.name,
+        "active": mold.active,
+        "created_at": mold.created_at.isoformat(),
+        "updated_at": mold.updated_at.isoformat(),
+    }
+
+
+def capability_dict(capability: ProductionCapability) -> dict:
+    return {
+        "id": capability.id,
+        "product_id": capability.product_id,
+        "product_sku": capability.product.sku,
+        "product_name": capability.product.name,
+        "line_id": capability.line_id,
+        "line_code": capability.line.code,
+        "line_name": capability.line.name,
+        "mold_id": capability.mold_id,
+        "mold_code": capability.mold.code,
+        "mold_name": capability.mold.name,
+        "nominal_daily_capacity": capability.nominal_daily_capacity,
+        "safety_factor": capability.safety_factor,
+        "effective_daily_capacity": round(
+            capability.nominal_daily_capacity * capability.safety_factor, 6
+        ),
+        "active": capability.active,
+    }
+
+
+@app.get("/api/production/lines")
+def production_lines(db: Session = Depends(get_db)):
+    return [
+        production_line_dict(row)
+        for row in db.scalars(select(ProductionLine).order_by(ProductionLine.code)).all()
+    ]
+
+
+@app.post("/api/production/lines", status_code=201)
+def create_production_line(payload: ProductionLinePayload, db: Session = Depends(get_db)):
+    code = payload.code.upper()
+    if db.scalar(select(ProductionLine.id).where(ProductionLine.code == code)):
+        raise HTTPException(409, "生产线编码已存在")
+    row = ProductionLine(code=code, name=payload.name, active=payload.active)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return production_line_dict(row)
+
+
+@app.put("/api/production/lines/{line_id}")
+def update_production_line(
+    line_id: int,
+    payload: ProductionLinePayload,
+    db: Session = Depends(get_db),
+):
+    row = db.get(ProductionLine, line_id)
+    if not row:
+        raise HTTPException(404, "生产线不存在")
+    code = payload.code.upper()
+    duplicate = db.scalar(select(ProductionLine.id).where(
+        ProductionLine.code == code,
+        ProductionLine.id != line_id,
+    ))
+    if duplicate:
+        raise HTTPException(409, "生产线编码已存在")
+    row.code, row.name, row.active = code, payload.name, payload.active
+    recalculate_production_plan(db)
+    db.commit()
+    return production_line_dict(row)
+
+
+@app.get("/api/production/molds")
+def molds(db: Session = Depends(get_db)):
+    return [mold_dict(row) for row in db.scalars(select(Mold).order_by(Mold.code)).all()]
+
+
+@app.post("/api/production/molds", status_code=201)
+def create_mold(payload: MoldPayload, db: Session = Depends(get_db)):
+    code = payload.code.upper()
+    if db.scalar(select(Mold.id).where(Mold.code == code)):
+        raise HTTPException(409, "模具编码已存在")
+    row = Mold(code=code, name=payload.name, active=payload.active)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return mold_dict(row)
+
+
+@app.put("/api/production/molds/{mold_id}")
+def update_mold(mold_id: int, payload: MoldPayload, db: Session = Depends(get_db)):
+    row = db.get(Mold, mold_id)
+    if not row:
+        raise HTTPException(404, "模具不存在")
+    code = payload.code.upper()
+    duplicate = db.scalar(select(Mold.id).where(Mold.code == code, Mold.id != mold_id))
+    if duplicate:
+        raise HTTPException(409, "模具编码已存在")
+    row.code, row.name, row.active = code, payload.name, payload.active
+    recalculate_production_plan(db)
+    db.commit()
+    return mold_dict(row)
+
+
+def load_capability(db: Session, capability_id: int) -> ProductionCapability:
+    row = db.scalar(
+        select(ProductionCapability)
+        .where(ProductionCapability.id == capability_id)
+        .options(
+            selectinload(ProductionCapability.product),
+            selectinload(ProductionCapability.line),
+            selectinload(ProductionCapability.mold),
+        )
+    )
+    if not row:
+        raise HTTPException(404, "生产能力配置不存在")
+    return row
+
+
+@app.get("/api/production/capabilities")
+def production_capabilities(db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(ProductionCapability)
+        .options(
+            selectinload(ProductionCapability.product),
+            selectinload(ProductionCapability.line),
+            selectinload(ProductionCapability.mold),
+        )
+        .order_by(ProductionCapability.product_id, ProductionCapability.id)
+    ).all()
+    return [capability_dict(row) for row in rows]
+
+
+def save_capability(
+    db: Session,
+    payload: ProductionCapabilityPayload,
+    row: ProductionCapability | None = None,
+) -> ProductionCapability:
+    product = find_item(db, payload.product_id, "PRODUCT")
+    line = db.get(ProductionLine, payload.line_id)
+    mold = db.get(Mold, payload.mold_id)
+    if not line or not mold:
+        raise HTTPException(400, "生产线或模具不存在")
+    duplicate = select(ProductionCapability.id).where(
+        ProductionCapability.product_id == product.id,
+        ProductionCapability.line_id == line.id,
+        ProductionCapability.mold_id == mold.id,
+    )
+    if row:
+        duplicate = duplicate.where(ProductionCapability.id != row.id)
+    if db.scalar(duplicate):
+        raise HTTPException(409, "该产品、生产线和模具的能力配置已存在")
+    association = db.scalar(select(ProductMold).where(
+        ProductMold.product_id == product.id,
+        ProductMold.mold_id == mold.id,
+    ))
+    if association is None:
+        db.add(ProductMold(product_id=product.id, mold_id=mold.id, active=True))
+    else:
+        association.active = True
+    values = payload.model_dump()
+    if row is None:
+        row = ProductionCapability(**values)
+        db.add(row)
+    else:
+        for key, value in values.items():
+            setattr(row, key, value)
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return load_capability(db, row.id)
+
+
+@app.post("/api/production/capabilities", status_code=201)
+def create_capability(payload: ProductionCapabilityPayload, db: Session = Depends(get_db)):
+    return capability_dict(save_capability(db, payload))
+
+
+@app.put("/api/production/capabilities/{capability_id}")
+def update_capability(
+    capability_id: int,
+    payload: ProductionCapabilityPayload,
+    db: Session = Depends(get_db),
+):
+    return capability_dict(save_capability(db, payload, load_capability(db, capability_id)))
+
+
+@app.delete("/api/production/capabilities/{capability_id}")
+def delete_capability(capability_id: int, db: Session = Depends(get_db)):
+    row = load_capability(db, capability_id)
+    row.active = False
+    recalculate_production_plan(db)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/production/runs")
+def production_runs(status: str | None = None, db: Session = Depends(get_db)):
+    return list_production_runs(db, status)
+
+
+@app.post("/api/production/plan/recalculate")
+def recalculate_plan(db: Session = Depends(get_db)):
+    result = recalculate_production_plan(db)
+    db.commit()
+    return result
+
+
+@app.put("/api/production/runs/{run_id}/status")
+def update_production_run_status(
+    run_id: int,
+    payload: ProductionRunStatusPayload,
+    db: Session = Depends(get_db),
+):
+    run = db.get(ProductionRun, run_id)
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status not in {"PLANNED", "RUNNING"}:
+        raise HTTPException(409, "该生产批次已结束，不能修改状态")
+    run.status = payload.status
+    if payload.status == "RUNNING" and run.actual_start_at is None:
+        run.actual_start_at = datetime.now()
+    if payload.status == "CANCELLED":
+        recalculate_production_plan(db)
+    db.commit()
+    return {"ok": True, "run_id": run_id, "status": run.status}
+
+
 @app.get("/api/inventory")
 def inventory(
     kind: str | None = None,
@@ -665,6 +924,15 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
         raise HTTPException(422, "产品入库数量必须为正整数")
     changes: list[tuple[InventoryItem, float, float]] = []
     tx_type = "PURCHASE_IN" if item.kind == "PART" else "MANUAL_IN"
+    production_run = None
+    if payload.production_run_id is not None:
+        production_run = db.get(ProductionRun, payload.production_run_id)
+        if not production_run or production_run.product_id != item.id:
+            raise HTTPException(400, "生产批次与所选产品不匹配")
+        if production_run.status not in {"PLANNED", "RUNNING"}:
+            raise HTTPException(409, "该生产批次已完成或取消")
+        if abs(float(payload.quantity) - float(production_run.planned_quantity)) > 1e-6:
+            raise HTTPException(422, "按计划完工时，入库数量必须等于批次计划数量")
     if item.kind == "PRODUCT" and payload.consume_bom:
         product = db.scalar(
             select(InventoryItem)
@@ -683,6 +951,12 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     if tx_type == "ASSEMBLY_IN":
         # Newly produced stock must immediately flow to confirmed orders by delivery priority.
         rebalance_product_reservations(db, {item.id})
+        if production_run:
+            production_run.produced_quantity = payload.quantity
+            production_run.status = "COMPLETED"
+            production_run.actual_start_at = production_run.actual_start_at or datetime.now()
+            production_run.actual_end_at = datetime.now()
+        recalculate_production_plan(db)
     db.commit()
     tx = db.scalar(
         select(StockTransaction)
@@ -706,6 +980,8 @@ def outbound(payload: StockPayload, db: Session = Depends(get_db)):
         if payload.quantity > free_stock + 1e-9:
             raise HTTPException(409, f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留")
     tx = create_transaction(db, "MANUAL_OUT", [(item, -payload.quantity, item.cost_price)], payload.notes)
+    if item.kind == "PRODUCT":
+        recalculate_production_plan(db)
     db.commit()
     tx = db.scalar(
         select(StockTransaction)
@@ -782,13 +1058,16 @@ def confirm_order(order_id: int, db: Session = Depends(get_db)):
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿客单可以确认")
     order.status = "CONFIRMED"
-    result = prepare_order_stock(db, order)
+    db.flush()
     rebalance_product_reservations(db, {line.product_id for line in order.items})
+    plan = recalculate_production_plan(db)
     db.commit()
     refreshed = load_order(db, order.id)
-    result["order"] = order_dict(refreshed)
-    result["workflow"] = order_workflow_dict(db, refreshed)
-    return result
+    return {
+        "order": order_dict(refreshed),
+        "workflow": order_workflow_dict(db, refreshed),
+        "plan": plan,
+    }
 
 
 @app.get("/api/orders/{order_id}/availability")
@@ -798,7 +1077,17 @@ def order_availability(order_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/orders/{order_id}/prepare")
 def prepare_order(order_id: int, db: Session = Depends(get_db)):
-    return prepare_order_stock(db, load_order(db, order_id))
+    order = load_order(db, order_id)
+    if order.status not in {"CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"}:
+        raise HTTPException(409, "只有已确认且未完结的客单可以重算计划")
+    plan = recalculate_production_plan(db)
+    db.commit()
+    refreshed = load_order(db, order_id)
+    return {
+        "order": order_dict(refreshed),
+        "workflow": order_workflow_dict(db, refreshed),
+        "plan": plan,
+    }
 
 
 @app.post("/api/orders/{order_id}/receive-materials")
@@ -817,7 +1106,15 @@ def receive_order_materials(
         raise HTTPException(409, "该客单产品尚未配置 BOM，请先完善产品组成")
     shortages = [row for row in workflow["material_lines"] if row["shortage_quantity"] > 1e-9]
     if not shortages:
-        return prepare_order_stock(db, order)
+        plan = recalculate_production_plan(db)
+        db.commit()
+        refreshed = load_order(db, order_id)
+        return {
+            "order": order_dict(refreshed),
+            "workflow": order_workflow_dict(db, refreshed),
+            "plan": plan,
+            "material_transaction_id": None,
+        }
 
     part_ids = [row["part_id"] for row in shortages]
     parts = {
@@ -837,10 +1134,15 @@ def receive_order_materials(
         payload.notes or f"客单 {order.order_no} 缺口零件入库",
         order.id,
     )
-    db.flush()
-    result = prepare_order_stock(db, order)
-    result["material_transaction_id"] = transaction.id
-    return result
+    plan = recalculate_production_plan(db)
+    db.commit()
+    refreshed = load_order(db, order_id)
+    return {
+        "order": order_dict(refreshed),
+        "workflow": order_workflow_dict(db, refreshed),
+        "plan": plan,
+        "material_transaction_id": transaction.id,
+    }
 
 
 @app.post("/api/orders/{order_id}/fulfill")
@@ -861,9 +1163,11 @@ def fulfill_order(order_id: int, db: Session = Depends(get_db)):
         f"客单 {order.order_no} 出库",
         order.id,
     )
-    release_order_reservations(order)
+    release_order_reservations(db, order)
     order.status = "FULFILLED"
+    db.flush()
     rebalance_product_reservations(db, product_ids)
+    recalculate_production_plan(db)
     db.commit()
     return {"order": order_dict(order), "transaction_id": tx.id}
 
@@ -874,9 +1178,11 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     if order.status in {"FULFILLED", "CANCELLED"}:
         raise HTTPException(409, "已完结客单不能取消")
     product_ids = {line.product_id for line in order.items}
-    release_order_reservations(order)
+    release_order_reservations(db, order)
     order.status = "CANCELLED"
+    db.flush()
     rebalance_product_reservations(db, product_ids)
+    recalculate_production_plan(db)
     db.commit()
     return order_dict(order)
 

@@ -3,6 +3,8 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -36,6 +38,17 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 class Base(DeclarativeBase):
     pass
+
+
+def run_migrations() -> None:
+    """执行正式 Alembic 迁移；已有旧库先补齐历史兼容列。"""
+    inspector = inspect(engine)
+    if "inventory_items" in inspector.get_table_names():
+        ensure_schema_compatibility()
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "backend" / "alembic"))
+    config.attributes["connection"] = engine
+    command.upgrade(config, "head")
 
 
 def ensure_schema_compatibility() -> None:

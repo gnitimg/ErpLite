@@ -11,7 +11,9 @@ const drawer = ref(false)
 const keyword = ref("")
 const products = ref<any[]>([])
 const recentRows = ref<any[]>([])
-const form = reactive({ item_id: undefined as number | undefined, quantity: 1, unit_cost: 0, notes: "" })
+const productionRuns = ref<any[]>([])
+const activeTab = ref("plan")
+const form = reactive({ item_id: undefined as number | undefined, quantity: 1, unit_cost: 0, notes: "", production_run_id: undefined as number | undefined })
 const selected = computed(() => products.value.find(row => row.id === form.item_id))
 const filteredProducts = computed(() => {
   const token = keyword.value.trim().toLowerCase()
@@ -27,13 +29,20 @@ const materialPreview = computed(() => selected.value?.components?.map((line: an
   remaining: Number(line.available_stock) - Number(line.quantity) * Number(form.quantity)
 })) || [])
 const canProduce = computed(() => selected.value?.components?.length && materialPreview.value.every((line: any) => line.remaining >= -1e-9))
+const runStatusMap: Record<string, string> = {
+  PLANNED: "待生产",
+  RUNNING: "生产中",
+  COMPLETED: "已完成",
+  CANCELLED: "已取消"
+}
 
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    [products.value, recentRows.value] = await Promise.all([
+    [products.value, recentRows.value, productionRuns.value] = await Promise.all([
       api("/api/products"),
-      api("/api/stock/transactions?transaction_type=ASSEMBLY_IN&limit=20")
+      api("/api/stock/transactions?transaction_type=ASSEMBLY_IN&limit=20"),
+      api("/api/production/runs")
     ])
   } catch (error: any) {
     ElMessage.error(error.message)
@@ -41,9 +50,15 @@ async function load(silent = false) {
     if (!silent) loading.value = false
   }
 }
-function openProduction(product?: any) {
+function openProduction(product?: any, run?: any) {
   const target = product || products.value[0]
-  Object.assign(form, { item_id: target?.id, quantity: 1, unit_cost: target?.cost_price || 0, notes: "" })
+  Object.assign(form, {
+    item_id: target?.id,
+    quantity: run ? Math.round(run.planned_quantity) : 1,
+    unit_cost: target?.cost_price || 0,
+    notes: run ? `完成排产批次 ${run.run_no}` : "",
+    production_run_id: run?.id
+  })
   drawer.value = true
 }
 function productChanged() {
@@ -67,6 +82,47 @@ async function save() {
     saving.value = false
   }
 }
+async function recalculate() {
+  loading.value = true
+  try {
+    const result = await api<any>("/api/production/plan/recalculate", { method: "POST" })
+    ElMessage.success(`生产计划已重算，共生成 ${result.created_run_count} 个批次`)
+    await load(true)
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    loading.value = false
+  }
+}
+async function startRun(run: any) {
+  try {
+    await api(`/api/production/runs/${run.id}/status`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "RUNNING" })
+    })
+    ElMessage.success(`${run.run_no} 已开始生产`)
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  }
+}
+async function cancelRun(run: any) {
+  try {
+    await ElMessageBox.confirm(`确定取消生产批次“${run.run_no}”吗？系统会立即重新计算其余客单 ETA。`, "取消生产批次", { type: "warning" })
+    await api(`/api/production/runs/${run.id}/status`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "CANCELLED" })
+    })
+    ElMessage.success(`${run.run_no} 已取消，生产计划已重算`)
+    await load()
+  } catch (error: any) {
+    if (error !== "cancel") ElMessage.error(error.message)
+  }
+}
+function completeRun(run: any) {
+  const product = products.value.find(row => row.id === run.product_id)
+  openProduction(product, run)
+}
 onMounted(load)
 useLiveRefresh(() => load(true))
 </script>
@@ -74,14 +130,33 @@ useLiveRefresh(() => load(true))
 <template>
   <div class="erp-page production-page">
     <ListToolbar v-model="keyword" placeholder="搜索待生产的产品编码、名称或规格" :loading="loading" @search="() => {}" @refresh="load">
+      <el-button @click="recalculate">
+        <el-icon><Refresh /></el-icon>重算生产计划
+      </el-button>
       <el-button type="primary" @click="openProduction()">
-        <el-icon><Tools /></el-icon>新建生产作业
+        <el-icon><Tools /></el-icon>手工生产入库
       </el-button>
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品生产</h3><span>按产品 BOM 领用零件并办理成品入库</span>
+        <h3>产品生产</h3><span>计划按同产品合批，生产线和模具占用不会重叠</span>
       </div>
+      <el-tabs v-model="activeTab">
+        <el-tab-pane name="plan" label="生产计划">
+          <el-table v-loading="loading" :data="productionRuns" empty-text="暂无生产计划；请先确认客单并维护生产资源">
+            <el-table-column label="批次 / 产品" min-width="210">
+              <template #default="{ row }"><div class="sku-cell"><strong>{{ row.product_name }}</strong><span class="mono">{{ row.run_no }} · {{ row.product_sku }}</span></div></template>
+            </el-table-column>
+            <el-table-column label="资源" min-width="190"><template #default="{ row }"><div class="sku-cell"><strong>{{ row.line_code }} · {{ row.line_name }}</strong><span>{{ row.mold_code }} · {{ row.mold_name }} · 有效日产 {{ productQty(row.effective_daily_capacity) }}</span></div></template></el-table-column>
+            <el-table-column label="计划数量" width="115" align="right"><template #default="{ row }"><b>{{ productQty(row.planned_quantity) }}</b> {{ row.unit }}</template></el-table-column>
+            <el-table-column label="预计开始" width="170"><template #default="{ row }">{{ formatTime(row.planned_start_at) }}</template></el-table-column>
+            <el-table-column label="预计完成" width="170"><template #default="{ row }">{{ formatTime(row.planned_end_at) }}</template></el-table-column>
+            <el-table-column label="订单分配" min-width="210"><template #default="{ row }"><div class="tx-lines"><el-tag v-for="allocation in row.allocations" :key="allocation.id" size="small" effect="plain">{{ allocation.order_no }} · {{ productQty(allocation.quantity) }}</el-tag></div></template></el-table-column>
+            <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="row.status === 'RUNNING' ? 'warning' : row.status === 'COMPLETED' ? 'success' : row.status === 'CANCELLED' ? 'info' : 'primary'" size="small">{{ runStatusMap[row.status] || row.status }}</el-tag></template></el-table-column>
+            <el-table-column label="操作" width="170" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'PLANNED'" link type="primary" @click="startRun(row)">开始</el-button><el-button v-if="row.status === 'RUNNING'" link type="success" @click="completeRun(row)">完成入库</el-button><el-button v-if="['PLANNED', 'RUNNING'].includes(row.status)" link type="danger" @click="cancelRun(row)">取消</el-button><span v-if="['COMPLETED', 'CANCELLED'].includes(row.status)" class="muted">已结束</span></template></el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane name="manual" label="产品与 BOM">
       <el-table v-loading="loading" :data="filteredProducts" empty-text="暂无可生产产品">
         <el-table-column label="产品" min-width="210">
           <template #default="{ row }">
@@ -130,6 +205,8 @@ useLiveRefresh(() => load(true))
           </template>
         </el-table-column>
       </el-table>
+        </el-tab-pane>
+      </el-tabs>
     </div>
     <div class="content-card production-history">
       <div class="card-head">
@@ -179,10 +256,10 @@ useLiveRefresh(() => load(true))
       </el-table>
     </div>
 
-    <el-drawer v-model="drawer" title="新建产品生产作业" size="min(720px, 96vw)">
+    <el-drawer v-model="drawer" :title="form.production_run_id ? '完成排产批次并入库' : '新建手工生产作业'" size="min(720px, 96vw)">
       <el-form label-position="top">
         <el-form-item label="生产产品" required>
-          <el-select v-model="form.item_id" filterable placeholder="选择已配置 BOM 的产品" style="width:100%" @change="productChanged">
+          <el-select v-model="form.item_id" filterable :disabled="Boolean(form.production_run_id)" placeholder="选择已配置 BOM 的产品" style="width:100%" @change="productChanged">
             <el-option
               v-for="product in products"
               :key="product.id"
@@ -194,7 +271,7 @@ useLiveRefresh(() => load(true))
         </el-form-item>
         <div class="form-grid">
           <el-form-item label="生产数量" required>
-            <QuantityInput v-model="form.quantity" integer :min="1" :unit="selected?.unit" />
+            <QuantityInput v-model="form.quantity" integer :min="1" :unit="selected?.unit" :disabled="Boolean(form.production_run_id)" />
           </el-form-item><el-form-item label="成品单位成本">
             <el-input-number v-model="form.unit_cost" :min="0" :precision="2" :controls="false" style="width:100%" />
           </el-form-item>

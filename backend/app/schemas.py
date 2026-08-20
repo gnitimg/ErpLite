@@ -49,7 +49,6 @@ class ProductPayload(BaseModel):
     cost_price: float = Field(default=0, ge=0)
     sale_price: float = Field(default=0, ge=0)
     min_stock: int = Field(default=0, ge=0)
-    daily_capacity: int = Field(default=0, ge=0)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -75,6 +74,7 @@ class StockPayload(BaseModel):
     unit_cost: float = Field(default=0, ge=0)
     notes: str = Field(default="", max_length=500)
     consume_bom: bool = True
+    production_run_id: int | None = None
 
 
 class OrderStockPayload(BaseModel):
@@ -119,3 +119,44 @@ class OrderPayload(BaseModel):
         if value and order_date and value < order_date:
             raise ValueError("要求交期不能早于订单日期")
         return value
+
+
+class ProductionLinePayload(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=120)
+    active: bool = True
+
+    @field_validator("code", "name")
+    @classmethod
+    def strip_line_text(cls, value: str):
+        value = value.strip()
+        if not value:
+            raise ValueError("不能为空")
+        return value
+
+
+class MoldPayload(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=120)
+    active: bool = True
+
+    @field_validator("code", "name")
+    @classmethod
+    def strip_mold_text(cls, value: str):
+        value = value.strip()
+        if not value:
+            raise ValueError("不能为空")
+        return value
+
+
+class ProductionCapabilityPayload(BaseModel):
+    product_id: int
+    line_id: int
+    mold_id: int
+    nominal_daily_capacity: int = Field(gt=0)
+    safety_factor: float = Field(default=0.85, gt=0, le=1)
+    active: bool = True
+
+
+class ProductionRunStatusPayload(BaseModel):
+    status: Literal["RUNNING", "CANCELLED"]

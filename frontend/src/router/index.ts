@@ -100,6 +100,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "产品目录", elIcon: "Box", keepAlive: true }
       },
       {
+        path: "production-resources",
+        component: () => import("@/pages/erp/production-resources.vue"),
+        name: "ProductionResources",
+        meta: { title: "生产资源", elIcon: "SetUp", keepAlive: true }
+      },
+      {
         path: "samples",
         redirect: "/warehouse/samples",
         meta: { hidden: true }

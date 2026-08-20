@@ -32,6 +32,16 @@ function Wait-ForMySql {
   throw "Local MySQL did not start. Check $ErrorLog"
 }
 
+function Wait-ForMySqlStop {
+  for ($attempt = 0; $attempt -lt 80; $attempt++) {
+    $process = Get-LocalMySqlProcess
+    $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if (-not $process -and -not $connection) { return }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "Local MySQL did not stop completely. Check $ErrorLog"
+}
+
 function Repair-UndoFiles {
   Get-ChildItem -LiteralPath $DataDir -Filter "undo_*" -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
@@ -40,7 +50,14 @@ function Repair-UndoFiles {
 switch ($Action) {
   "start" {
     $running = Get-LocalMySqlProcess
-    if ($running) { Write-Host "Local MySQL is already running (PID $($running.Id), port $Port)."; break }
+    if ($running) {
+      $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+      if ($connection) {
+        Write-Host "Local MySQL is already running (PID $($running.Id), port $Port)."
+        break
+      }
+      Wait-ForMySqlStop
+    }
 
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
     @(
@@ -89,6 +106,7 @@ switch ($Action) {
       $env:MYSQL_PWD = "LocalRoot@2026!"
       try { & (Join-Path (Split-Path -Parent $MysqlExe) "mysqladmin.exe") --protocol=TCP --host=127.0.0.1 --port=$Port --user=root shutdown }
       finally { $env:MYSQL_PWD = $oldPassword }
+      Wait-ForMySqlStop
       Write-Host "Local MySQL stopped." -ForegroundColor Yellow
     }
     else { Write-Host "Local MySQL is not running." }

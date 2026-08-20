@@ -80,7 +80,7 @@ def main() -> None:
         assert waiting_result["workflow"]["next_action"] == "WAIT_PRIORITY"
         assert product.stock_qty == 0
 
-        release_order_reservations(earlier)
+        release_order_reservations(db, earlier)
         earlier.status = "CANCELLED"
         product.stock_qty = 1
         rebalance_product_reservations(db, {product.id})

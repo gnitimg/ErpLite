@@ -10,27 +10,56 @@ from sqlalchemy import Date, DateTime
 from sqlalchemy.orm import Session
 
 from .database import PROJECT_ROOT
-from .models import InventoryItem, OperationLog, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
+from .models import (
+    InventoryItem,
+    Mold,
+    OperationLog,
+    ProductBomItem,
+    ProductMold,
+    ProductionAllocation,
+    ProductionCapability,
+    ProductionLine,
+    ProductionRun,
+    SalesOrder,
+    SalesOrderItem,
+    StockReservation,
+    StockTransaction,
+    StockTransactionItem,
+)
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 4
+BACKUP_SCHEMA_VERSION = 5
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
     ProductBomItem.__table__,
     SalesOrderItem.__table__,
+    ProductionLine.__table__,
+    Mold.__table__,
+    ProductMold.__table__,
+    ProductionCapability.__table__,
+    StockReservation.__table__,
+    ProductionRun.__table__,
+    ProductionAllocation.__table__,
     StockTransaction.__table__,
     StockTransactionItem.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    ProductionAllocation.__table__,
     StockTransactionItem.__table__,
     OperationLog.__table__,
+    StockReservation.__table__,
+    ProductionRun.__table__,
+    ProductionCapability.__table__,
+    ProductMold.__table__,
     ProductBomItem.__table__,
     SalesOrderItem.__table__,
     StockTransaction.__table__,
     SalesOrder.__table__,
+    Mold.__table__,
+    ProductionLine.__table__,
     InventoryItem.__table__,
 )
 
@@ -72,7 +101,7 @@ def _load_archive(path: Path) -> dict[str, Any]:
         raise BackupError("备份文件已损坏或格式不正确") from error
 
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3, BACKUP_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, 4, BACKUP_SCHEMA_VERSION}:
         raise BackupError("备份版本与当前系统不兼容")
     if not isinstance(payload.get("created_at"), str):
         raise BackupError("备份缺少有效的创建时间")
@@ -81,20 +110,48 @@ def _load_archive(path: Path) -> dict[str, Any]:
     tables = payload.get("tables")
     if not isinstance(tables, dict):
         raise BackupError("备份缺少数据表内容")
-    # 兼容流程改造前生成的 v1/v2 快照，并为新增字段提供安全默认值。
-    if schema_version in {1, 2, 3}:
+    # 兼容流程和 ETA 改造前的快照，并为新增字段提供安全默认值。
+    if schema_version in {1, 2, 3, 4}:
         tables.setdefault("operation_logs", [])
         for row in tables.get("inventory_items", []):
             row.setdefault("supply_mode", "STOCK")
             row.setdefault("sample_stock_qty", 0)
+            row.setdefault("daily_capacity", 0)
         for row in tables.get("sales_orders", []):
             row.setdefault("required_date", row.get("order_date"))
+            row.setdefault("estimated_completion_at", None)
+            row.setdefault("eta_calculated_at", None)
+            row.setdefault("eta_reliable", False)
+            row.setdefault("eta_note", "")
         reference_prices = {
             row.get("id"): row.get("sale_price", 0) for row in tables.get("inventory_items", [])
         }
         for row in tables.get("sales_order_items", []):
             row.setdefault("reserved_quantity", 0)
             row.setdefault("reference_price", reference_prices.get(row.get("product_id"), row.get("unit_price", 0)))
+            row.setdefault("production_required_quantity", 0)
+            row.setdefault("estimated_completion_at", None)
+            row.setdefault("eta_reliable", False)
+            row.setdefault("eta_note", "")
+        tables.setdefault("production_lines", [])
+        tables.setdefault("molds", [])
+        tables.setdefault("product_molds", [])
+        tables.setdefault("production_capabilities", [])
+        tables.setdefault("production_runs", [])
+        tables.setdefault("production_allocations", [])
+        if "stock_reservations" not in tables:
+            tables["stock_reservations"] = [
+                {
+                    "id": index + 1,
+                    "order_item_id": row["id"],
+                    "product_id": row["product_id"],
+                    "quantity": row.get("reserved_quantity", 0),
+                    "status": "ACTIVE" if row.get("reserved_quantity", 0) > 0 else "RELEASED",
+                    "created_at": payload["created_at"],
+                    "updated_at": payload["created_at"],
+                }
+                for index, row in enumerate(tables.get("sales_order_items", []))
+            ]
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:
