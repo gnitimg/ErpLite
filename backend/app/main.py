@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import json
 import logging
 import os
@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -42,6 +42,7 @@ from .schemas import (
     PartPayload,
     ProductPayload,
     ProductionCapabilityPayload,
+    ProductionRunSchedulePayload,
     ProductionRunStatusPayload,
     ProductionSettingsPayload,
     SamplePayload,
@@ -205,6 +206,8 @@ def operation_action(path: str, method: str) -> str:
     if path.startswith("/api/production/plan"):
         return "重算生产计划"
     if path.startswith("/api/production/runs"):
+        if path.endswith("/schedule"):
+            return "调整订单排产"
         return "更新生产批次"
     if path.startswith("/api/system/production-settings"):
         return "修改生产设置"
@@ -609,6 +612,7 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
 def production_settings_dict(settings: ProductionSetting) -> dict:
     return {
         "line_count": settings.line_count,
+        "schedule_auto_snap": settings.schedule_auto_snap,
         "updated_at": settings.updated_at.isoformat(),
     }
 
@@ -650,6 +654,7 @@ def update_production_settings(
         row = ProductionSetting(id=1)
         db.add(row)
     row.line_count = payload.line_count
+    row.schedule_auto_snap = payload.schedule_auto_snap
     db.flush()
     recalculate_production_plan(db)
     db.commit()
@@ -763,6 +768,117 @@ def update_production_run_status(
         recalculate_production_plan(db)
     db.commit()
     return {"ok": True, "run_id": run_id, "status": run.status}
+
+
+def _active_schedule_condition():
+    return or_(
+        ProductionRun.status == "RUNNING",
+        and_(
+            ProductionRun.status == "PLANNED",
+            ProductionRun.schedule_locked.is_(True),
+        ),
+    )
+
+
+@app.put("/api/production/runs/{run_id}/schedule")
+def update_production_run_schedule(
+    run_id: int,
+    payload: ProductionRunSchedulePayload,
+    db: Session = Depends(get_db),
+):
+    run = db.scalar(
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(selectinload(ProductionRun.allocations))
+        .with_for_update()
+    )
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status != "PLANNED":
+        raise HTTPException(409, "只有待生产批次可以调整排期")
+    settings = db.get(ProductionSetting, 1)
+    line_count = max(int(settings.line_count if settings else 1), 1)
+    if payload.line_slot > line_count:
+        raise HTTPException(400, "生产位超出系统设置的可用范围")
+
+    planned_start = payload.planned_start_at
+    if planned_start.tzinfo is not None:
+        planned_start = planned_start.astimezone().replace(tzinfo=None)
+    if planned_start < datetime.now() - timedelta(minutes=1):
+        raise HTTPException(400, "排产开始时间不能早于当前时间")
+    duration_seconds = max(
+        float(run.planned_quantity)
+        / max(float(run.effective_daily_capacity), 1e-9)
+        * 86400,
+        60,
+    )
+    planned_end = planned_start + timedelta(seconds=duration_seconds)
+
+    line_conflict = db.scalar(
+        select(ProductionRun.id).where(
+            ProductionRun.id != run.id,
+            _active_schedule_condition(),
+            ProductionRun.line_slot == payload.line_slot,
+            ProductionRun.planned_start_at < planned_end,
+            ProductionRun.planned_end_at > planned_start,
+        ).limit(1)
+    )
+    if line_conflict:
+        raise HTTPException(409, "该生产位在所选时间段已有确认排期")
+
+    mold_count = max(int(run.product.mold_count or 1), 1)
+    chosen_mold_slot = None
+    preferred_slots = [run.mold_slot] + [
+        slot for slot in range(1, mold_count + 1) if slot != run.mold_slot
+    ]
+    for mold_slot in preferred_slots:
+        mold_conflict = db.scalar(
+            select(ProductionRun.id).where(
+                ProductionRun.id != run.id,
+                _active_schedule_condition(),
+                ProductionRun.product_id == run.product_id,
+                ProductionRun.mold_slot == mold_slot,
+                ProductionRun.planned_start_at < planned_end,
+                ProductionRun.planned_end_at > planned_start,
+            ).limit(1)
+        )
+        if not mold_conflict:
+            chosen_mold_slot = mold_slot
+            break
+    if chosen_mold_slot is None:
+        raise HTTPException(409, "该产品在所选时间段没有可用模具")
+
+    time_shift = planned_start - run.planned_start_at
+    run.line_slot = payload.line_slot
+    run.mold_slot = chosen_mold_slot
+    run.planned_start_at = planned_start
+    run.planned_end_at = planned_end
+    run.schedule_locked = True
+    for allocation in run.allocations:
+        if allocation.estimated_completion_at:
+            allocation.estimated_completion_at += time_shift
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return next(
+        row for row in list_production_runs(db) if row["id"] == run_id
+    )
+
+
+@app.delete("/api/production/runs/{run_id}/schedule")
+def unlock_production_run_schedule(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = db.get(ProductionRun, run_id)
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status != "PLANNED":
+        raise HTTPException(409, "只有待生产批次可以恢复自动排期")
+    run.schedule_locked = False
+    recalculate_production_plan(db)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/inventory")

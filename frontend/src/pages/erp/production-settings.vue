@@ -5,7 +5,11 @@ import { api, formatTime, useLiveRefresh } from "./api"
 
 const loading = ref(false)
 const saving = ref(false)
-const form = reactive({ line_count: 1, updated_at: "" })
+const form = reactive({
+  line_count: 1,
+  schedule_auto_snap: true,
+  updated_at: ""
+})
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -23,7 +27,10 @@ async function save() {
   try {
     Object.assign(form, await api("/api/system/production-settings", {
       method: "PUT",
-      body: JSON.stringify({ line_count: form.line_count })
+      body: JSON.stringify({
+        line_count: form.line_count,
+        schedule_auto_snap: form.schedule_auto_snap
+      })
     }))
     ElMessage.success("生产设置已保存，客单 ETA 已自动重算")
   } catch (error: any) {
@@ -61,9 +68,10 @@ useLiveRefresh(() => load(true))
     <div class="content-card settings-card" v-loading="loading">
       <div class="card-head">
         <h3>生产设置</h3>
+        <span>全局参数会影响全部产品和未完成客单的预计完成时间</span>
       </div>
       <el-form label-position="top" class="settings-form">
-        <el-form-item label="并行作业数" required>
+        <el-form-item label="并行生产线数量" required>
           <el-input-number
             v-model="form.line_count"
             :min="1"
@@ -71,7 +79,33 @@ useLiveRefresh(() => load(true))
             :precision="0"
             style="width: 220px"
           />
+          <div class="field-help">
+            表示同一时刻最多可安排多少个生产任务；实际并行数还会受产品模具数量限制。
+          </div>
         </el-form-item>
+        <el-form-item label="排产图拖动方式">
+          <el-checkbox v-model="form.schedule_auto_snap">
+            开启自动吸附
+          </el-checkbox>
+          <div class="field-help">
+            开启后，拖动时间块会自动贴合最近的日期刻度或相邻批次边界；关闭后可自由选择落点。
+          </div>
+        </el-form-item>
+        <div class="slot-preview">
+          <div class="preview-label">排产槽位预览</div>
+          <div class="slot-list">
+            <el-tag
+              v-for="slot in form.line_count"
+              :key="slot"
+              effect="plain"
+            >
+              生产位 {{ slot }}
+            </el-tag>
+          </div>
+        </div>
+        <div v-if="form.updated_at" class="updated-at">
+          最近更新：{{ formatTime(form.updated_at) }}
+        </div>
       </el-form>
     </div>
   </div>

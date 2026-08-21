@@ -40,10 +40,14 @@ def upgrade() -> None:
             ),
             sa.PrimaryKeyConstraint("id"),
         )
+    setting_columns = _column_names(bind, "production_settings")
+    snap_column = ", schedule_auto_snap" if "schedule_auto_snap" in setting_columns else ""
+    snap_value = ", 1" if "schedule_auto_snap" in setting_columns else ""
     bind.execute(sa.text(
-        "INSERT INTO production_settings (id, line_count, updated_at) "
+        "INSERT INTO production_settings "
+        f"(id, line_count, updated_at{snap_column}) "
         "SELECT 1, CASE WHEN COUNT(*) > 0 THEN COUNT(*) ELSE 1 END, CURRENT_TIMESTAMP "
-        "FROM production_lines WHERE active = 1 "
+        f"{snap_value} FROM production_lines WHERE active = 1 "
         "AND NOT EXISTS (SELECT 1 FROM production_settings WHERE id = 1)"
     ))
 

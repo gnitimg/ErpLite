@@ -177,6 +177,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "客户订单", elIcon: "Tickets", keepAlive: true }
       },
       {
+        path: "scheduling",
+        component: () => import("@/pages/erp/scheduling.vue"),
+        name: "Scheduling",
+        meta: { title: "订单排产", elIcon: "Calendar", keepAlive: true }
+      },
+      {
         path: "production",
         component: () => import("@/pages/erp/production.vue"),
         name: "Production",

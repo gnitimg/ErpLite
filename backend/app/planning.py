@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from math import floor
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
@@ -56,6 +56,7 @@ def _run_dict(run: ProductionRun) -> dict:
         "actual_start_at": run.actual_start_at.isoformat() if run.actual_start_at else None,
         "actual_end_at": run.actual_end_at.isoformat() if run.actual_end_at else None,
         "effective_daily_capacity": run.effective_daily_capacity,
+        "schedule_locked": run.schedule_locked,
         "status": run.status,
         "allocations": [
             {
@@ -259,9 +260,12 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
     if product_ids:
         rebalance_product_reservations(db, product_ids)
 
-    # 仅重建尚未执行的模拟计划；生产中和已完成批次作为既有时间轴保留。
+    # 仅重建未被人工确认的模拟计划；人工排期和生产中批次作为固定时间轴保留。
     planned_ids = db.scalars(
-        select(ProductionRun.id).where(ProductionRun.status == "PLANNED")
+        select(ProductionRun.id).where(
+            ProductionRun.status == "PLANNED",
+            ProductionRun.schedule_locked.is_(False),
+        )
     ).all()
     if planned_ids:
         db.execute(delete(ProductionAllocation).where(
@@ -286,8 +290,13 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
     fixed_runs = db.scalars(
         select(ProductionRun)
         .where(
-            ProductionRun.status == "RUNNING",
-            ProductionRun.planned_end_at > now,
+            or_(
+                ProductionRun.status == "RUNNING",
+                and_(
+                    ProductionRun.status == "PLANNED",
+                    ProductionRun.schedule_locked.is_(True),
+                ),
+            ),
         )
         .options(selectinload(ProductionRun.allocations))
     ).all()
@@ -314,7 +323,7 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
                 if line.production_required_quantity > 1e-9:
                     line.estimated_completion_at = running_eta.get(line.id)
                     line.eta_reliable = bool(line.estimated_completion_at)
-                    line.eta_note = "已由生产中批次覆盖"
+                    line.eta_note = "已由人工排期或生产中批次覆盖"
                 continue
             demands_by_product[line.product_id].append({
                 "line": line,

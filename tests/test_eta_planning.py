@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
+from app.main import update_production_run_schedule
 from app.models import (
     InventoryItem,
     ProductBomItem,
@@ -20,6 +21,7 @@ from app.models import (
     SalesOrderItem,
 )
 from app.planning import recalculate_production_plan
+from app.schemas import ProductionRunSchedulePayload
 
 
 NOW = datetime(2026, 8, 20, 8, 0, 0)
@@ -243,3 +245,58 @@ def test_running_allocation_is_not_scheduled_twice():
         assert result["created_run_count"] == 0
         assert db.query(ProductionRun).count() == 1
         assert order.estimated_completion_at == NOW + timedelta(days=1)
+
+
+def test_manually_scheduled_run_survives_recalculation():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        product = make_product(db, "P01")
+        add_capability(db, product, 10000)
+        order = add_order(db, "SO-1", [(product, 10000)])
+        recalculate_production_plan(db, NOW)
+
+        run = db.query(ProductionRun).one()
+        original_id = run.id
+        run.schedule_locked = True
+        run.planned_start_at = NOW + timedelta(days=1)
+        run.planned_end_at = NOW + timedelta(days=2)
+        run.allocations[0].estimated_completion_at = NOW + timedelta(days=2)
+
+        result = recalculate_production_plan(db, NOW)
+
+        kept = db.get(ProductionRun, original_id)
+        assert result["created_run_count"] == 0
+        assert kept is not None
+        assert kept.schedule_locked is True
+        assert kept.planned_end_at == NOW + timedelta(days=2)
+        assert order.estimated_completion_at == NOW + timedelta(days=2)
+        assert "人工排期" in order.eta_note
+
+
+def test_schedule_api_locks_run_and_keeps_single_machine_duration():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        product = make_product(db, "P01")
+        add_capability(db, product, 10000)
+        add_order(db, "SO-1", [(product, 5000)])
+        recalculate_production_plan(db, NOW)
+        run = db.query(ProductionRun).one()
+        requested_start = datetime.now().replace(microsecond=0) + timedelta(days=1)
+
+        result = update_production_run_schedule(
+            run.id,
+            ProductionRunSchedulePayload(
+                line_slot=1,
+                planned_start_at=requested_start,
+            ),
+            db,
+        )
+
+        assert result["schedule_locked"] is True
+        assert result["line_slot"] == 1
+        assert result["planned_start_at"] == requested_start.isoformat()
+        assert result["planned_end_at"] == (
+            requested_start + timedelta(days=0.5)
+        ).isoformat()

@@ -32,15 +32,15 @@
 
 ### 产品模具数量 / `production_settings`
 
-`inventory_items.mold_count` 直接保存产品拥有的模具套数，产品表单中维护，零件为 0。排产时为每套模具建立产品内的逻辑 `mold_slot`，同一模具位同一时刻只能被一个生产批次占用。`production_settings` 是单例全局设置，`line_count` 表示系统允许同时运行的生产任务数；系统据此生成逻辑生产位，不维护产线编号、名称或独立档案。`molds`、`product_molds` 与 `production_lines` 仅为旧版数据和备份兼容保留。
+`inventory_items.mold_count` 直接保存产品拥有的模具套数，产品表单中维护，零件为 0。排产时为每套模具建立产品内的逻辑 `mold_slot`，同一模具位同一时刻只能被一个生产批次占用。`production_settings` 是单例全局设置：`line_count` 表示系统允许同时运行的生产任务数，`schedule_auto_snap` 控制排产图拖动时是否吸附到日期刻度或相邻批次边界。系统据此生成逻辑生产位，不维护产线编号、名称或独立档案。`molds`、`product_molds` 与 `production_lines` 仅为旧版数据和备份兼容保留。
 
 ### `production_capabilities`
 
-每个产品维护一条标称单线日产和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，产品表遗留的 `daily_capacity` 不参与排产；实际并行数不超过全局 `line_count` 和该产品 `mold_count` 中的较小值。`line_id` 仅为兼容旧数据保留，新记录固定为空。
+每个产品维护一条用户填写的单日单机产量和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，时间块时长为 `计划数量 ÷ 单机有效日产`；产品表遗留的 `daily_capacity` 不参与排产。实际并行数不超过全局 `line_count` 和该产品 `mold_count` 中的较小值。`line_id` 仅为兼容旧数据保留，新记录固定为空。
 
 ### `production_runs`
 
-按产品合并后的连续生产段，保存产品、逻辑 `line_slot`、`mold_slot`、计划/实际数量、计划/实际时间和执行状态。它不直接归属于客单；生产位与产品模具位的占用时间轴由运行中的批次和模拟计划共同形成。`line_id` 仅为兼容旧批次保留，新记录固定为空。
+按产品合并后的连续生产段，保存产品、逻辑 `line_slot`、`mold_slot`、计划/实际数量、计划/实际时间和执行状态。`schedule_locked` 表示批次是否已由用户在订单排产时间轴中确认；人工确认批次在自动重算时作为固定时间轴保留，未确认的建议批次可以重建。它不直接归属于客单；生产位与产品模具位的占用时间轴由人工排期、运行中的批次和模拟计划共同形成。`line_id` 仅为兼容旧批次保留，新记录固定为空。
 
 ### `production_allocations`
 

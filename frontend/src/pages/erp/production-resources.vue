@@ -101,7 +101,7 @@ useLiveRefresh(() => load(true))
     <div class="page-toolbar">
       <div class="toolbar-group">
         <el-alert
-          title="每个产品只需维护一组日产能力；模具数在产品目录维护，产线总数在系统管理中统一设置。"
+          title="每个产品只需维护单日单机产量；模具数在产品目录维护，产线总数在系统管理中统一设置。"
           type="info"
           :closable="false"
           show-icon
@@ -120,6 +120,7 @@ useLiveRefresh(() => load(true))
     <div class="content-card">
       <div class="card-head">
         <h3>生产能力</h3>
+        <span>按产品维护单日单机产量，排产时自动计算时间块长度</span>
       </div>
       <el-table
         v-loading="loading"
@@ -136,7 +137,7 @@ useLiveRefresh(() => load(true))
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="标称单线日产" width="145" align="right">
+        <el-table-column label="单日单机产量" width="145" align="right">
           <template #default="{ row }">
             {{ productQty(row.nominal_daily_capacity) }}
           </template>
@@ -146,7 +147,7 @@ useLiveRefresh(() => load(true))
             {{ Math.round(row.safety_factor * 100) }}%
           </template>
         </el-table-column>
-        <el-table-column label="有效单线日产" width="145" align="right">
+        <el-table-column label="单机有效日产" width="145" align="right">
           <template #default="{ row }">
             <b>{{ productQty(row.effective_daily_capacity) }}</b>
           </template>
@@ -196,7 +197,7 @@ useLiveRefresh(() => load(true))
           </el-select>
         </el-form-item>
         <div class="form-grid">
-          <el-form-item label="标称单线日产量" required>
+          <el-form-item label="单日单机产量" required>
             <el-input-number
               v-model="capabilityForm.nominal_daily_capacity"
               :min="1"
@@ -217,7 +218,7 @@ useLiveRefresh(() => load(true))
           </el-form-item>
         </div>
         <el-alert
-          :title="`ETA 按单线有效日产 ${productQty(effectiveCapacity)} 件计算`"
+          :title="`计入安全系数后，单机有效日产 ${productQty(effectiveCapacity)} 件`"
           type="success"
           :closable="false"
           show-icon

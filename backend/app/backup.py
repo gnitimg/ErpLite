@@ -30,7 +30,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 7
+BACKUP_SCHEMA_VERSION = 9
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -104,7 +104,7 @@ def _load_archive(path: Path) -> dict[str, Any]:
         raise BackupError("备份文件已损坏或格式不正确") from error
 
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3, 4, 5, 6, BACKUP_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, 3, 4, 5, 6, 7, 8, BACKUP_SCHEMA_VERSION}:
         raise BackupError("备份版本与当前系统不兼容")
     if not isinstance(payload.get("created_at"), str):
         raise BackupError("备份缺少有效的创建时间")
@@ -191,6 +191,14 @@ def _load_archive(path: Path) -> dict[str, Any]:
         for row in tables.get("production_runs", []):
             row.setdefault("line_slot", line_slots.get(row.get("line_id"), 1))
             row["line_id"] = None
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version in {1, 2, 3, 4, 5, 6, 7}:
+        for row in tables.get("production_runs", []):
+            row.setdefault("schedule_locked", False)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version in {1, 2, 3, 4, 5, 6, 7, 8}:
+        for row in tables.get("production_settings", []):
+            row.setdefault("schedule_auto_snap", True)
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

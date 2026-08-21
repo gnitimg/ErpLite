@@ -127,6 +127,17 @@ export function stockQty(value: number | string = 0, integer = false) {
 
 export const formatTime = (value?: string) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-"
 
+export function formatDate(value?: string) {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "-"
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-")
+}
+
 export const txLabels: Record<string, string> = {
   OPENING: "期初库存",
   PURCHASE_IN: "采购入库",

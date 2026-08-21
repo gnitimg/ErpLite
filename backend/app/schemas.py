@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -124,6 +124,7 @@ class OrderPayload(BaseModel):
 
 class ProductionSettingsPayload(BaseModel):
     line_count: int = Field(default=1, ge=1, le=100)
+    schedule_auto_snap: bool = True
 
 
 class ProductionCapabilityPayload(BaseModel):
@@ -135,3 +136,8 @@ class ProductionCapabilityPayload(BaseModel):
 
 class ProductionRunStatusPayload(BaseModel):
     status: Literal["RUNNING", "CANCELLED"]
+
+
+class ProductionRunSchedulePayload(BaseModel):
+    line_slot: int = Field(ge=1, le=100)
+    planned_start_at: datetime

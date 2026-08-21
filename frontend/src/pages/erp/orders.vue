@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
+import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -153,7 +153,7 @@ useLiveRefresh(async () => {
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>客户订单</h3>
+        <h3>客户订单</h3><span>出库后自动写入库存流水</span>
       </div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无符合条件的客户订单">
         <el-table-column label="客单号" min-width="185">
@@ -170,10 +170,10 @@ useLiveRefresh(async () => {
         </el-table-column>
         <el-table-column prop="order_date" label="订单日期" width="115" />
         <el-table-column prop="required_date" label="要求交期" width="115" />
-        <el-table-column label="预计完成" width="170">
+        <el-table-column label="预计完成" width="125">
           <template #default="{ row }">
             <div v-if="row.estimated_completion_at" class="sku-cell">
-              <strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatTime(row.estimated_completion_at) }}</strong>
+              <strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatDate(row.estimated_completion_at) }}</strong>
               <span>{{ row.eta_reliable ? '当前可承诺' : '仅机器排程参考' }}</span>
             </div><span v-else class="muted">待确认 / 待配置产能</span>
           </template>
@@ -284,7 +284,7 @@ useLiveRefresh(async () => {
                 <div><span>要求交期</span><strong>{{ activeOrder.required_date }}</strong></div>
                 <div>
                   <span>预计完成</span>
-                  <strong :class="workflow?.eta_reliable ? '' : 'number-negative'">{{ formatTime(workflow?.estimated_completion_at) }}</strong>
+                  <strong :class="workflow?.eta_reliable ? '' : 'number-negative'">{{ formatDate(workflow?.estimated_completion_at) }}</strong>
                 </div>
                 <div><span>产品数量</span><strong>{{ productQty(orderedQuantity) }}</strong></div>
                 <div><span>订单金额</span><strong>{{ money(activeOrder.total_amount) }}</strong></div>
@@ -446,7 +446,7 @@ useLiveRefresh(async () => {
                   </template>
                 </el-table-column><el-table-column label="预计满足" width="170">
                   <template #default="{ row }">
-                    <div class="sku-cell"><strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatTime(row.estimated_completion_at) }}</strong><span>{{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}</span></div>
+                    <div class="sku-cell"><strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatDate(row.estimated_completion_at) }}</strong><span>{{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}</span></div>
                   </template>
                 </el-table-column>
               </el-table>

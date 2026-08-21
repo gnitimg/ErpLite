@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime, money, productQty, qty, useLiveRefresh } from "./api"
+import { api, formatDate, formatTime, money, productQty, qty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -139,7 +139,7 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品生产</h3>
+        <h3>产品生产</h3><span>计划按同产品合批，生产位和产品模具位不会重复占用</span>
       </div>
       <el-tabs v-model="activeTab">
         <el-tab-pane name="plan" label="生产计划">
@@ -158,7 +158,7 @@ useLiveRefresh(() => load(true))
                   <strong>生产位 {{ row.line_slot }}</strong>
                   <span>
                     模具位 {{ row.mold_slot }} / {{ row.mold_count }} ·
-                    有效日产 {{ productQty(row.effective_daily_capacity) }}
+                    单机有效日产 {{ productQty(row.effective_daily_capacity) }}
                   </span>
                 </div>
               </template>
@@ -166,11 +166,11 @@ useLiveRefresh(() => load(true))
             <el-table-column label="计划数量" width="115" align="right">
               <template #default="{ row }"><b>{{ productQty(row.planned_quantity) }}</b> {{ row.unit }}</template>
             </el-table-column>
-            <el-table-column label="预计开始" width="170">
-              <template #default="{ row }">{{ formatTime(row.planned_start_at) }}</template>
+            <el-table-column label="预计开始" width="125">
+              <template #default="{ row }">{{ formatDate(row.planned_start_at) }}</template>
             </el-table-column>
-            <el-table-column label="预计完成" width="170">
-              <template #default="{ row }">{{ formatTime(row.planned_end_at) }}</template>
+            <el-table-column label="预计完成" width="125">
+              <template #default="{ row }">{{ formatDate(row.planned_end_at) }}</template>
             </el-table-column>
             <el-table-column label="订单分配" min-width="210">
               <template #default="{ row }">
@@ -268,7 +268,7 @@ useLiveRefresh(() => load(true))
     </div>
     <div class="content-card production-history">
       <div class="card-head">
-        <h3>最近生产记录</h3>
+        <h3>最近生产记录</h3><span>最近 {{ recentRows.length }} 条生产入库流水</span>
       </div>
       <el-table :data="recentRows" empty-text="暂无生产记录">
         <el-table-column label="生产流水" min-width="190">

@@ -134,6 +134,7 @@ class ProductionSetting(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     line_count: Mapped[int] = mapped_column(Integer, default=1)
+    schedule_auto_snap: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -213,6 +214,7 @@ class ProductionRun(Base):
     actual_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     actual_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     effective_daily_capacity: Mapped[float] = mapped_column(Float)
+    schedule_locked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
