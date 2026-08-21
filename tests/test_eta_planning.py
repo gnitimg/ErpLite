@@ -9,11 +9,10 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
-from app.main import update_production_run_schedule
+from app.main import save_product, update_production_run_schedule
 from app.models import (
     InventoryItem,
     ProductBomItem,
-    ProductionCapability,
     ProductionAllocation,
     ProductionRun,
     ProductionSetting,
@@ -21,7 +20,7 @@ from app.models import (
     SalesOrderItem,
 )
 from app.planning import recalculate_production_plan
-from app.schemas import ProductionRunSchedulePayload
+from app.schemas import ProductPayload, ProductionRunSchedulePayload
 
 
 NOW = datetime(2026, 8, 20, 8, 0, 0)
@@ -59,18 +58,11 @@ def add_order(
 def add_capability(
     db: Session,
     product: InventoryItem,
-    daily_capacity: float,
-) -> ProductionCapability:
-    capability = ProductionCapability(
-        product_id=product.id,
-        line_id=None,
-        mold_id=None,
-        nominal_daily_capacity=daily_capacity,
-        safety_factor=1,
-    )
-    db.add(capability)
+    daily_capacity: int,
+) -> InventoryItem:
+    product.daily_capacity = daily_capacity
     db.flush()
-    return capability
+    return product
 
 
 def set_line_count(db: Session, line_count: int) -> None:
@@ -94,6 +86,22 @@ def make_product(
     db.add(product)
     db.flush()
     return product
+
+
+def test_product_save_persists_daily_capacity_on_product():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        product = save_product(
+            db,
+            ProductPayload(
+                sku="P-CAP",
+                name="capacity product",
+                daily_capacity=12500,
+            ),
+        )
+
+        assert product.daily_capacity == 12500
 
 
 def test_single_line_eta_and_two_products_run_in_parallel():

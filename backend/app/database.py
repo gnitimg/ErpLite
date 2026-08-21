@@ -66,7 +66,7 @@ def ensure_schema_compatibility() -> None:
         ),
         "inventory_items.daily_capacity": (
             "daily_capacity",
-            "ALTER TABLE inventory_items ADD COLUMN daily_capacity FLOAT NOT NULL DEFAULT 0",
+            "ALTER TABLE inventory_items ADD COLUMN daily_capacity INT NOT NULL DEFAULT 0",
         ),
         "sales_order_items": (
             "reserved_quantity",

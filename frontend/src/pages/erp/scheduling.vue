@@ -245,7 +245,7 @@ useLiveRefresh(() => load(true))
     <div class="page-toolbar">
       <div class="toolbar-group">
         <el-alert
-          title="排产图按日期显示；时间块长度根据生产数量和该产品的单日单机有效产量计算。"
+          title="排产图按日期显示；时间块长度根据生产数量和产品目录中的单机日产量计算。"
           type="info"
           :closable="false"
           show-icon
@@ -300,7 +300,7 @@ useLiveRefresh(() => load(true))
 
           <div v-for="lineSlot in lines" :key="lineSlot" class="lane-row">
             <div class="lane-label">
-              <strong>生产位 {{ lineSlot }}</strong>
+              <strong>{{ lineSlot }} 号机</strong>
               <span>{{ runsOnLine(lineSlot).length }} 个批次</span>
             </div>
             <div

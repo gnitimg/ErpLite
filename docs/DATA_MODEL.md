@@ -16,7 +16,7 @@
 
 ### `inventory_items`
 
-统一物料主数据。`kind` 为 `PART` 或 `PRODUCT`；包含编码、名称、规格、单位、成本、售价、安全库存、实时结存和启用状态。
+统一物料主数据。`kind` 为 `PART` 或 `PRODUCT`；包含编码、名称、规格、单位、成本、售价、安全库存、实时结存和启用状态。产品额外直接保存模具数量 `mold_count` 和整数单机日产量 `daily_capacity`。
 
 ### `product_bom_items`
 
@@ -34,9 +34,9 @@
 
 `inventory_items.mold_count` 直接保存产品拥有的模具套数，产品表单中维护，零件为 0。排产时为每套模具建立产品内的逻辑 `mold_slot`，同一模具位同一时刻只能被一个生产批次占用。`production_settings` 是单例全局设置：`line_count` 表示系统允许同时运行的生产任务数，`schedule_auto_snap` 控制排产图拖动时是否吸附到日期刻度或相邻批次边界。系统据此生成逻辑生产位，不维护产线编号、名称或独立档案。`molds`、`product_molds` 与 `production_lines` 仅为旧版数据和备份兼容保留。
 
-### `production_capabilities`
+### 产品单机日产量
 
-每个产品维护一条用户填写的单日单机产量和安全系数。ETA 使用 `nominal_daily_capacity × safety_factor`，时间块时长为 `计划数量 ÷ 单机有效日产`；产品表遗留的 `daily_capacity` 不参与排产。实际并行数不超过全局 `line_count` 和该产品 `mold_count` 中的较小值。`line_id` 仅为兼容旧数据保留，新记录固定为空。
+`inventory_items.daily_capacity` 是排产使用的唯一产能数据源，直接在产品目录维护，不再引入安全系数。时间块时长为 `计划数量 ÷ 单机日产量`，实际并行数不超过全局 `line_count` 和产品 `mold_count` 中的较小值。`production_capabilities` 仅为旧版数据和备份兼容保留，新业务不再写入或读取。
 
 ### `production_runs`
 

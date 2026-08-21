@@ -26,7 +26,6 @@ from .models import (
     InventoryItem,
     OperationLog,
     ProductBomItem,
-    ProductionCapability,
     ProductionRun,
     ProductionSetting,
     SalesOrder,
@@ -41,7 +40,6 @@ from .schemas import (
     OrderStockPayload,
     PartPayload,
     ProductPayload,
-    ProductionCapabilityPayload,
     ProductionRunSchedulePayload,
     ProductionRunStatusPayload,
     ProductionSettingsPayload,
@@ -211,8 +209,6 @@ def operation_action(path: str, method: str) -> str:
         return "更新生产批次"
     if path.startswith("/api/system/production-settings"):
         return "修改生产设置"
-    if path.startswith("/api/production/capabilities"):
-        return "维护生产能力"
     if path.startswith("/api/backups"):
         return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
     return f"{method} 操作"
@@ -617,22 +613,6 @@ def production_settings_dict(settings: ProductionSetting) -> dict:
     }
 
 
-def capability_dict(capability: ProductionCapability) -> dict:
-    return {
-        "id": capability.id,
-        "product_id": capability.product_id,
-        "product_sku": capability.product.sku,
-        "product_name": capability.product.name,
-        "mold_count": max(int(capability.product.mold_count or 1), 1),
-        "nominal_daily_capacity": capability.nominal_daily_capacity,
-        "safety_factor": capability.safety_factor,
-        "effective_daily_capacity": round(
-            capability.nominal_daily_capacity * capability.safety_factor, 6
-        ),
-        "active": capability.active,
-    }
-
-
 @app.get("/api/system/production-settings")
 def production_settings(db: Session = Depends(get_db)):
     row = db.get(ProductionSetting, 1)
@@ -660,82 +640,6 @@ def update_production_settings(
     db.commit()
     db.refresh(row)
     return production_settings_dict(row)
-
-
-def load_capability(db: Session, capability_id: int) -> ProductionCapability:
-    row = db.scalar(
-        select(ProductionCapability)
-        .where(ProductionCapability.id == capability_id)
-        .options(
-            selectinload(ProductionCapability.product),
-        )
-    )
-    if not row:
-        raise HTTPException(404, "生产能力配置不存在")
-    return row
-
-
-@app.get("/api/production/capabilities")
-def production_capabilities(db: Session = Depends(get_db)):
-    rows = db.scalars(
-        select(ProductionCapability)
-        .options(
-            selectinload(ProductionCapability.product),
-        )
-        .order_by(ProductionCapability.product_id, ProductionCapability.id)
-    ).all()
-    return [capability_dict(row) for row in rows]
-
-
-def save_capability(
-    db: Session,
-    payload: ProductionCapabilityPayload,
-    row: ProductionCapability | None = None,
-) -> ProductionCapability:
-    product = find_item(db, payload.product_id, "PRODUCT")
-    duplicate = select(ProductionCapability.id).where(
-        ProductionCapability.product_id == product.id,
-    )
-    if row:
-        duplicate = duplicate.where(ProductionCapability.id != row.id)
-    if db.scalar(duplicate):
-        raise HTTPException(409, "该产品的生产能力配置已存在")
-    values = payload.model_dump()
-    if row is None:
-        row = ProductionCapability(**values, line_id=None, mold_id=None)
-        db.add(row)
-    else:
-        for key, value in values.items():
-            setattr(row, key, value)
-        row.line_id = None
-        row.mold_id = None
-    db.flush()
-    recalculate_production_plan(db)
-    db.commit()
-    return load_capability(db, row.id)
-
-
-@app.post("/api/production/capabilities", status_code=201)
-def create_capability(payload: ProductionCapabilityPayload, db: Session = Depends(get_db)):
-    return capability_dict(save_capability(db, payload))
-
-
-@app.put("/api/production/capabilities/{capability_id}")
-def update_capability(
-    capability_id: int,
-    payload: ProductionCapabilityPayload,
-    db: Session = Depends(get_db),
-):
-    return capability_dict(save_capability(db, payload, load_capability(db, capability_id)))
-
-
-@app.delete("/api/production/capabilities/{capability_id}")
-def delete_capability(capability_id: int, db: Session = Depends(get_db)):
-    row = load_capability(db, capability_id)
-    row.active = False
-    recalculate_production_plan(db)
-    db.commit()
-    return {"ok": True}
 
 
 @app.get("/api/production/runs")

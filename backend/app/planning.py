@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session, selectinload
 from .models import (
     InventoryItem,
     ProductionAllocation,
-    ProductionCapability,
     ProductionRun,
     ProductionSetting,
     ProductBomItem,
@@ -111,7 +110,8 @@ def _finish_for_resources(resources: list[dict], quantity: float) -> datetime:
 
 
 def _choose_resources(
-    capabilities: list[ProductionCapability],
+    product_id: int,
+    daily_capacity: int,
     quantity: float,
     now: datetime,
     line_available: dict[int, datetime],
@@ -119,29 +119,25 @@ def _choose_resources(
     mold_count: int,
     line_count: int,
 ) -> tuple[list[dict], datetime] | None:
+    effective_capacity = float(daily_capacity)
+    if effective_capacity <= 0:
+        return None
     candidates = []
-    for capability in capabilities:
-        effective_capacity = (
-            float(capability.nominal_daily_capacity) * float(capability.safety_factor)
-        )
-        if effective_capacity <= 0:
-            continue
-        rate = effective_capacity / SECONDS_PER_DAY
-        for line_slot in range(1, max(int(line_count), 1) + 1):
-            for mold_slot in range(1, max(int(mold_count), 1) + 1):
-                start = max(
-                    now,
-                    line_available.get(line_slot, now),
-                    mold_available.get((capability.product_id, mold_slot), now),
-                )
-                candidates.append({
-                    "capability": capability,
-                    "line_slot": line_slot,
-                    "mold_slot": mold_slot,
-                    "start": start,
-                    "rate": rate,
-                    "effective_capacity": effective_capacity,
-                })
+    rate = effective_capacity / SECONDS_PER_DAY
+    for line_slot in range(1, max(int(line_count), 1) + 1):
+        for mold_slot in range(1, max(int(mold_count), 1) + 1):
+            start = max(
+                now,
+                line_available.get(line_slot, now),
+                mold_available.get((product_id, mold_slot), now),
+            )
+            candidates.append({
+                "line_slot": line_slot,
+                "mold_slot": mold_slot,
+                "start": start,
+                "rate": rate,
+                "effective_capacity": effective_capacity,
+            })
     if not candidates:
         return None
 
@@ -339,14 +335,6 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         mold_key = (run.product_id, max(int(run.mold_slot or 1), 1))
         mold_available[mold_key] = max(mold_available[mold_key], run.planned_end_at)
 
-    capabilities = db.scalars(
-        select(ProductionCapability)
-        .where(ProductionCapability.active.is_(True))
-    ).all()
-    capabilities_by_product: dict[int, list[ProductionCapability]] = defaultdict(list)
-    for capability in capabilities:
-        capabilities_by_product[capability.product_id].append(capability)
-
     material_required: dict[int, float] = defaultdict(float)
     products_with_part: dict[int, set[int]] = defaultdict(set)
     missing_bom_products: set[int] = set()
@@ -378,13 +366,15 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
     for product_id in product_order:
         demands = demands_by_product[product_id]
         total_quantity = int(sum(row["quantity"] for row in demands))
+        product = demands[0]["line"].product
         choice = _choose_resources(
-            capabilities_by_product.get(product_id, []),
+            product_id,
+            int(product.daily_capacity or 0),
             total_quantity,
             now,
             line_available,
             mold_available,
-            max(int(demands[0]["line"].product.mold_count or 1), 1),
+            max(int(product.mold_count or 1), 1),
             line_count,
         )
         if choice is None:
@@ -406,7 +396,6 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         for resource, planned_quantity in zip(resources, planned_shares):
             if planned_quantity <= 0:
                 continue
-            capability = resource["capability"]
             run = ProductionRun(
                 run_no=serial("PR"),
                 product_id=product_id,

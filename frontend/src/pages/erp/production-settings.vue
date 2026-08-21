@@ -79,19 +79,14 @@ useLiveRefresh(() => load(true))
             :precision="0"
             style="width: 220px"
           />
-          <div class="field-help">
-            表示同一时刻最多可安排多少个生产任务；实际并行数还会受产品模具数量限制。
-          </div>
         </el-form-item>
         <el-form-item label="排产图拖动方式">
           <el-checkbox v-model="form.schedule_auto_snap">
             开启自动吸附
           </el-checkbox>
-          <div class="field-help">
-            开启后，拖动时间块会自动贴合最近的日期刻度或相邻批次边界；关闭后可自由选择落点。
-          </div>
+
         </el-form-item>
-        <div class="slot-preview">
+        <!-- <div class="slot-preview">
           <div class="preview-label">排产槽位预览</div>
           <div class="slot-list">
             <el-tag
@@ -105,7 +100,7 @@ useLiveRefresh(() => load(true))
         </div>
         <div v-if="form.updated_at" class="updated-at">
           最近更新：{{ formatTime(form.updated_at) }}
-        </div>
+        </div> -->
       </el-form>
     </div>
   </div>

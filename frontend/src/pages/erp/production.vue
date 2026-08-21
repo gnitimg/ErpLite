@@ -158,7 +158,7 @@ useLiveRefresh(() => load(true))
                   <strong>生产位 {{ row.line_slot }}</strong>
                   <span>
                     模具位 {{ row.mold_slot }} / {{ row.mold_count }} ·
-                    单机有效日产 {{ productQty(row.effective_daily_capacity) }}
+                    单机日产量 {{ productQty(row.effective_daily_capacity) }}
                   </span>
                 </div>
               </template>

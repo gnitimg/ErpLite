@@ -101,9 +101,8 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "production-resources",
-        component: () => import("@/pages/erp/production-resources.vue"),
-        name: "ProductionResources",
-        meta: { title: "生产能力", elIcon: "SetUp", keepAlive: true }
+        redirect: "/master-data/products",
+        meta: { hidden: true }
       },
       {
         path: "samples",

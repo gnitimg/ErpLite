@@ -17,7 +17,18 @@ const filters = reactive({ stockStatus: "", bomStatus: "" })
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)) + Number(Boolean(filters.bomStatus)))
 const editingId = ref<number | null>(null)
 const formRef = ref<FormInstance>()
-const emptyForm = () => ({ sku: "", name: "", unit: "台", spec: "", cost_price: 0, sale_price: 0, min_stock: 0, mold_count: 1, components: [] as any[] })
+const emptyForm = () => ({
+  sku: "",
+  name: "",
+  unit: "台",
+  spec: "",
+  cost_price: 0,
+  sale_price: 0,
+  min_stock: 0,
+  mold_count: 1,
+  daily_capacity: 0,
+  components: [] as any[]
+})
 const form = reactive(emptyForm())
 const rules: FormRules = {
   sku: [{ required: true, message: "请输入产品编码", trigger: "blur" }],
@@ -64,6 +75,7 @@ function openEdit(row: any) {
     sale_price: row.sale_price,
     min_stock: row.min_stock,
     mold_count: row.mold_count || 1,
+    daily_capacity: row.daily_capacity || 0,
     components: row.components.map((line: any) => ({
       part_id: line.part_id,
       quantity: line.quantity
@@ -123,7 +135,7 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品目录</h3>
+        <h3>产品目录</h3><span>产品由零件清单定义组成</span>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="产品" min-width="190">
@@ -157,6 +169,11 @@ useLiveRefresh(() => load(true))
         <el-table-column label="模具数" width="90" align="right">
           <template #default="{ row }">
             {{ row.mold_count || 1 }} 套
+          </template>
+        </el-table-column>
+        <el-table-column label="单机日产量" width="125" align="right">
+          <template #default="{ row }">
+            {{ productQty(row.daily_capacity) }} {{ row.unit }}/日
           </template>
         </el-table-column>
         <el-table-column label="状态" width="85">
@@ -200,7 +217,12 @@ useLiveRefresh(() => load(true))
       </el-form>
     </el-drawer>
 
-    <el-drawer v-model="drawer" :title="editingId ? '编辑产品目录' : '新建产品目录'" size="min(720px, 96vw)">
+    <el-drawer
+      v-model="drawer"
+      class="product-edit-drawer"
+      :title="editingId ? '编辑产品目录' : '新建产品目录'"
+      size="min(720px, 96vw)"
+    >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-grid">
           <el-form-item label="产品编码" prop="sku">
@@ -221,12 +243,23 @@ useLiveRefresh(() => load(true))
           <el-form-item label="销售单价">
             <el-input-number v-model="form.sale_price" :min="0" :precision="2" :controls="false" style="width:100%" />
           </el-form-item>
+        </div>
+        <div class="form-grid form-grid-three">
           <el-form-item label="安全库存">
             <QuantityInput v-model="form.min_stock" integer :min="0" :unit="form.unit" />
           </el-form-item>
           <el-form-item label="模具数量">
             <QuantityInput v-model="form.mold_count" integer :min="1" unit="套" />
             <div class="form-help">决定该产品最多可同时占用多少个生产位。</div>
+          </el-form-item>
+          <el-form-item label="单机日产量">
+            <QuantityInput
+              v-model="form.daily_capacity"
+              integer
+              :min="0"
+              :unit="`${form.unit}/日`"
+            />
+            <div class="form-help">用于计算排产时长；填 0 表示暂不参与自动排产。</div>
           </el-form-item>
         </div>
         <div class="section-label">
@@ -262,14 +295,16 @@ useLiveRefresh(() => load(true))
           </el-table-column>
         </el-table>
         <el-alert v-if="!form.components.length" title="当前产品没有 BOM。仍可保存，但不能执行按 BOM 生产入库。" type="warning" :closable="false" style="margin-top:10px" />
-        <div class="drawer-footer">
+      </el-form>
+      <template #footer>
+        <div class="drawer-action-bar">
           <el-button @click="drawer = false">
             取消
           </el-button><el-button type="primary" :loading="saving" @click="save">
             保存产品
           </el-button>
         </div>
-      </el-form>
+      </template>
     </el-drawer>
   </div>
 </template>

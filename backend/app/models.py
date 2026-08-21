@@ -18,7 +18,7 @@ class InventoryItem(Base):
     cost_price: Mapped[float] = mapped_column(Float, default=0)
     sale_price: Mapped[float] = mapped_column(Float, default=0)
     min_stock: Mapped[float] = mapped_column(Float, default=0)
-    daily_capacity: Mapped[float] = mapped_column(Float, default=0)  # 兼容旧库；ETA 不读取此字段
+    daily_capacity: Mapped[int] = mapped_column(Integer, default=0)
     mold_count: Mapped[int] = mapped_column(Integer, default=0)
     stock_qty: Mapped[float] = mapped_column(Float, default=0)
     sample_stock_qty: Mapped[int] = mapped_column(Integer, default=300)

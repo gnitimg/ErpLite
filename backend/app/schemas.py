@@ -50,6 +50,7 @@ class ProductPayload(BaseModel):
     sale_price: float = Field(default=0, ge=0)
     min_stock: int = Field(default=0, ge=0)
     mold_count: int = Field(default=1, ge=1)
+    daily_capacity: int = Field(default=0, ge=0)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -125,13 +126,6 @@ class OrderPayload(BaseModel):
 class ProductionSettingsPayload(BaseModel):
     line_count: int = Field(default=1, ge=1, le=100)
     schedule_auto_snap: bool = True
-
-
-class ProductionCapabilityPayload(BaseModel):
-    product_id: int
-    nominal_daily_capacity: int = Field(gt=0)
-    safety_factor: float = Field(default=0.85, gt=0, le=1)
-    active: bool = True
 
 
 class ProductionRunStatusPayload(BaseModel):
