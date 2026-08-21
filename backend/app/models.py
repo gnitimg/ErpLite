@@ -79,8 +79,9 @@ class SalesOrderItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("sales_orders.id", ondelete="CASCADE"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
-    quantity: Mapped[float] = mapped_column(Float)
-    reserved_quantity: Mapped[float] = mapped_column(Float, default=0)
+    quantity: Mapped[int] = mapped_column(Integer)
+    shipped_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_quantity: Mapped[int] = mapped_column(Integer, default=0)
     reference_price: Mapped[float] = mapped_column(Float, default=0)
     unit_price: Mapped[float] = mapped_column(Float)
     line_total: Mapped[float] = mapped_column(Float)
@@ -271,11 +272,20 @@ class StockTransaction(Base):
     transaction_type: Mapped[str] = mapped_column(String(30), index=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     related_order_id: Mapped[int | None] = mapped_column(ForeignKey("sales_orders.id", ondelete="SET NULL"), nullable=True)
+    related_production_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    order_no_snapshot: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    counterparty_name_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    counterparty_phone_snapshot: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    counterparty_address_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     lines: Mapped[list["StockTransactionItem"]] = relationship(cascade="all, delete-orphan", back_populates="transaction")
     related_order: Mapped[SalesOrder | None] = relationship()
+    related_production_run: Mapped[ProductionRun | None] = relationship()
 
 
 class StockTransactionItem(Base):
@@ -286,6 +296,12 @@ class StockTransactionItem(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
     quantity_change: Mapped[float] = mapped_column(Float)
     unit_cost: Mapped[float] = mapped_column(Float, default=0)
+    sku_snapshot: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    name_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    spec_snapshot: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    unit_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    unit_price_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    line_total_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     transaction: Mapped[StockTransaction] = relationship(back_populates="lines")
     item: Mapped[InventoryItem] = relationship()

@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from math import floor
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
@@ -277,7 +277,10 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         order.eta_note = ""
         for line in order.items:
             line.production_required_quantity = max(
-                float(line.quantity) - float(line.reserved_quantity or 0), 0
+                int(line.quantity)
+                - int(line.shipped_quantity or 0)
+                - int(line.reserved_quantity or 0),
+                0,
             )
             line.estimated_completion_at = now if line.production_required_quantity <= 1e-9 else None
             line.eta_reliable = line.production_required_quantity <= 1e-9
@@ -453,3 +456,89 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         "material_shortage_product_ids": sorted(shortage_products),
         "missing_bom_product_ids": sorted(missing_bom_products),
     }
+
+
+def production_demand_summary(db: Session) -> list[dict]:
+    """从订单剩余缺口和有效批次分配推导生产总量、已排产与待排产。"""
+    rows = db.execute(
+        select(
+            SalesOrderItem.product_id,
+            InventoryItem.sku,
+            InventoryItem.name,
+            InventoryItem.unit,
+            func.coalesce(func.sum(SalesOrderItem.production_required_quantity), 0),
+        )
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .join(InventoryItem, InventoryItem.id == SalesOrderItem.product_id)
+        .where(SalesOrder.status.in_(RESERVATION_STATUSES))
+        .group_by(
+            SalesOrderItem.product_id,
+            InventoryItem.sku,
+            InventoryItem.name,
+            InventoryItem.unit,
+        )
+        .order_by(InventoryItem.sku)
+    ).all()
+    scheduled = dict(db.execute(
+        select(
+            ProductionRun.product_id,
+            func.coalesce(func.sum(ProductionAllocation.quantity), 0),
+        )
+        .join(
+            ProductionAllocation,
+            ProductionAllocation.production_run_id == ProductionRun.id,
+        )
+        .where(ProductionRun.status.in_(("PLANNED", "RUNNING")))
+        .group_by(ProductionRun.product_id)
+    ).all())
+    return [
+        {
+            "product_id": product_id,
+            "sku": sku,
+            "name": name,
+            "unit": unit,
+            "total_production_required": int(total or 0),
+            "scheduled_quantity": min(int(scheduled.get(product_id, 0)), int(total or 0)),
+            "unscheduled_quantity": max(int(total or 0) - int(scheduled.get(product_id, 0)), 0),
+        }
+        for product_id, sku, name, unit, total in rows
+        if int(total or 0) > 0
+    ]
+
+
+def purchase_requirement_summary(db: Session) -> list[dict]:
+    """将全部未完成生产需求按 BOM 展开并全局汇总，同一库存只扣一次。"""
+    demands = production_demand_summary(db)
+    required: dict[int, dict] = {}
+    for demand in demands:
+        components = db.scalars(
+            select(ProductBomItem)
+            .where(ProductBomItem.product_id == demand["product_id"])
+            .options(selectinload(ProductBomItem.part))
+        ).all()
+        for component in components:
+            row = required.setdefault(component.part_id, {
+                "part_id": component.part_id,
+                "sku": component.part.sku,
+                "name": component.part.name,
+                "unit": component.part.unit,
+                "supply_mode": component.part.supply_mode or "STOCK",
+                "current_stock": float(component.part.stock_qty),
+                "total_required": 0.0,
+                "products": [],
+            })
+            row["total_required"] += (
+                float(component.quantity) * demand["total_production_required"]
+            )
+            if demand["name"] not in row["products"]:
+                row["products"].append(demand["name"])
+    result = []
+    for row in required.values():
+        row["total_required"] = round(row["total_required"], 6)
+        row["shortage_quantity"] = round(
+            max(row["total_required"] - row["current_stock"], 0), 6
+        )
+        row["involved_products"] = "、".join(row.pop("products")[:5])
+        if row["shortage_quantity"] > 0:
+            result.append(row)
+    return sorted(result, key=lambda row: (-row["shortage_quantity"], row["sku"]))

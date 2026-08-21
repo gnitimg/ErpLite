@@ -12,6 +12,8 @@ const filterDrawer = ref(false)
 const workflowDrawer = ref(false)
 const workflowLoading = ref(false)
 const workflow = ref<any>(null)
+const shipmentDrawer = ref(false)
+const shipmentForm = reactive({ items: [] as any[], notes: "" })
 const activeOrder = ref<any>(null)
 const activeDetailTab = ref("overview")
 const rows = ref<any[]>([])
@@ -37,12 +39,12 @@ const workflowNextAction = computed(() => {
   const labels: Record<string, string> = {
     CONFIRM: "确认客单后检查产品库存",
     PURCHASE: "采购缺口零件并办理入库",
-    WAIT_PRIORITY: "等待更近交期客单优先备货",
     PRODUCE: "零件齐套后完成生产入库",
-    SHIP: "确认产品出库并完成客单",
+    SHIP: "可按整单、单产品或部分数量出库",
     CONFIGURE_BOM: "补充缺货产品的 BOM 配置"
   }
-  return labels[workflow.value?.next_action] || "当前无需处理"
+  if (workflow.value?.status === "FULFILLED") return "订单已全部出库"
+  return labels[workflow.value?.next_action] || "系统正在自动计算剩余需求"
 })
 const orderedQuantity = computed(() => activeOrder.value?.items?.reduce((sum: number, line: any) => sum + Number(line.quantity || 0), 0) || 0)
 
@@ -117,16 +119,60 @@ async function openWorkflow(row: any) {
     workflowLoading.value = false
   }
 }
-async function action(row: any, type: "confirm" | "prepare" | "fulfill" | "cancel") {
-  const labels = { confirm: "确认客单、预留库存并计算 ETA", prepare: "重新计算生产计划", fulfill: "确认产品出库", cancel: "取消客单" }
+async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
+  const labels = {
+    confirm: "确认客单、预留库存并计算 ETA",
+    "ship-all": "将全部剩余产品出库",
+    cancel: "取消客单"
+  }
   try {
-    await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, "客单操作", { type: type === "cancel" ? "warning" : "info" })
+    await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, "客单操作", {
+      type: type === "cancel" ? "warning" : "info"
+    })
     await api(`/api/orders/${row.id}/${type}`, { method: "POST" })
     ElMessage.success(`${labels[type]}成功`)
     await load()
-    if (workflowDrawer.value && activeOrder.value?.id === row.id) await openWorkflow(rows.value.find(x => x.id === row.id) || row)
+    if (workflowDrawer.value && activeOrder.value?.id === row.id) {
+      await openWorkflow(rows.value.find(x => x.id === row.id) || row)
+    }
   } catch (error: any) {
     if (error !== "cancel") ElMessage.error(error.message)
+  }
+}
+function openShipment(row: any) {
+  activeOrder.value = row
+  shipmentForm.items = row.items
+    .filter((line: any) => Number(line.remaining_quantity) > 0)
+    .map((line: any) => ({
+      order_item_id: line.id,
+      product_name: line.product_name,
+      remaining_quantity: Number(line.remaining_quantity),
+      reserved_quantity: Number(line.reserved_quantity),
+      quantity: Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
+    }))
+  shipmentForm.notes = ""
+  shipmentDrawer.value = true
+}
+function fillShipmentLine(line: any) {
+  line.quantity = Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
+}
+async function submitShipment() {
+  const items = shipmentForm.items
+    .filter(line => Number(line.quantity) > 0)
+    .map(line => ({ order_item_id: line.order_item_id, quantity: Number(line.quantity) }))
+  if (!items.length) return ElMessage.warning("请填写至少一项出库数量")
+  try {
+    await api(`/api/orders/${activeOrder.value.id}/ship`, {
+      method: "POST",
+      body: JSON.stringify({ items, notes: shipmentForm.notes })
+    })
+    ElMessage.success("出库成功，销售出库单已自动生成")
+    shipmentDrawer.value = false
+    await load()
+    const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
+    if (refreshed && workflowDrawer.value) await openWorkflow(refreshed)
+  } catch (error: any) {
+    ElMessage.error(error.message)
   }
 }
 onMounted(load)
@@ -175,7 +221,7 @@ useLiveRefresh(async () => {
             <div v-if="row.estimated_completion_at" class="sku-cell">
               <strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatDate(row.estimated_completion_at) }}</strong>
               <span>{{ row.eta_reliable ? '当前可承诺' : '仅机器排程参考' }}</span>
-            </div><span v-else class="muted">待确认 / 待配置产能</span>
+            </div><span v-else class="muted">待计算 / 待配置产能</span>
           </template>
         </el-table-column>
         <el-table-column label="产品数" width="90" align="right">
@@ -195,17 +241,41 @@ useLiveRefresh(async () => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="245" fixed="right">
+        <el-table-column label="操作" min-width="310" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openWorkflow(row)">
               详情
-            </el-button><el-button v-if="row.status === 'DRAFT'" link @click="action(row, 'confirm')">
+            </el-button>
+            <el-button v-if="row.status === 'DRAFT'" link @click="action(row, 'confirm')">
               确认
-            </el-button><el-button v-if="row.status === 'READY_TO_SHIP'" link type="success" @click="action(row, 'fulfill')">
-              出库
-            </el-button><el-button v-if="!['FULFILLED', 'CANCELLED'].includes(row.status)" link type="danger" @click="action(row, 'cancel')">
+            </el-button>
+            <el-button
+              v-if="row.status === 'READY_TO_SHIP'"
+              link
+              type="success"
+              @click="action(row, 'ship-all')"
+            >
+              整单出库
+            </el-button>
+            <el-button
+              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(row.status)"
+              link
+              type="success"
+              @click="openShipment(row)"
+            >
+              {{ row.status === 'PARTIALLY_SHIPPED' ? '继续出库' : '选择出库' }}
+            </el-button>
+            <el-button
+              v-if="!['FULFILLED', 'CANCELLED'].includes(row.status)"
+              link
+              type="danger"
+              @click="action(row, 'cancel')"
+            >
               取消
-            </el-button><span v-if="['FULFILLED', 'CANCELLED'].includes(row.status)" class="muted">已完结</span>
+            </el-button>
+            <span v-if="['FULFILLED', 'CANCELLED'].includes(row.status)" class="muted">
+              已完结
+            </span>
           </template>
         </el-table-column>
       </el-table>
@@ -254,16 +324,34 @@ useLiveRefresh(async () => {
             </el-tag>
           </div>
           <div v-if="activeOrder" class="order-workspace-actions">
-            <el-button v-if="activeOrder.status === 'DRAFT'" type="primary" @click="action(activeOrder, 'confirm')">
+            <el-button
+              v-if="activeOrder.status === 'DRAFT'"
+              type="primary"
+              @click="action(activeOrder, 'confirm')"
+            >
               确认并计算 ETA
             </el-button>
-            <el-button v-if="activeOrder.status === 'WAITING_MATERIALS'" type="primary" @click="action(activeOrder, 'prepare')">
-              重算生产计划
+            <el-button
+              v-if="activeOrder.status === 'READY_TO_SHIP'"
+              type="success"
+              @click="action(activeOrder, 'ship-all')"
+            >
+              整单出库
             </el-button>
-            <el-button v-if="activeOrder.status === 'READY_TO_SHIP'" type="success" @click="action(activeOrder, 'fulfill')">
-              确认产品出库
+            <el-button
+              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(activeOrder.status)"
+              plain
+              type="success"
+              @click="openShipment(activeOrder)"
+            >
+              {{ activeOrder.status === 'PARTIALLY_SHIPPED' ? '继续出库' : '选择出库' }}
             </el-button>
-            <el-button v-if="!['FULFILLED', 'CANCELLED'].includes(activeOrder.status)" plain type="danger" @click="action(activeOrder, 'cancel')">
+            <el-button
+              v-if="!['FULFILLED', 'CANCELLED'].includes(activeOrder.status)"
+              plain
+              type="danger"
+              @click="action(activeOrder, 'cancel')"
+            >
               取消客单
             </el-button>
           </div>
@@ -396,9 +484,19 @@ useLiveRefresh(async () => {
                     1 接单
                   </div><div class="workflow-step" :class="{ active: workflow.status !== 'DRAFT' }">
                     2 检查产品库存
-                  </div><div class="workflow-step" :class="{ active: ['WAITING_MATERIALS', 'READY_TO_SHIP', 'FULFILLED'].includes(workflow.status) }">
+                  </div><div
+                    class="workflow-step"
+                    :class="{
+                      active: [
+                        'WAITING_MATERIALS',
+                        'READY_TO_SHIP',
+                        'PARTIALLY_SHIPPED',
+                        'FULFILLED'
+                      ].includes(workflow.status)
+                    }"
+                  >
                     3 零件采购/备料
-                  </div><div class="workflow-step" :class="{ active: ['READY_TO_SHIP', 'FULFILLED'].includes(workflow.status) }">
+                  </div><div class="workflow-step" :class="{ active: ['READY_TO_SHIP', 'PARTIALLY_SHIPPED', 'FULFILLED'].includes(workflow.status) }">
                     4 生产并预留
                   </div><div class="workflow-step" :class="{ active: workflow.status === 'FULFILLED' }">
                     5 产品出库
@@ -436,7 +534,15 @@ useLiveRefresh(async () => {
                   <template #default="{ row }">
                     {{ productQty(row.ordered_quantity) }}
                   </template>
-                </el-table-column><el-table-column label="已预留" width="120" align="right">
+                </el-table-column><el-table-column label="已出库" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.shipped_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="剩余" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.remaining_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="已预留" width="105" align="right">
                   <template #default="{ row }">
                     <b class="number-positive">{{ productQty(row.reserved_quantity) }}</b>
                   </template>
@@ -446,7 +552,14 @@ useLiveRefresh(async () => {
                   </template>
                 </el-table-column><el-table-column label="预计满足" width="170">
                   <template #default="{ row }">
-                    <div class="sku-cell"><strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatDate(row.estimated_completion_at) }}</strong><span>{{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}</span></div>
+                    <div class="sku-cell">
+                      <strong :class="row.eta_reliable ? '' : 'number-negative'">
+                        {{ formatDate(row.estimated_completion_at) }}
+                      </strong>
+                      <span>
+                        {{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}
+                      </span>
+                    </div>
                   </template>
                 </el-table-column>
               </el-table>
@@ -498,6 +611,45 @@ useLiveRefresh(async () => {
             </div>
           </el-tab-pane>
         </el-tabs>
+      </div>
+    </el-drawer>
+
+    <el-drawer v-model="shipmentDrawer" title="订单出库" size="min(620px, 96vw)">
+      <el-alert title="只能使用当前为本订单预留的库存；每次提交都会生成一张独立销售出库单。" type="info" :closable="false" show-icon />
+      <el-table :data="shipmentForm.items" border style="margin-top: 18px">
+        <el-table-column prop="product_name" label="产品" min-width="180" />
+        <el-table-column prop="remaining_quantity" label="剩余" width="90" align="right" />
+        <el-table-column prop="reserved_quantity" label="可出" width="90" align="right" />
+        <el-table-column label="本次出库" width="150">
+          <template #default="{ row }">
+            <QuantityInput
+              v-model="row.quantity"
+              integer
+              :min="0"
+              :max="Math.min(row.remaining_quantity, row.reserved_quantity)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="快捷" width="100">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="fillShipmentLine(row)">
+              本产品全部
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-form label-position="top" style="margin-top: 18px">
+        <el-form-item label="备注">
+          <el-input v-model="shipmentForm.notes" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <div class="drawer-footer">
+        <el-button @click="shipmentDrawer = false">
+          取消
+        </el-button>
+        <el-button type="primary" @click="submitShipment">
+          确认出库并生成出库单
+        </el-button>
       </div>
     </el-drawer>
 

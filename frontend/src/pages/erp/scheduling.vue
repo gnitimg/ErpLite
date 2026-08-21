@@ -78,8 +78,8 @@ function blockStyle(run: any) {
   const left = (start - timelineStart.value.getTime()) / DAY_MS * pixelsPerDay.value
   const width = Math.max(durationHours(run) / 24 * pixelsPerDay.value, 18)
   return {
-    left: `${left}px`,
-    width: `${width}px`,
+    "left": `${left}px`,
+    "width": `${width}px`,
     "--block-hue": `${productHue(run.product_id)}`
   }
 }
@@ -202,19 +202,6 @@ async function unlockSchedule(run: any) {
   }
 }
 
-async function recalculate() {
-  loading.value = true
-  try {
-    await api("/api/production/plan/recalculate", { method: "POST" })
-    ElMessage.success("建议排期已重算，人工确认的时间块保持不变")
-    await load(true)
-  } catch (error: any) {
-    ElMessage.error(error.message)
-  } finally {
-    loading.value = false
-  }
-}
-
 function zoom(delta: number) {
   pixelsPerDay.value = Math.min(Math.max(pixelsPerDay.value + delta, 72), 200)
 }
@@ -253,16 +240,19 @@ useLiveRefresh(() => load(true))
       </div>
       <div class="toolbar-right">
         <el-button-group>
-          <el-button :disabled="pixelsPerDay <= 72" @click="zoom(-16)">缩小</el-button>
-          <el-button @click="scrollToNow">现在</el-button>
-          <el-button :disabled="pixelsPerDay >= 200" @click="zoom(16)">放大</el-button>
+          <el-button :disabled="pixelsPerDay <= 72" @click="zoom(-16)">
+            缩小
+          </el-button>
+          <el-button @click="scrollToNow">
+            现在
+          </el-button>
+          <el-button :disabled="pixelsPerDay >= 200" @click="zoom(16)">
+            放大
+          </el-button>
         </el-button-group>
         <el-tag :type="autoSnap ? 'success' : 'info'" effect="plain">
           {{ autoSnap ? "自动吸附" : "自由拖动" }}
         </el-tag>
-        <el-button :loading="loading" @click="recalculate">
-          <el-icon><Refresh /></el-icon>重算建议
-        </el-button>
         <el-button type="primary" @click="openRuns()">
           <el-badge :value="pendingRuns.length" :hidden="!pendingRuns.length">
             <span>待排产</span>
@@ -275,8 +265,8 @@ useLiveRefresh(() => load(true))
       <div class="card-head">
         <h3>订单排产</h3>
         <span>
-          {{ lineCount }} 个生产位 · {{ pendingRuns.length }} 个待确认批次 ·
-          {{ confirmedRuns.length }} 个已确认批次
+          {{ lineCount }} 个生产位 · {{ pendingRuns.length }} 个系统建议 ·
+          {{ confirmedRuns.length }} 个人工调整
         </span>
       </div>
       <div ref="timelineScroll" class="timeline-scroll">
@@ -285,7 +275,9 @@ useLiveRefresh(() => load(true))
           :style="{ width: `${timelineWidth + LANE_LABEL_WIDTH}px` }"
         >
           <div class="axis-row">
-            <div class="lane-label axis-label">日期</div>
+            <div class="lane-label axis-label">
+              日期
+            </div>
             <div class="axis-track" :style="{ width: `${timelineWidth}px` }">
               <div
                 v-for="tick in axisTicks"
@@ -306,8 +298,8 @@ useLiveRefresh(() => load(true))
             <div
               class="lane-track"
               :style="{
-                width: `${timelineWidth}px`,
-                '--day-width': `${pixelsPerDay}px`
+                'width': `${timelineWidth}px`,
+                '--day-width': `${pixelsPerDay}px`,
               }"
               @dragover.prevent
               @drop="dropRun($event, lineSlot)"
@@ -324,7 +316,7 @@ useLiveRefresh(() => load(true))
                 :class="{
                   suggested: run.status === 'PLANNED' && !run.schedule_locked,
                   confirmed: run.status === 'PLANNED' && run.schedule_locked,
-                  running: run.status === 'RUNNING'
+                  running: run.status === 'RUNNING',
                 }"
                 :style="blockStyle(run)"
                 :draggable="run.status === 'PLANNED'"
@@ -337,7 +329,7 @@ useLiveRefresh(() => load(true))
                   {{ durationLabel(run) }}
                 </span>
                 <em v-if="run.status === 'RUNNING'">生产中</em>
-                <em v-else-if="run.schedule_locked">已确认</em>
+                <em v-else-if="run.schedule_locked">人工调整</em>
                 <em v-else>建议</em>
               </div>
             </div>
@@ -345,8 +337,8 @@ useLiveRefresh(() => load(true))
         </div>
       </div>
       <div class="timeline-legend">
-        <span><i class="legend-dot suggested-dot" />系统建议，可拖动确认</span>
-        <span><i class="legend-dot confirmed-dot" />人工确认，可继续拖动</span>
+        <span><i class="legend-dot suggested-dot" />系统建议，无需确认即可生效</span>
+        <span><i class="legend-dot confirmed-dot" />人工调整，可继续拖动</span>
         <span><i class="legend-dot running-dot" />正在生产，不可拖动</span>
       </div>
     </div>
@@ -358,10 +350,10 @@ useLiveRefresh(() => load(true))
       :modal="false"
     >
       <el-tabs v-model="drawerTab">
-        <el-tab-pane :label="`待确认 ${pendingRuns.length}`" name="pending">
+        <el-tab-pane :label="`系统建议 ${pendingRuns.length}`" name="pending">
           <el-empty
             v-if="!pendingRuns.length"
-            description="当前没有待确认的建议排期"
+            description="当前没有系统建议排期"
           />
           <div v-else class="run-list">
             <article
@@ -374,7 +366,9 @@ useLiveRefresh(() => load(true))
             >
               <div class="run-card-head">
                 <strong>{{ run.product_name }}</strong>
-                <el-tag size="small" effect="plain">拖至时间轴</el-tag>
+                <el-tag size="small" effect="plain">
+                  拖至时间轴
+                </el-tag>
               </div>
               <span>{{ run.product_sku }} · {{ run.run_no }}</span>
               <div class="run-metrics">
@@ -389,8 +383,8 @@ useLiveRefresh(() => load(true))
             </article>
           </div>
         </el-tab-pane>
-        <el-tab-pane :label="`已确认 ${confirmedRuns.length}`" name="confirmed">
-          <el-empty v-if="!confirmedRuns.length" description="暂无人工确认排期" />
+        <el-tab-pane :label="`人工调整 ${confirmedRuns.length}`" name="confirmed">
+          <el-empty v-if="!confirmedRuns.length" description="暂无人工调整排期" />
           <div v-else class="run-list">
             <article
               v-for="run in confirmedRuns"
@@ -429,7 +423,9 @@ useLiveRefresh(() => load(true))
             >
               <div class="run-card-head">
                 <strong>{{ run.product_name }}</strong>
-                <el-tag type="warning" size="small">生产中</el-tag>
+                <el-tag type="warning" size="small">
+                  生产中
+                </el-tag>
               </div>
               <span>{{ run.product_sku }} · 生产位 {{ run.line_slot }}</span>
               <small>预计 {{ formatDate(run.planned_end_at) }} 完成</small>
@@ -538,14 +534,13 @@ useLiveRefresh(() => load(true))
 
 .lane-track {
   background-color: var(--el-fill-color-extra-light);
-  background-image:
-    repeating-linear-gradient(
-      to right,
-      transparent 0,
-      transparent calc(var(--day-width) - 1px),
-      var(--el-border-color) calc(var(--day-width) - 1px),
-      var(--el-border-color) var(--day-width)
-    );
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(var(--day-width) - 1px),
+    var(--el-border-color) calc(var(--day-width) - 1px),
+    var(--el-border-color) var(--day-width)
+  );
 }
 
 .lane-track:hover {

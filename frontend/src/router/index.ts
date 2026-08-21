@@ -176,6 +176,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "客户订单", elIcon: "Tickets", keepAlive: true }
       },
       {
+        path: "purchase",
+        component: () => import("@/pages/erp/purchase.vue"),
+        name: "PurchaseRequirements",
+        meta: { title: "待购买", elIcon: "ShoppingCart", keepAlive: true }
+      },
+      {
         path: "scheduling",
         component: () => import("@/pages/erp/scheduling.vue"),
         name: "Scheduling",
@@ -185,7 +191,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "production",
         component: () => import("@/pages/erp/production.vue"),
         name: "Production",
-        meta: { title: "产品生产", elIcon: "Tools", keepAlive: true }
+        meta: { title: "生产入库", elIcon: "Tools", keepAlive: true }
       },
       {
         path: "stock-operations",
@@ -201,11 +207,23 @@ export const constantRoutes: RouteRecordRaw[] = [
     redirect: "/logs/stock",
     name: "LogManagement",
     meta: {
-      title: "操作日志",
+      title: "单据 / 日志",
       elIcon: "Document",
       alwaysShow: true
     },
     children: [
+      {
+        path: "inbound-documents",
+        component: () => import("@/pages/erp/documents.vue"),
+        name: "InboundDocuments",
+        meta: { title: "入库单", elIcon: "DocumentAdd", documentDirection: "inbound", keepAlive: true }
+      },
+      {
+        path: "outbound-documents",
+        component: () => import("@/pages/erp/documents.vue"),
+        name: "OutboundDocuments",
+        meta: { title: "出库单", elIcon: "DocumentRemove", documentDirection: "outbound", keepAlive: true }
+      },
       {
         path: "stock",
         component: () => import("@/pages/erp/movements.vue"),

@@ -26,13 +26,30 @@ const todoTypeMeta: Record<string, { label: string, type: string }> = {
   shipping: { label: "产品出库", type: "success" }
 }
 
-const allTodoRows = computed(() => Object.entries(todoTypeMeta)
-  .flatMap(([taskType]) => (data.value.todos[taskType] || []).map((row: any) => ({ ...row, taskType })))
-  .sort((left: any, right: any) => left.required_date.localeCompare(right.required_date)))
+const allTodoRows = computed(() => [
+  ...(data.value.todos.purchase || []).map((row: any) => ({
+    ...row,
+    taskType: "purchase",
+    title: `${row.sku} · ${row.name}`,
+    summary: `待购买 ${qty(row.shortage_quantity)} ${row.unit}，涉及 ${row.involved_products || "产品需求"}`
+  })),
+  ...(data.value.todos.production || []).map((row: any) => ({
+    ...row,
+    taskType: "production",
+    title: `${row.sku} · ${row.name}`,
+    summary: `待生产 ${productQty(row.total_production_required)} ${row.unit}，已排产 ${productQty(row.scheduled_quantity)}`
+  })),
+  ...(data.value.todos.shipping || []).map((row: any) => ({
+    ...row,
+    taskType: "shipping",
+    title: `${row.order_no} · ${row.customer_name}`,
+    summary: row.lines?.map((line: any) => `${line.name} ${productQty(line.remaining_quantity)}`).join("、")
+  }))
+])
 
 const activeTodoRows = computed(() => allTodoRows.value.filter((row: any) => {
   if (todoFilter.value === "all") return true
-  if (todoFilter.value === "overdue") return dueMeta(row.required_date).days < 0
+  if (todoFilter.value === "overdue") return row.required_date && dueMeta(row.required_date).days < 0
   return row.taskType === todoFilter.value
 }))
 
@@ -48,12 +65,7 @@ async function load(silent = false) {
 }
 
 function todoSummary(row: any) {
-  if (!row.lines?.length) return "暂无物料明细"
-  const first = row.lines[0]
-  const quantity = row.taskType === "purchase"
-    ? qty(first.shortage_quantity)
-    : productQty(first.production_required || first.ordered_quantity)
-  return `${first.name} ${quantity} ${first.unit}${row.lines.length > 1 ? ` 等 ${row.lines.length} 项` : ""}`
+  return row.summary || "系统正在自动计算"
 }
 
 function dueMeta(value: string) {
@@ -68,7 +80,9 @@ function dueMeta(value: string) {
 }
 
 function todoRoute(row: any) {
-  return row.taskType === "production" ? "/operations/production" : "/operations/stock-operations"
+  if (row.taskType === "purchase") return "/operations/purchase"
+  if (row.taskType === "production") return "/operations/production"
+  return "/operations/orders"
 }
 
 function transactionSummary(row: any) {
@@ -109,7 +123,7 @@ useLiveRefresh(() => load(true))
     <section class="content-card dashboard-todos">
       <div class="card-head">
         <div>
-          <h3>备货任务</h3>
+          <h3>业务待办</h3>
         </div>
         <div class="todo-filter">
           <el-select v-model="todoFilter" aria-label="筛选备货任务" style="width: 150px">
@@ -124,21 +138,20 @@ useLiveRefresh(() => load(true))
           </router-link>
         </div>
       </div>
-      <el-table :data="activeTodoRows" empty-text="当前没有符合条件的备货任务">
-        <el-table-column label="客单" min-width="190">
+      <el-table :data="activeTodoRows" empty-text="当前没有符合条件的业务待办">
+        <el-table-column label="待办对象" min-width="250">
           <template #default="{ row }">
-            <span class="mono">{{ row.order_no }}</span>
+            <span>{{ row.title }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="customer_name" label="客户" min-width="150" />
         <el-table-column label="交付时限" width="210">
           <template #default="{ row }">
-            <div class="due-cell">
+            <div v-if="row.required_date" class="due-cell">
               <span>{{ row.required_date }}</span>
               <el-tag :type="dueMeta(row.required_date).type as any" effect="light" size="small">
                 {{ dueMeta(row.required_date).label }}
               </el-tag>
-            </div>
+            </div><span v-else class="muted">按汇总需求处理</span>
           </template>
         </el-table-column>
         <el-table-column label="任务" width="110">
@@ -200,20 +213,23 @@ useLiveRefresh(() => load(true))
       <div class="dashboard-side-stack">
         <div class="content-card">
           <div class="card-head">
-            <h3>快捷入口</h3><span>常用操作</span>
+            <h3>快捷开单</h3><span>常用单据入口</span>
           </div>
           <div class="card-body quick-actions">
             <router-link class="quick-action" to="/operations/stock-operations">
-              <strong>出入库作业</strong><span>按物料或按客单办理</span>
+              <strong>开入库单</strong><span>采购件或普通物料入库</span>
             </router-link>
-            <router-link class="quick-action" to="/operations/production">
-              <strong>产品生产</strong><span>按 BOM 领料并入库</span>
+            <router-link class="quick-action" to="/operations/stock-operations">
+              <strong>开出库单</strong><span>领料或普通物料出库</span>
+            </router-link>
+            <router-link class="quick-action" to="/logs/inbound-documents">
+              <strong>查看入库单</strong><span>生产与采购入库凭证</span>
+            </router-link>
+            <router-link class="quick-action" to="/logs/outbound-documents">
+              <strong>查看出库单</strong><span>销售与普通出库凭证</span>
             </router-link>
             <router-link class="quick-action" to="/operations/orders">
-              <strong>录入客单</strong><span>创建销售订单</span>
-            </router-link>
-            <router-link class="quick-action" to="/warehouse/parts-inventory">
-              <strong>库存查询</strong><span>查看零件和产品结存</span>
+              <strong>新建客户订单</strong><span>录入客户需求与交期</span>
             </router-link>
           </div>
         </div>

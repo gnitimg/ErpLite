@@ -30,6 +30,7 @@ from .models import (
     ProductionSetting,
     SalesOrder,
     SalesOrderItem,
+    StockReservation,
     StockTransaction,
     StockTransactionItem,
 )
@@ -37,16 +38,23 @@ from .schemas import (
     BackupRestorePayload,
     LoginPayload,
     OrderPayload,
+    OrderShipmentPayload,
     OrderStockPayload,
     PartPayload,
     ProductPayload,
     ProductionRunSchedulePayload,
     ProductionRunStatusPayload,
+    ProductionCompletionPayload,
     ProductionSettingsPayload,
     SamplePayload,
     StockPayload,
 )
-from .planning import list_production_runs, recalculate_production_plan
+from .planning import (
+    list_production_runs,
+    production_demand_summary,
+    purchase_requirement_summary,
+    recalculate_production_plan,
+)
 from .services import (
     create_transaction,
     client_ip,
@@ -73,9 +81,12 @@ BomStatus = Literal["CONFIGURED", "EMPTY"]
 async def lifespan(_app: FastAPI):
     try:
         run_migrations()
-        if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
-            with SessionLocal() as db:
+        with SessionLocal() as db:
+            if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
                 seed_demo(db)
+            # 迁移后的旧订单、预留和自动排期也必须立即回到同一业务事实。
+            recalculate_production_plan(db)
+            db.commit()
         _app.state.database_ready = True
     except SQLAlchemyError as error:
         _app.state.database_ready = False
@@ -370,7 +381,8 @@ def dashboard(db: Session = Depends(get_db)):
         select(func.count())
         .select_from(SalesOrder)
         .where(SalesOrder.status.in_([
-            "DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"
+            "DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP",
+            "PARTIALLY_SHIPPED",
         ]))
     ) or 0
     inventory_value = db.scalar(
@@ -378,7 +390,11 @@ def dashboard(db: Session = Depends(get_db)):
     ) or 0
     recent_txs = db.scalars(
         select(StockTransaction)
-        .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order))
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+            selectinload(StockTransaction.related_production_run),
+        )
         .order_by(StockTransaction.occurred_at.desc()).limit(6)
     ).all()
     low_items = db.scalars(
@@ -388,7 +404,10 @@ def dashboard(db: Session = Depends(get_db)):
     ).all()
     pending_order_rows = db.scalars(
         select(SalesOrder)
-        .where(SalesOrder.status.in_(["CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"]))
+        .where(SalesOrder.status.in_([
+            "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP",
+            "PARTIALLY_SHIPPED",
+        ]))
         .options(
             selectinload(SalesOrder.items)
             .selectinload(SalesOrderItem.product)
@@ -397,8 +416,8 @@ def dashboard(db: Session = Depends(get_db)):
         )
         .order_by(SalesOrder.required_date, SalesOrder.order_date, SalesOrder.id)
     ).all()
-    purchase_todos: list[dict] = []
-    production_todos: list[dict] = []
+    purchase_todos = purchase_requirement_summary(db)
+    production_todos = production_demand_summary(db)
     shipping_todos: list[dict] = []
     for order in pending_order_rows:
         workflow = order_workflow_dict(db, order)
@@ -408,14 +427,9 @@ def dashboard(db: Session = Depends(get_db)):
             "customer_name": order.customer_name,
             "required_date": (order.required_date or order.order_date).isoformat(),
         }
-        shortages = [row for row in workflow["material_lines"] if row["shortage_quantity"] > 1e-9]
-        if workflow["next_action"] == "PURCHASE":
-            purchase_todos.append({**todo, "lines": shortages})
-        elif workflow["next_action"] == "PRODUCE":
-            production_todos.append(
-                {**todo, "lines": [row for row in workflow["product_lines"] if row["production_required"] > 1e-9]}
-            )
-        elif workflow["next_action"] == "SHIP":
+        if workflow["ready_to_ship"] and any(
+            row["remaining_quantity"] > 0 for row in workflow["product_lines"]
+        ):
             shipping_todos.append({**todo, "lines": workflow["product_lines"]})
 
     return {
@@ -649,6 +663,7 @@ def production_runs(status: str | None = None, db: Session = Depends(get_db)):
 
 @app.post("/api/production/plan/recalculate")
 def recalculate_plan(db: Session = Depends(get_db)):
+    """系统维护用；正常业务写入会自动重算。"""
     result = recalculate_production_plan(db)
     db.commit()
     return result
@@ -666,12 +681,88 @@ def update_production_run_status(
     if run.status not in {"PLANNED", "RUNNING"}:
         raise HTTPException(409, "该生产批次已结束，不能修改状态")
     run.status = payload.status
-    if payload.status == "RUNNING" and run.actual_start_at is None:
-        run.actual_start_at = datetime.now()
-    if payload.status == "CANCELLED":
-        recalculate_production_plan(db)
+    recalculate_production_plan(db)
     db.commit()
     return {"ok": True, "run_id": run_id, "status": run.status}
+
+
+@app.get("/api/production/demands")
+def production_demands(db: Session = Depends(get_db)):
+    return production_demand_summary(db)
+
+
+@app.get("/api/purchase/requirements")
+def purchase_requirements(db: Session = Depends(get_db)):
+    return purchase_requirement_summary(db)
+
+
+@app.post("/api/production/runs/{run_id}/complete", status_code=201)
+def complete_production_run(
+    run_id: int,
+    payload: ProductionCompletionPayload,
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(
+            selectinload(ProductionRun.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part),
+            selectinload(ProductionRun.allocations),
+        )
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    run = db.scalar(query)
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status not in {"PLANNED", "RUNNING"}:
+        raise HTTPException(409, "只有待完工批次可以办理生产入库")
+    if not run.product.bom_components:
+        raise HTTPException(409, "产品未配置 BOM，不能办理生产入库")
+    actual = int(payload.actual_quantity)
+    changes = [
+        (
+            component.part,
+            -float(component.quantity) * actual,
+            component.part.cost_price,
+        )
+        for component in run.product.bom_components
+    ]
+    changes.append((run.product, actual, run.product.cost_price))
+    tx = create_transaction(
+        db,
+        "ASSEMBLY_IN",
+        changes,
+        payload.notes or f"生产批次 {run.run_no} 完工入库",
+        related_production_run_id=run.id,
+        occurred_at=datetime.combine(payload.completion_date, time.min),
+    )
+    run.produced_quantity = actual
+    run.status = "COMPLETED"
+    run.actual_end_at = datetime.combine(payload.completion_date, time.min)
+    # 实际少产时，历史分配也只能记录本批次真正完成的数量；剩余缺口由重算生成新批次。
+    allocatable = actual
+    for allocation in sorted(run.allocations, key=lambda row: row.sequence):
+        fulfilled = min(int(allocation.quantity), allocatable)
+        if fulfilled <= 0:
+            db.delete(allocation)
+            continue
+        allocation.quantity = fulfilled
+        allocation.estimated_completion_at = run.actual_end_at
+        allocatable -= fulfilled
+    rebalance_product_reservations(db, {run.product_id})
+    plan = recalculate_production_plan(db)
+    db.commit()
+    return {
+        "transaction_id": tx.id,
+        "run_id": run.id,
+        "planned_quantity": run.planned_quantity,
+        "actual_quantity": actual,
+        "excess_quantity": max(actual - int(run.planned_quantity), 0),
+        "plan": plan,
+    }
 
 
 def _active_schedule_condition():
@@ -852,6 +943,36 @@ def stock_transactions(
     return [transaction_dict(tx) for tx in txs]
 
 
+def _document_rows(db: Session, direction: Literal["INBOUND", "OUTBOUND"]):
+    types = (
+        ("PURCHASE_IN", "ASSEMBLY_IN", "MANUAL_IN", "OPENING")
+        if direction == "INBOUND"
+        else ("SALE_OUT", "MANUAL_OUT")
+    )
+    rows = db.scalars(
+        select(StockTransaction)
+        .where(StockTransaction.transaction_type.in_(types))
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+            selectinload(StockTransaction.related_production_run),
+        )
+        .order_by(StockTransaction.occurred_at.desc())
+        .limit(500)
+    ).all()
+    return [transaction_dict(row) for row in rows]
+
+
+@app.get("/api/documents/inbound")
+def inbound_documents(db: Session = Depends(get_db)):
+    return _document_rows(db, "INBOUND")
+
+
+@app.get("/api/documents/outbound")
+def outbound_documents(db: Session = Depends(get_db)):
+    return _document_rows(db, "OUTBOUND")
+
+
 @app.post("/api/stock/inbound", status_code=201)
 def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
@@ -859,15 +980,8 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
         raise HTTPException(422, "产品入库数量必须为正整数")
     changes: list[tuple[InventoryItem, float, float]] = []
     tx_type = "PURCHASE_IN" if item.kind == "PART" else "MANUAL_IN"
-    production_run = None
     if payload.production_run_id is not None:
-        production_run = db.get(ProductionRun, payload.production_run_id)
-        if not production_run or production_run.product_id != item.id:
-            raise HTTPException(400, "生产批次与所选产品不匹配")
-        if production_run.status not in {"PLANNED", "RUNNING"}:
-            raise HTTPException(409, "该生产批次已完成或取消")
-        if abs(float(payload.quantity) - float(production_run.planned_quantity)) > 1e-6:
-            raise HTTPException(422, "按计划完工时，入库数量必须等于批次计划数量")
+        raise HTTPException(410, "生产批次请从“生产入库”页面办理完工入库")
     if item.kind == "PRODUCT" and payload.consume_bom:
         product = db.scalar(
             select(InventoryItem)
@@ -883,15 +997,11 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
         tx_type = "ASSEMBLY_IN"
     changes.append((item, payload.quantity, payload.unit_cost or item.cost_price))
     tx = create_transaction(db, tx_type, changes, payload.notes)
-    if tx_type == "ASSEMBLY_IN":
-        # Newly produced stock must immediately flow to confirmed orders by delivery priority.
+    if item.kind == "PRODUCT":
+        # 新增成品必须立即按交期流向活动订单。
         rebalance_product_reservations(db, {item.id})
-        if production_run:
-            production_run.produced_quantity = payload.quantity
-            production_run.status = "COMPLETED"
-            production_run.actual_start_at = production_run.actual_start_at or datetime.now()
-            production_run.actual_end_at = datetime.now()
-        recalculate_production_plan(db)
+    # 零件到货、普通成品入库都会改变待购买、可承诺库存或 ETA。
+    recalculate_production_plan(db)
     db.commit()
     tx = db.scalar(
         select(StockTransaction)
@@ -915,8 +1025,7 @@ def outbound(payload: StockPayload, db: Session = Depends(get_db)):
         if payload.quantity > free_stock + 1e-9:
             raise HTTPException(409, f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留")
     tx = create_transaction(db, "MANUAL_OUT", [(item, -payload.quantity, item.cost_price)], payload.notes)
-    if item.kind == "PRODUCT":
-        recalculate_production_plan(db)
+    recalculate_production_plan(db)
     db.commit()
     tx = db.scalar(
         select(StockTransaction)
@@ -987,6 +1096,45 @@ def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
     return order_dict(load_order(db, order.id))
 
 
+@app.put("/api/orders/{order_id}")
+def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get_db)):
+    order = load_order(db, order_id)
+    if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
+        raise HTTPException(409, "订单已经发生出库，客户、产品、数量和价格已冻结")
+    if order.status != "DRAFT":
+        raise HTTPException(409, "只有草稿订单可以编辑")
+    product_ids = [line.product_id for line in payload.items]
+    products = {
+        item.id: item
+        for item in db.scalars(select(InventoryItem).where(
+            InventoryItem.id.in_(product_ids),
+            InventoryItem.kind == "PRODUCT",
+            InventoryItem.active.is_(True),
+        )).all()
+    }
+    if len(products) != len(product_ids):
+        raise HTTPException(400, "客单中包含无效产品")
+    order.customer_name = payload.customer_name
+    order.customer_phone = payload.customer_phone
+    order.customer_address = payload.customer_address
+    order.order_date = payload.order_date
+    order.required_date = payload.required_date or payload.order_date
+    order.notes = payload.notes
+    order.items = [
+        SalesOrderItem(
+            product_id=line.product_id,
+            quantity=line.quantity,
+            reference_price=products[line.product_id].sale_price,
+            unit_price=line.unit_price,
+            line_total=round(line.quantity * line.unit_price, 2),
+        )
+        for line in payload.items
+    ]
+    order.total_amount = round(sum(line.line_total for line in order.items), 2)
+    db.commit()
+    return order_dict(load_order(db, order.id))
+
+
 @app.post("/api/orders/{order_id}/confirm")
 def confirm_order(order_id: int, db: Session = Depends(get_db)):
     order = load_order(db, order_id)
@@ -1010,101 +1158,121 @@ def order_availability(order_id: int, db: Session = Depends(get_db)):
     return order_workflow_dict(db, load_order(db, order_id))
 
 
-@app.post("/api/orders/{order_id}/prepare")
+@app.post("/api/orders/{order_id}/prepare", deprecated=True)
 def prepare_order(order_id: int, db: Session = Depends(get_db)):
-    order = load_order(db, order_id)
-    if order.status not in {"CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"}:
-        raise HTTPException(409, "只有已确认且未完结的客单可以重算计划")
-    plan = recalculate_production_plan(db)
-    db.commit()
-    refreshed = load_order(db, order_id)
-    return {
-        "order": order_dict(refreshed),
-        "workflow": order_workflow_dict(db, refreshed),
-        "plan": plan,
-    }
+    raise HTTPException(410, "订单级备货已停用；系统会自动聚合待购买和待生产需求")
 
 
-@app.post("/api/orders/{order_id}/receive-materials")
+@app.post("/api/orders/{order_id}/receive-materials", deprecated=True)
 def receive_order_materials(
     order_id: int,
     payload: OrderStockPayload,
     db: Session = Depends(get_db),
 ):
-    order = load_order(db, order_id)
-    if order.status not in {"CONFIRMED", "WAITING_MATERIALS"}:
-        raise HTTPException(409, "该客单当前不需要办理零件入库")
-    workflow = order_workflow_dict(db, order)
-    if workflow["next_action"] == "WAIT_PRIORITY":
-        raise HTTPException(409, "该客单正在等待更早交期客单，暂不采购或生产")
-    if workflow["next_action"] == "CONFIGURE_BOM":
-        raise HTTPException(409, "该客单产品尚未配置 BOM，请先完善产品组成")
-    shortages = [row for row in workflow["material_lines"] if row["shortage_quantity"] > 1e-9]
-    if not shortages:
-        plan = recalculate_production_plan(db)
-        db.commit()
-        refreshed = load_order(db, order_id)
-        return {
-            "order": order_dict(refreshed),
-            "workflow": order_workflow_dict(db, refreshed),
-            "plan": plan,
-            "material_transaction_id": None,
-        }
+    raise HTTPException(410, "订单级补料已停用；请按待购买汇总在出入库页面办理采购入库")
 
-    part_ids = [row["part_id"] for row in shortages]
-    parts = {
-        item.id: item
-        for item in db.scalars(
-            select(InventoryItem).where(InventoryItem.id.in_(part_ids), InventoryItem.kind == "PART")
+
+def _ship_order(
+    db: Session,
+    order_id: int,
+    requested: dict[int, int] | None,
+    notes: str = "",
+) -> dict:
+    query = (
+        select(SalesOrder)
+        .where(SalesOrder.id == order_id)
+        .options(selectinload(SalesOrder.items).selectinload(SalesOrderItem.product))
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    order = db.scalar(query)
+    if not order:
+        raise HTTPException(404, "客单不存在")
+    if order.status not in {
+        "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP", "PARTIALLY_SHIPPED",
+    }:
+        raise HTTPException(409, "该客单当前不能出库")
+    lines = sorted(order.items, key=lambda line: line.id)
+    line_by_id = {line.id: line for line in lines}
+    if requested is None:
+        requested = {
+            line.id: max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+            for line in lines
+        }
+    if not requested or any(line_id not in line_by_id for line_id in requested):
+        raise HTTPException(400, "出库明细不属于该客单")
+    reservations = {
+        row.order_item_id: row
+        for row in db.scalars(
+            select(StockReservation)
+            .where(StockReservation.order_item_id.in_(sorted(requested)))
+            .order_by(StockReservation.order_item_id)
+            .with_for_update()
         ).all()
     }
-    changes = [
-        (parts[row["part_id"]], row["shortage_quantity"], parts[row["part_id"]].cost_price)
-        for row in shortages
-    ]
-    transaction = create_transaction(
-        db,
-        "PURCHASE_IN",
-        changes,
-        payload.notes or f"客单 {order.order_no} 缺口零件入库",
-        order.id,
-    )
-    plan = recalculate_production_plan(db)
-    db.commit()
-    refreshed = load_order(db, order_id)
-    return {
-        "order": order_dict(refreshed),
-        "workflow": order_workflow_dict(db, refreshed),
-        "plan": plan,
-        "material_transaction_id": transaction.id,
-    }
-
-
-@app.post("/api/orders/{order_id}/fulfill")
-def fulfill_order(order_id: int, db: Session = Depends(get_db)):
-    order = load_order(db, order_id)
-    if order.status != "READY_TO_SHIP":
-        raise HTTPException(409, "客单尚未完成库存检查和备货，不能出库")
-    if any(float(line.reserved_quantity or 0) + 1e-9 < float(line.quantity) for line in order.items):
-        raise HTTPException(409, "客单产品预留数量不足，请重新执行备货检查")
-    product_ids = {line.product_id for line in order.items}
+    changes = []
+    price_snapshots: dict[int, tuple[float, float]] = {}
+    for line_id, quantity in requested.items():
+        line = line_by_id[line_id]
+        remaining = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        reserved = int(reservations.get(line_id).quantity if reservations.get(line_id) else 0)
+        if quantity <= 0:
+            raise HTTPException(422, "出库数量必须为正整数")
+        if quantity > remaining:
+            raise HTTPException(409, f"{line.product.name} 本次出库超过剩余数量 {remaining}")
+        if quantity > reserved:
+            raise HTTPException(409, f"{line.product.name} 当前仅为本单预留 {reserved} {line.product.unit}")
+        changes.append((line.product, -quantity, line.product.cost_price))
+        price_snapshots[line.product_id] = (
+            float(line.unit_price),
+            round(float(line.unit_price) * quantity, 2),
+        )
     tx = create_transaction(
         db,
         "SALE_OUT",
-        [
-            (line.product, -line.quantity, line.product.cost_price)
-            for line in order.items
-        ],
-        f"客单 {order.order_no} 出库",
-        order.id,
+        changes,
+        notes or f"客单 {order.order_no} 出库",
+        related_order_id=order.id,
+        price_snapshots=price_snapshots,
     )
-    release_order_reservations(db, order)
-    order.status = "FULFILLED"
+    affected_products = set()
+    for line_id, quantity in requested.items():
+        line = line_by_id[line_id]
+        line.shipped_quantity = int(line.shipped_quantity or 0) + quantity
+        affected_products.add(line.product_id)
     db.flush()
-    rebalance_product_reservations(db, product_ids)
+    rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
-    return {"order": order_dict(order), "transaction_id": tx.id}
+    return {
+        "order": order_dict(load_order(db, order.id)),
+        "transaction_id": tx.id,
+    }
+
+
+@app.post("/api/orders/{order_id}/ship", status_code=201)
+def ship_order_lines(
+    order_id: int,
+    payload: OrderShipmentPayload,
+    db: Session = Depends(get_db),
+):
+    return _ship_order(
+        db,
+        order_id,
+        {line.order_item_id: line.quantity for line in payload.items},
+        payload.notes,
+    )
+
+
+@app.post("/api/orders/{order_id}/ship-all", status_code=201)
+def ship_order_all(order_id: int, db: Session = Depends(get_db)):
+    return _ship_order(db, order_id, None)
+
+
+@app.post("/api/orders/{order_id}/fulfill", deprecated=True)
+def fulfill_order(order_id: int, db: Session = Depends(get_db)):
+    """旧客户端兼容别名；新前端使用 ship-all。"""
+    return _ship_order(db, order_id, None)
 
 
 @app.post("/api/orders/{order_id}/cancel")
@@ -1112,6 +1280,8 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     order = load_order(db, order_id)
     if order.status in {"FULFILLED", "CANCELLED"}:
         raise HTTPException(409, "已完结客单不能取消")
+    if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
+        raise HTTPException(409, "订单已经发生出库，不能取消；请继续处理剩余数量")
     product_ids = {line.product_id for line in order.items}
     release_order_reservations(db, order)
     order.status = "CANCELLED"

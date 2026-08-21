@@ -129,7 +129,31 @@ class ProductionSettingsPayload(BaseModel):
 
 
 class ProductionRunStatusPayload(BaseModel):
-    status: Literal["RUNNING", "CANCELLED"]
+    status: Literal["CANCELLED"]
+
+
+class ProductionCompletionPayload(BaseModel):
+    actual_quantity: int = Field(gt=0)
+    completion_date: date = Field(default_factory=date.today)
+    notes: str = Field(default="", max_length=500)
+
+
+class OrderShipmentLinePayload(BaseModel):
+    order_item_id: int
+    quantity: int = Field(gt=0)
+
+
+class OrderShipmentPayload(BaseModel):
+    items: list[OrderShipmentLinePayload] = Field(min_length=1)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("items")
+    @classmethod
+    def unique_order_items(cls, value: list[OrderShipmentLinePayload]):
+        ids = [line.order_item_id for line in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一订单产品不能重复出库")
+        return value
 
 
 class ProductionRunSchedulePayload(BaseModel):

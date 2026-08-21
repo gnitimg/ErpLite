@@ -8,7 +8,7 @@
 2. 产品组成由 `product_bom_items` 保存；每行表示生产 1 单位产品所需的零件数量。
 3. `inventory_items.stock_qty` 是快速读取的实时结存，但任何修改必须和 `stock_transactions`、`stock_transaction_items` 流水在同一数据库事务中完成。
 4. 产品生产入库是一笔复合流水：成品为正数，BOM 零件按“入库数量 × 单台用量”为负数；任何零件不足时整笔失败。
-5. 客单确认后按要求交期创建 `stock_reservations` 成品预留；点击“出库”时统一校验并扣减已预留成品，成功后客单进入 `FULFILLED`。
+5. 客单确认后按要求交期创建成品预留；预留基数始终是 `quantity - shipped_quantity`。订单允许多次出库，全部出完才进入 `FULFILLED`。
 6. 当前版本禁止负库存。已产生业务历史的物料采用停用而非物理删除。
 7. 同一笔库存业务涉及的全部物料按 ID 固定顺序加行锁，结存和流水在同一事务中写入。
 
@@ -24,11 +24,11 @@
 
 ### `sales_orders` / `sales_order_items`
 
-客户订单头与产品明细。状态流转为 `DRAFT → CONFIRMED / WAITING_MATERIALS → READY_TO_SHIP → FULFILLED`，未完结状态可转为 `CANCELLED`。订单和明细缓存预计完成时间、计算时间、可靠性和原因；缓存可由生产计划重建。
+客户订单头与产品明细。明细保存整数 `quantity`、`shipped_quantity`，剩余数量由两者相减。状态流转为 `DRAFT → CONFIRMED / WAITING_MATERIALS / READY_TO_SHIP → PARTIALLY_SHIPPED → FULFILLED`；第一次出库后订单业务内容冻结。订单和明细缓存 ETA、可靠性和原因，可由生产计划重建。
 
 ### `stock_reservations`
 
-已确认客单的成品库存预留。`inventory_items.stock_qty` 继续表示物理结存，预留不直接扣减它。可承诺库存等于物理结存减去其他有效预留；每条客单明细最多一条权威预留记录。
+已确认客单剩余未出库部分的成品库存预留。`inventory_items.stock_qty` 继续表示物理结存，预留不直接扣减它。每条客单明细最多一条权威预留，且 `reservation.quantity <= quantity - shipped_quantity`。
 
 ### 产品模具数量 / `production_settings`
 
@@ -48,7 +48,16 @@
 
 ### `stock_transactions` / `stock_transaction_items`
 
-库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。一笔期初盘点可包含多种物料；一笔生产入库可以同时记录成品增加与多个零件减少。普通结存可由全部非样品流水汇总复核。
+库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。一笔生产入库同时记录成品增加与 BOM 零件减少，并通过 `related_production_run_id` 关联批次；每次订单出库独立关联订单。
+
+单据头保存订单号、客户名称、电话、地址和经办人快照；单据行保存 SKU、名称、规格、单位以及可选成交价快照。旧流水快照允许为空，读取时回退当前主数据；新流水始终写快照，因此历史单据不会被后续主数据改名影响。
+
+## 聚合需求规则
+
+- 成品库存先按要求交期分配，订单生产缺口为 `remaining - reserved`。
+- 全部订单的生产缺口按 `product_id` 合并；有效 `ProductionAllocation` 是已排产覆盖量，未覆盖部分才创建新批次。
+- 全部产品需求展开 BOM 后按 `part_id` 汇总，再减一次当前零件库存，得到“待购买”。缺料只影响 ETA 可靠性，不阻断排产。
+- `ProductionRun` 正常状态从 `PLANNED` 直接完工为 `COMPLETED`；历史 `RUNNING` 继续兼容并允许直接完工。
 
 ## 后续扩展位置
 

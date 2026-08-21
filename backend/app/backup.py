@@ -30,7 +30,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 10
+BACKUP_SCHEMA_VERSION = 11
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -104,7 +104,7 @@ def _load_archive(path: Path) -> dict[str, Any]:
         raise BackupError("备份文件已损坏或格式不正确") from error
 
     schema_version = payload.get("schema_version")
-    if schema_version not in {1, 2, 3, 4, 5, 6, 7, 8, 9, BACKUP_SCHEMA_VERSION}:
+    if schema_version not in set(range(1, BACKUP_SCHEMA_VERSION + 1)):
         raise BackupError("备份版本与当前系统不兼容")
     if not isinstance(payload.get("created_at"), str):
         raise BackupError("备份缺少有效的创建时间")
@@ -215,6 +215,24 @@ def _load_archive(path: Path) -> dict[str, Any]:
                 row.get("daily_capacity", 0)
                 or legacy_capacity.get(int(row.get("id", 0) or 0), 0)
             )
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 10:
+        for row in tables.get("sales_order_items", []):
+            row.setdefault("shipped_quantity", 0)
+        for row in tables.get("stock_transactions", []):
+            row.setdefault("related_production_run_id", None)
+            row.setdefault("order_no_snapshot", None)
+            row.setdefault("counterparty_name_snapshot", None)
+            row.setdefault("counterparty_phone_snapshot", None)
+            row.setdefault("counterparty_address_snapshot", None)
+            row.setdefault("operator_snapshot", None)
+        for row in tables.get("stock_transaction_items", []):
+            row.setdefault("sku_snapshot", None)
+            row.setdefault("name_snapshot", None)
+            row.setdefault("spec_snapshot", None)
+            row.setdefault("unit_snapshot", None)
+            row.setdefault("unit_price_snapshot", None)
+            row.setdefault("line_total_snapshot", None)
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

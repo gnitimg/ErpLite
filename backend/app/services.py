@@ -153,6 +153,11 @@ def order_dict(order: SalesOrder) -> dict:
                 "product_sku": line.product.sku,
                 "product_name": line.product.name,
                 "quantity": line.quantity,
+                "shipped_quantity": int(line.shipped_quantity or 0),
+                "remaining_quantity": max(
+                    int(line.quantity) - int(line.shipped_quantity or 0),
+                    0,
+                ),
                 "reserved_quantity": line.reserved_quantity or 0,
                 "reference_price": line.reference_price,
                 "unit_price": line.unit_price,
@@ -178,21 +183,38 @@ def transaction_dict(tx: StockTransaction) -> dict:
         "transaction_type": tx.transaction_type,
         "occurred_at": tx.occurred_at.isoformat(),
         "related_order_id": tx.related_order_id,
-        "related_order_no": tx.related_order.order_no if tx.related_order else None,
+        "related_order_no": tx.order_no_snapshot or (tx.related_order.order_no if tx.related_order else None),
+        "related_production_run_id": tx.related_production_run_id,
+        "related_production_run_no": (
+            tx.related_production_run.run_no if tx.related_production_run else None
+        ),
+        "counterparty_name": tx.counterparty_name_snapshot or (
+            tx.related_order.customer_name if tx.related_order else None
+        ),
+        "counterparty_phone": tx.counterparty_phone_snapshot or (
+            tx.related_order.customer_phone if tx.related_order else None
+        ),
+        "counterparty_address": tx.counterparty_address_snapshot or (
+            tx.related_order.customer_address if tx.related_order else None
+        ),
+        "operator": tx.operator_snapshot,
         "notes": tx.notes,
         "lines": [
             {
                 "id": line.id,
                 "item_id": line.item_id,
-                "sku": line.item.sku,
-                "name": line.item.name,
+                "sku": line.sku_snapshot or line.item.sku,
+                "name": line.name_snapshot or line.item.name,
+                "spec": line.spec_snapshot if line.spec_snapshot is not None else line.item.spec,
                 "kind": line.item.kind,
-                "unit": line.item.unit,
+                "unit": line.unit_snapshot or line.item.unit,
                 "inventory_scope": (
                     "SAMPLE" if tx.transaction_type == "SAMPLE_ADJUST" else line.item.kind
                 ),
                 "quantity_change": line.quantity_change,
                 "unit_cost": line.unit_cost,
+                "unit_price": line.unit_price_snapshot,
+                "line_total": line.line_total_snapshot,
             }
             for line in tx.lines
         ],
@@ -205,6 +227,10 @@ def create_transaction(
     changes: list[tuple[InventoryItem, float, float]],
     notes: str = "",
     related_order_id: int | None = None,
+    related_production_run_id: int | None = None,
+    occurred_at: datetime | None = None,
+    operator: str | None = None,
+    price_snapshots: dict[int, tuple[float, float]] | None = None,
 ) -> StockTransaction:
     if not changes:
         raise HTTPException(400, "库存流水至少需要一项物料变化")
@@ -250,8 +276,19 @@ def create_transaction(
         if item.stock_qty + delta < -1e-9:
             raise HTTPException(409, f"{item.name} 库存不足，当前 {item.stock_qty:g} {item.unit}")
 
+    related_order = db.get(SalesOrder, related_order_id) if related_order_id else None
     tx = StockTransaction(
-        transaction_no=serial("ST"), transaction_type=tx_type, notes=notes.strip(), related_order_id=related_order_id
+        transaction_no=serial("ST"),
+        transaction_type=tx_type,
+        notes=notes.strip(),
+        related_order_id=related_order_id,
+        related_production_run_id=related_production_run_id,
+        occurred_at=occurred_at or datetime.now(),
+        order_no_snapshot=related_order.order_no if related_order else None,
+        counterparty_name_snapshot=related_order.customer_name if related_order else None,
+        counterparty_phone_snapshot=related_order.customer_phone if related_order else None,
+        counterparty_address_snapshot=related_order.customer_address if related_order else None,
+        operator_snapshot=operator,
     )
     db.add(tx)
     db.flush()
@@ -259,7 +296,19 @@ def create_transaction(
         item.stock_qty = round(item.stock_qty + delta, 6)
         if delta > 0 and unit_cost > 0:
             item.cost_price = unit_cost
-        db.add(StockTransactionItem(transaction_id=tx.id, item_id=item.id, quantity_change=delta, unit_cost=unit_cost))
+        price, line_total = (price_snapshots or {}).get(item.id, (None, None))
+        db.add(StockTransactionItem(
+            transaction_id=tx.id,
+            item_id=item.id,
+            quantity_change=delta,
+            unit_cost=unit_cost,
+            sku_snapshot=item.sku,
+            name_snapshot=item.name,
+            spec_snapshot=item.spec,
+            unit_snapshot=item.unit,
+            unit_price_snapshot=price,
+            line_total_snapshot=line_total,
+        ))
     db.flush()
     return tx
 
@@ -280,7 +329,12 @@ def load_order(db: Session, order_id: int) -> SalesOrder:
     return order
 
 
-RESERVATION_STATUSES = ("CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP")
+RESERVATION_STATUSES = (
+    "CONFIRMED",
+    "WAITING_MATERIALS",
+    "READY_TO_SHIP",
+    "PARTIALLY_SHIPPED",
+)
 
 
 def rebalance_product_reservations(db: Session, product_ids: set[int] | None = None) -> None:
@@ -321,7 +375,8 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
     remaining: dict[int, float] = {}
     for line in lines:
         available = remaining.setdefault(line.product_id, float(line.product.stock_qty))
-        reserved_quantity = int(min(int(line.quantity), max(available, 0)))
+        demand = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        reserved_quantity = int(min(demand, max(available, 0)))
         line.reserved_quantity = reserved_quantity
         reservation = reservations.get(line.id)
         if reservation is None:
@@ -344,11 +399,21 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
         active_order = db.get(SalesOrder, order_id)
         order_lines = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)).all()
         if active_order and active_order.status in RESERVATION_STATUSES:
-            active_order.status = (
-                "READY_TO_SHIP"
-                if all(float(line.reserved_quantity or 0) + 1e-9 >= float(line.quantity) for line in order_lines)
-                else "WAITING_MATERIALS"
+            all_shipped = all(int(line.shipped_quantity or 0) >= int(line.quantity) for line in order_lines)
+            any_shipped = any(int(line.shipped_quantity or 0) > 0 for line in order_lines)
+            all_remaining_reserved = all(
+                int(line.reserved_quantity or 0)
+                >= max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+                for line in order_lines
             )
+            if all_shipped:
+                active_order.status = "FULFILLED"
+            elif any_shipped:
+                active_order.status = "PARTIALLY_SHIPPED"
+            elif all_remaining_reserved:
+                active_order.status = "READY_TO_SHIP"
+            else:
+                active_order.status = "WAITING_MATERIALS"
     db.flush()
 
 
@@ -374,10 +439,11 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
     missing_bom: list[dict] = []
 
     for line in order.items:
-        reserved = min(float(line.reserved_quantity or 0), float(line.quantity))
+        remaining_quantity = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        reserved = min(int(line.reserved_quantity or 0), remaining_quantity)
         other_reserved = reserved_product_quantity(db, line.product_id, order.id)
         free_stock = max(float(line.product.stock_qty) - other_reserved - reserved, 0)
-        production_required = max(float(line.quantity) - reserved, 0)
+        production_required = max(remaining_quantity - reserved, 0)
         priority_rows = db.execute(
             select(SalesOrder.id, SalesOrder.order_no, SalesOrder.required_date)
             .join(SalesOrderItem, SalesOrderItem.order_id == SalesOrder.id)
@@ -392,13 +458,14 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
             "name": line.product.name,
             "unit": line.product.unit,
             "ordered_quantity": line.quantity,
+            "shipped_quantity": int(line.shipped_quantity or 0),
+            "remaining_quantity": remaining_quantity,
             "reserved_quantity": reserved,
             "free_stock": round(free_stock, 6),
             "production_required": round(production_required, 6),
             "bom_configured": bool(line.product.bom_components),
             "priority_rank": priority_rank,
             "priority_total": len(priority_rows),
-            "waiting_for_earlier_orders": priority_rank > 1 and production_required > 1e-9,
             "estimated_completion_at": (
                 line.estimated_completion_at.isoformat() if line.estimated_completion_at else None
             ),
@@ -433,9 +500,11 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
     material_lines.sort(key=lambda row: (row["shortage_quantity"] <= 0, row["sku"]))
 
     has_shortage = any(row["shortage_quantity"] > 1e-9 for row in material_lines)
-    waiting_for_priority = any(row["waiting_for_earlier_orders"] for row in product_lines)
     production_required = any(row["production_required"] > 1e-9 for row in product_lines)
-    ready_to_ship = all(row["reserved_quantity"] + 1e-9 >= row["ordered_quantity"] for row in product_lines)
+    ready_to_ship = all(
+        row["reserved_quantity"] >= row["remaining_quantity"]
+        for row in product_lines
+    )
     if order.status == "DRAFT":
         next_action = "CONFIRM"
     elif order.status == "FULFILLED":
@@ -444,8 +513,6 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
         next_action = "CANCELLED"
     elif ready_to_ship:
         next_action = "SHIP"
-    elif waiting_for_priority:
-        next_action = "WAIT_PRIORITY"
     elif missing_bom:
         next_action = "CONFIGURE_BOM"
     elif has_shortage:
@@ -474,66 +541,7 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
 
 
 def prepare_order_stock(db: Session, order: SalesOrder) -> dict:
-    if order.status not in RESERVATION_STATUSES:
-        raise HTTPException(409, "只有已确认且未完结的客单可以执行备货检查")
-
-    db.flush()
-    product_ids = {line.product_id for line in order.items}
-    rebalance_product_reservations(db, product_ids)
-
-    workflow = order_workflow_dict(db, order)
-    if (
-        workflow["next_action"] == "WAIT_PRIORITY"
-        or workflow["missing_bom"]
-        or any(row["shortage_quantity"] > 1e-9 for row in workflow["material_lines"])
-    ):
-        order.status = "WAITING_MATERIALS"
-        db.commit()
-        refreshed = load_order(db, order.id)
-        return {"order": order_dict(refreshed), "workflow": order_workflow_dict(db, refreshed), "transaction_id": None}
-
-    changes: dict[int, list] = {}
-    for line in order.items:
-        production_quantity = max(float(line.quantity) - float(line.reserved_quantity or 0), 0)
-        if production_quantity <= 1e-9:
-            continue
-        for component in line.product.bom_components:
-            entry = changes.setdefault(component.part_id, [component.part, 0.0, component.part.cost_price])
-            entry[1] -= float(component.quantity) * production_quantity
-        product_entry = changes.setdefault(line.product_id, [line.product, 0.0, line.product.cost_price])
-        product_entry[1] += production_quantity
-
-    transaction_id = None
-    if changes:
-        for item, delta, _unit_cost in changes.values():
-            if item.kind == "PART" and item.stock_qty + delta < -1e-9:
-                order.status = "WAITING_MATERIALS"
-                db.commit()
-                refreshed = load_order(db, order.id)
-                return {
-                    "order": order_dict(refreshed),
-                    "workflow": order_workflow_dict(db, refreshed),
-                    "transaction_id": None,
-                }
-        transaction = create_transaction(
-            db,
-            "ASSEMBLY_IN",
-            [(item, round(delta, 6), unit_cost) for item, delta, unit_cost in changes.values()],
-            f"客单 {order.order_no} 缺货产品生产入库",
-            order.id,
-        )
-        transaction_id = transaction.id
-        rebalance_product_reservations(db, product_ids)
-
-    refreshed_workflow = order_workflow_dict(db, order)
-    order.status = "READY_TO_SHIP" if refreshed_workflow["ready_to_ship"] else "WAITING_MATERIALS"
-    db.commit()
-    refreshed = load_order(db, order.id)
-    return {
-        "order": order_dict(refreshed),
-        "workflow": order_workflow_dict(db, refreshed),
-        "transaction_id": transaction_id,
-    }
+    raise HTTPException(410, "订单级备货已停用，请使用待购买、订单排产和生产入库流程")
 
 
 def release_order_reservations(db: Session, order: SalesOrder) -> None:

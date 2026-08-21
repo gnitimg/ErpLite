@@ -16,23 +16,18 @@ import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
 type Direction = "inbound" | "outbound"
-type OperationScope = "item" | "order"
 
 const route = useRoute()
 const loading = ref(false)
 const saving = ref(false)
 const itemDrawer = ref(false)
-const orderDrawer = ref(false)
 const detailDrawer = ref(false)
 const filterDrawer = ref(false)
 const direction = ref<Direction>("inbound")
-const operationScope = ref<OperationScope>("item")
 const itemKind = ref<"PART" | "PRODUCT">("PART")
 const items = ref<any[]>([])
-const orders = ref<any[]>([])
 const rows = ref<any[]>([])
 const activeTransaction = ref<any>(null)
-const activeOrderWorkflow = ref<any>(null)
 const keyword = ref("")
 const filters = reactive({ transactionType: "", dateRange: [] as string[] })
 const itemForm = reactive({
@@ -41,22 +36,13 @@ const itemForm = reactive({
   unit_cost: 0,
   notes: ""
 })
-const orderForm = reactive({
-  order_id: undefined as number | undefined,
-  notes: ""
-})
 
 const isHistory = computed(() => route.meta.stockView === "history")
 const selectedItem = computed(() => items.value.find(item => item.id === itemForm.item_id))
 const filteredItems = computed(() => items.value.filter(item => item.kind === itemKind.value))
-const selectedOrder = computed(() => orders.value.find(order => order.id === orderForm.order_id))
 const activeFilterCount = computed(
   () => Number(Boolean(filters.transactionType)) + Number(filters.dateRange.length === 2)
 )
-const candidateOrders = computed(() => orders.value.filter((order) => {
-  if (direction.value === "outbound") return order.status === "READY_TO_SHIP"
-  return ["CONFIRMED", "WAITING_MATERIALS"].includes(order.status)
-}))
 
 function quantityText(item: any, value: number) {
   return stockQty(
@@ -75,9 +61,8 @@ async function load(silent = false) {
     params.set("end_date", filters.dateRange[1])
   }
   try {
-    [items.value, orders.value, rows.value] = await Promise.all([
+    [items.value, rows.value] = await Promise.all([
       api("/api/inventory"),
-      api("/api/orders"),
       api(`/api/stock/transactions?${params}`)
     ])
   } catch (error: any) {
@@ -99,9 +84,7 @@ function resetFilters() {
 }
 
 function chooseDirection(value: Direction) {
-  direction.value = value
-  if (operationScope.value === "item") openItemOperation(value)
-  else openOrderOperation(value)
+  openItemOperation(value)
 }
 
 function openItemOperation(value: Direction, item?: any) {
@@ -122,26 +105,9 @@ function onItemKindChange() {
   itemForm.unit_cost = 0
 }
 
-function openOrderOperation(value: Direction) {
-  direction.value = value
-  activeOrderWorkflow.value = null
-  Object.assign(orderForm, { order_id: undefined, notes: "" })
-  orderDrawer.value = true
-}
-
 function onItemChange() {
   itemForm.unit_cost = selectedItem.value?.cost_price || 0
   itemForm.quantity = 1
-}
-
-async function onOrderChange() {
-  activeOrderWorkflow.value = null
-  if (!orderForm.order_id) return
-  try {
-    activeOrderWorkflow.value = await api(`/api/orders/${orderForm.order_id}/availability`)
-  } catch (error: any) {
-    ElMessage.error(error.message)
-  }
 }
 
 function openDetail(row: any) {
@@ -181,34 +147,6 @@ async function saveItemOperation() {
   }
 }
 
-async function saveOrderOperation() {
-  if (!selectedOrder.value) return ElMessage.warning("请选择客户订单")
-  const inbound = direction.value === "inbound"
-  const action = inbound ? "补齐缺口零件并继续备货" : "将已预留产品出库"
-  try {
-    await ElMessageBox.confirm(
-      `确认按客单“${selectedOrder.value.order_no}”${action}吗？`,
-      "确认客单作业",
-      { type: "warning" }
-    )
-    saving.value = true
-    const endpoint = inbound
-      ? `/api/orders/${selectedOrder.value.id}/receive-materials`
-      : `/api/orders/${selectedOrder.value.id}/fulfill`
-    await api(endpoint, {
-      method: "POST",
-      body: JSON.stringify({ notes: orderForm.notes })
-    })
-    ElMessage.success(inbound ? "客单缺口零件已入库并继续备货" : "客单产品已完成出库")
-    orderDrawer.value = false
-    await load()
-  } catch (error: any) {
-    if (error !== "cancel") ElMessage.error(error.message)
-  } finally {
-    saving.value = false
-  }
-}
-
 onMounted(load)
 useLiveRefresh(() => load(true))
 watch(() => route.name, () => load())
@@ -217,15 +155,6 @@ watch(() => route.name, () => load())
 <template>
   <div class="erp-page stock-work-page">
     <template v-if="!isHistory">
-      <el-segmented
-        v-model="operationScope"
-        :options="[
-          { label: '按零件 / 产品作业', value: 'item' },
-          { label: '按客户订单作业', value: 'order' },
-        ]"
-        class="operation-scope-switch"
-      />
-
       <div class="stock-operation-grid">
         <button
           class="stock-operation-card inbound"
@@ -234,9 +163,8 @@ watch(() => route.name, () => load())
         >
           <span class="stock-operation-icon"><el-icon><BottomLeft /></el-icon></span>
           <span>
-            <strong>{{ operationScope === 'item' ? '办理物料入库' : '按客单补料入库' }}</strong>
-            <small v-if="operationScope === 'item'">零件采购到货、成品盘盈或其他入库</small>
-            <small v-else>自动按 BOM 缺口办理零件入库并继续生产备货</small>
+            <strong>办理物料入库</strong>
+            <small>零件采购到货、成品盘盈或其他普通入库</small>
           </span>
           <el-icon class="stock-operation-arrow">
             <ArrowRight />
@@ -249,9 +177,8 @@ watch(() => route.name, () => load())
         >
           <span class="stock-operation-icon"><el-icon><TopRight /></el-icon></span>
           <span>
-            <strong>{{ operationScope === 'item' ? '办理物料出库' : '按客单产品出库' }}</strong>
-            <small v-if="operationScope === 'item'">零件领用、产品非客单出库或库存调整</small>
-            <small v-else>选择已经完成库存预留的客单并一次性出库</small>
+            <strong>办理物料出库</strong>
+            <small>零件领用、产品非订单出库或库存调整；订单出库请在客户订单中办理</small>
           </span>
           <el-icon class="stock-operation-arrow">
             <ArrowRight />
@@ -261,9 +188,9 @@ watch(() => route.name, () => load())
 
       <div class="content-card">
         <div class="card-head">
-          <h3>{{ operationScope === 'item' ? '当前物料库存' : '待处理客户订单' }}</h3>
+          <h3>当前物料库存</h3>
         </div>
-        <el-table v-if="operationScope === 'item'" v-loading="loading" :data="items" height="420">
+        <el-table v-loading="loading" :data="items" height="420">
           <el-table-column label="物料" min-width="230">
             <template #default="{ row }">
               <div class="sku-cell">
@@ -313,49 +240,6 @@ watch(() => route.name, () => load())
           </el-table-column>
         </el-table>
 
-        <el-table v-else v-loading="loading" :data="orders" height="420">
-          <el-table-column label="客单" min-width="200">
-            <template #default="{ row }">
-              <span class="mono">{{ row.order_no }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="customer_name" label="客户" min-width="160" />
-          <el-table-column prop="required_date" label="要求交期" width="120" />
-          <el-table-column label="产品" min-width="220">
-            <template #default="{ row }">
-              {{ row.items[0]?.product_name || '-' }}
-              <span v-if="row.items.length > 1" class="muted">等 {{ row.items.length }} 项</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="120">
-            <template #default="{ row }">
-              <el-tag :type="row.status === 'READY_TO_SHIP' ? 'success' : 'warning'" size="small">
-                {{ row.status === 'READY_TO_SHIP' ? '待出库' : '待备货' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="快捷作业" width="150" fixed="right">
-            <template #default="{ row }">
-              <el-button
-                v-if="row.status === 'READY_TO_SHIP'"
-                link
-                type="success"
-                @click="openOrderOperation('outbound'); orderForm.order_id = row.id; onOrderChange()"
-              >
-                产品出库
-              </el-button>
-              <el-button
-                v-else-if="['CONFIRMED', 'WAITING_MATERIALS'].includes(row.status)"
-                link
-                type="primary"
-                @click="openOrderOperation('inbound'); orderForm.order_id = row.id; onOrderChange()"
-              >
-                补料入库
-              </el-button>
-              <span v-else class="muted">无需处理</span>
-            </template>
-          </el-table-column>
-        </el-table>
       </div>
     </template>
 
@@ -564,99 +448,6 @@ watch(() => route.name, () => load())
           </el-button>
           <el-button type="primary" :loading="saving" @click="saveItemOperation">
             确认{{ direction === 'inbound' ? '入库' : '出库' }}
-          </el-button>
-        </div>
-      </el-form>
-    </el-drawer>
-
-    <el-drawer
-      v-model="orderDrawer"
-      :title="direction === 'inbound' ? '按客单补料入库' : '按客单产品出库'"
-      size="min(720px, 96vw)"
-    >
-      <el-form label-position="top">
-        <el-form-item label="客户订单" required>
-          <el-select
-            v-model="orderForm.order_id"
-            filterable
-            placeholder="选择待处理客单"
-            style="width: 100%"
-            @change="onOrderChange"
-          >
-            <el-option
-              v-for="order in candidateOrders"
-              :key="order.id"
-              :label="`${order.order_no} · ${order.customer_name} · 交期 ${order.required_date}`"
-              :value="order.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-alert
-          v-if="direction === 'inbound'"
-          title="系统将按 BOM 自动补齐该客单的零件缺口，并继续执行生产和产品预留。"
-          type="info"
-          :closable="false"
-          show-icon
-          class="drawer-alert"
-        />
-        <el-alert
-          v-else
-          title="只显示已经全部预留产品的客单；确认后一次性生成客单出库流水。"
-          type="success"
-          :closable="false"
-          show-icon
-          class="drawer-alert"
-        />
-        <template v-if="activeOrderWorkflow">
-          <div class="detail-section-head">
-            <strong>{{ direction === 'inbound' ? '待入库零件' : '待出库产品' }}</strong>
-            <span>{{ selectedOrder?.order_no }}</span>
-          </div>
-          <el-table
-            :data="direction === 'inbound'
-              ? activeOrderWorkflow.material_lines.filter((line: any) => line.shortage_quantity > 0)
-              : activeOrderWorkflow.product_lines"
-            border
-            empty-text="当前客单没有需要处理的物料"
-          >
-            <el-table-column label="物料" min-width="230">
-              <template #default="{ row }">
-                <div class="sku-cell">
-                  <strong>{{ row.name }}</strong><span>{{ row.sku }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column
-              :label="direction === 'inbound' ? '缺口数量' : '出库数量'"
-              width="130"
-              align="right"
-            >
-              <template #default="{ row }">
-                <b>{{ direction === 'inbound' ? qty(row.shortage_quantity) : productQty(row.ordered_quantity) }}</b>
-                {{ row.unit }}
-              </template>
-            </el-table-column>
-          </el-table>
-        </template>
-        <el-form-item label="作业备注" class="order-operation-notes">
-          <el-input
-            v-model="orderForm.notes"
-            type="textarea"
-            :rows="3"
-            placeholder="供应商、到货单号、承运信息或其他说明"
-          />
-        </el-form-item>
-        <div class="drawer-footer">
-          <el-button @click="orderDrawer = false">
-            取消
-          </el-button>
-          <el-button
-            type="primary"
-            :loading="saving"
-            :disabled="!selectedOrder"
-            @click="saveOrderOperation"
-          >
-            确认{{ direction === 'inbound' ? '补料入库' : '客单出库' }}
           </el-button>
         </div>
       </el-form>
