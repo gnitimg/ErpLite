@@ -153,6 +153,20 @@ class ProductionSettingsPayload(BaseModel):
     schedule_auto_snap: bool = True
 
 
+class PrintSettingsPayload(BaseModel):
+    paper_preset: Literal[
+        "A4_LANDSCAPE",
+        "A4_PORTRAIT",
+        "A5_LANDSCAPE",
+        "A5_PORTRAIT",
+        "CONTINUOUS_HALF",
+        "CONTINUOUS_THIRD",
+        "CUSTOM",
+    ] = "A4_LANDSCAPE"
+    width_mm: float = Field(default=297, ge=50, le=500)
+    height_mm: float = Field(default=210, ge=50, le=500)
+
+
 class ProductionRunStatusPayload(BaseModel):
     status: Literal["CANCELLED"]
 

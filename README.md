@@ -25,6 +25,7 @@
 - 工作台集中显示待购买零件、待生产产品、待出库客单和库存预警。
 - 库存数量不显示负数；不足时使用红色状态。数量达到 10,000 后按“万”显示，例如 `15820` 显示为 `1.582万`，数据库仍保存原始数值。
 - 数据备份：一键创建、列表筛选、下载 ZIP 快照，并可从指定快照快速恢复。
+- “系统管理 → 打印设置”统一维护入库单和出库单纸张尺寸，内置 A4/A5 横纵向及二等分、三等分连续纸，也支持按毫米自定义宽高；打印时保持单据比例自动缩放并使用零浏览器页边距。
 - 客单确认后自动预留可承诺库存，并按全局生产位数量、产品模具数量、单机日产量和现有生产占用模拟预计完成时间。
 - “业务处理 → 订单排产”提供按日期显示的时间轴；生产位行数取自全局产线数，可将待确认产品批次拖到任意生产位的空闲日期，冲突校验通过后锁定人工排期并更新客单 ETA。
 - 同产品的不同客单需求先合并为连续生产批次，再通过产量分配计算各客单产品各自的满足时间；产品只有 1 套模具时禁止多线并行，有多套模具且能明显缩短交期时允许并行。
@@ -208,6 +209,7 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | 零件 | `GET/POST /api/parts`、`PUT/DELETE /api/parts/{id}` |
 | 产品/BOM | `GET/POST /api/products`、`PUT/DELETE /api/products/{id}`；产品接口同时保存 `mold_count` 与 `daily_capacity` |
 | 生产设置 | `GET/PUT /api/system/production-settings` 统一维护并行生产线数量和排产图自动吸附开关；生产位仅用于排产计算，不维护编号或名称 |
+| 打印设置 | `GET/PUT /api/system/print-settings` 统一维护单据纸张预设及自定义毫米宽高 |
 | 待购买 | `GET /api/purchase/requirements` |
 | 生产计划与排期 | `GET /api/production/demands`、`GET /api/production/runs`、`PUT/DELETE /api/production/runs/{id}/schedule` |
 | 生产入库 | `POST /api/production/runs/{id}/complete`；实际产量允许与计划不同 |

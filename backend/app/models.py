@@ -129,13 +129,16 @@ class ProductionLine(Base):
 
 
 class ProductionSetting(Base):
-    """全局生产设置；当前系统固定只使用 id=1 的单例记录。"""
+    """全局系统设置；当前系统固定只使用 id=1 的单例记录。"""
 
     __tablename__ = "production_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     line_count: Mapped[int] = mapped_column(Integer, default=1)
     schedule_auto_snap: Mapped[bool] = mapped_column(Boolean, default=True)
+    print_paper_preset: Mapped[str] = mapped_column(String(30), default="A4_LANDSCAPE")
+    print_width_mm: Mapped[float] = mapped_column(Float, default=297)
+    print_height_mm: Mapped[float] = mapped_column(Float, default=210)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 

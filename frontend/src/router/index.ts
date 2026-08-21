@@ -256,6 +256,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "生产设置", elIcon: "SetUp", keepAlive: true }
       },
       {
+        path: "print",
+        component: () => import("@/pages/erp/print-settings.vue"),
+        name: "PrintSettings",
+        meta: { title: "打印设置", elIcon: "Printer", keepAlive: true }
+      },
+      {
         path: "backups",
         component: () => import("@/pages/erp/backups.vue"),
         name: "Backups",

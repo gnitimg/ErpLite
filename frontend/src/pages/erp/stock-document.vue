@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, money, qty, useLiveRefresh } from "./api"
 import QuantityInput from "./components/QuantityInput.vue"
+import { printWithSavedSize } from "./print"
 
 type Direction = "INBOUND" | "OUTBOUND"
 
@@ -225,8 +226,8 @@ function viewDocument() {
   })
 }
 
-function printDocument() {
-  window.print()
+async function printDocument() {
+  await printWithSavedSize()
 }
 
 watch(direction, () => {
@@ -263,11 +264,13 @@ useLiveRefresh(() => loadInventory(true))
         <div class="document-meta">
           <label>
             <span>{{ counterpartyLabel }}</span>
-            <el-input v-model="form.counterparty_name" :placeholder="`请输入${counterpartyLabel}`" />
+            <el-input v-model="form.counterparty_name" class="no-print" :placeholder="`请输入${counterpartyLabel}`" />
+            <strong class="print-only">{{ form.counterparty_name || '-' }}</strong>
           </label>
           <label>
             <span>联系电话</span>
-            <el-input v-model="form.counterparty_phone" placeholder="选填" />
+            <el-input v-model="form.counterparty_phone" class="no-print" placeholder="选填" />
+            <strong class="print-only">{{ form.counterparty_phone || '-' }}</strong>
           </label>
           <label>
             <span>日期</span>
@@ -276,12 +279,15 @@ useLiveRefresh(() => loadInventory(true))
               type="date"
               value-format="YYYY-MM-DD"
               format="YYYY-MM-DD"
+              class="no-print"
               style="width: 100%"
             />
+            <strong class="print-only">{{ form.occurred_date }}</strong>
           </label>
           <label class="address-field">
             <span>{{ direction === 'INBOUND' ? '供应商地址' : '收货地址' }}</span>
-            <el-input v-model="form.counterparty_address" placeholder="选填" />
+            <el-input v-model="form.counterparty_address" class="no-print" placeholder="选填" />
+            <strong class="print-only">{{ form.counterparty_address || '-' }}</strong>
           </label>
         </div>
 
@@ -299,6 +305,7 @@ useLiveRefresh(() => loadInventory(true))
             <template #default="{ row }">
               <el-select
                 v-model="row.item_id"
+                class="no-print"
                 filterable
                 placeholder="搜索编码或名称"
                 style="width: 100%"
@@ -311,6 +318,7 @@ useLiveRefresh(() => loadInventory(true))
                   :value="item.id"
                 />
               </el-select>
+              <span class="print-only">{{ itemOf(row) ? `${itemOf(row).sku} · ${itemOf(row).name}` : '-' }}</span>
             </template>
           </el-table-column>
           <el-table-column label="规格型号" min-width="150">
@@ -323,14 +331,17 @@ useLiveRefresh(() => loadInventory(true))
             <template #default="{ row }">
               <QuantityInput
                 v-model="row.quantity"
+                class="no-print"
                 :integer="itemOf(row)?.kind === 'PRODUCT'"
                 :min="0"
               />
+              <span class="print-only">{{ qty(row.quantity) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="单价" width="150">
             <template #default="{ row }">
-              <el-input-number v-model="row.unit_price" :min="0" :precision="2" :controls="false" />
+              <el-input-number v-model="row.unit_price" class="no-print" :min="0" :precision="2" :controls="false" />
+              <span class="print-only">{{ money(row.unit_price) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="金额" width="120" align="right">
@@ -349,8 +360,8 @@ useLiveRefresh(() => loadInventory(true))
         </div>
 
         <div class="document-footer-fields">
-          <label><span>经办人</span><el-input v-model="form.operator" placeholder="选填" /></label>
-          <label class="notes-field"><span>备注</span><el-input v-model="form.notes" placeholder="填写本单说明" /></label>
+          <label><span>经办人</span><el-input v-model="form.operator" class="no-print" placeholder="选填" /><strong class="print-only">{{ form.operator || '-' }}</strong></label>
+          <label class="notes-field"><span>备注</span><el-input v-model="form.notes" class="no-print" placeholder="填写本单说明" /><strong class="print-only">{{ form.notes || '-' }}</strong></label>
         </div>
         <div class="signature-row">
           <span>制单：________________</span>
@@ -369,6 +380,7 @@ useLiveRefresh(() => loadInventory(true))
 </template>
 
 <style scoped>
+@page { size: 297mm 210mm; margin: 0; }
 .document-card { overflow: hidden; }
 .document-card-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .document-card-head h3 { margin: 0; }
@@ -391,6 +403,7 @@ useLiveRefresh(() => loadInventory(true))
 .document-footer-fields { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-top: 20px; }
 .signature-row { display: flex; justify-content: space-between; gap: 32px; margin-top: 30px; color: var(--el-text-color-regular); }
 .document-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 24px 24px; }
+.print-only { display: none; }
 @media (max-width: 900px) {
   .document-sheet { margin: 16px; padding: 20px; overflow-x: auto; }
   .document-title-row { grid-template-columns: 1fr; gap: 12px; }
@@ -400,11 +413,20 @@ useLiveRefresh(() => loadInventory(true))
   .signature-row { flex-direction: column; }
 }
 @media print {
+  :global(html), :global(body) { width: var(--erp-print-page-width, 297mm); height: var(--erp-print-page-height, 210mm); margin: 0 !important; overflow: visible !important; background: #fff !important; }
   :global(body *) { visibility: hidden !important; }
   .document-sheet, .document-sheet * { visibility: visible !important; }
-  .document-sheet { position: fixed; inset: 0; margin: 0; padding: 16mm; border: 0; overflow: visible; color: #000; }
+  .document-sheet { position: absolute; top: var(--erp-print-margin, 8mm); left: var(--erp-print-margin, 8mm); width: 277mm; margin: 0; padding: 0; border: 0; overflow: visible; color: #000; background: #fff; transform: scale(var(--erp-print-scale, 1)); transform-origin: top left; print-color-adjust: exact; }
   .no-print, :deep(.no-print) { display: none !important; }
-  :deep(.el-input__wrapper), :deep(.el-select__wrapper), :deep(.el-input-number) { box-shadow: none !important; padding: 0 !important; }
-  :deep(.el-input__inner), :deep(.el-select__selected-item) { color: #000 !important; }
+  .print-only { display: inline !important; color: #000; font-weight: 500; }
+  .document-title-row { grid-template-columns: 1fr auto 1fr; gap: 0; }
+  .document-title-row h1 { grid-column: 2; justify-self: stretch; }
+  .document-number { grid-column: 3; justify-self: stretch; }
+  .document-meta { grid-template-columns: 1.2fr 1fr 1fr; }
+  .address-field { grid-column: 1 / -1; }
+  .document-footer-fields { grid-template-columns: 1fr 2fr; }
+  .signature-row { flex-direction: row; }
+  .document-meta label, .document-footer-fields label { grid-template-columns: auto 1fr; min-height: 32px; border-bottom: 1px solid #d7dce3; }
+  .document-lines :deep(.el-table__inner-wrapper::before) { background-color: #606266; }
 }
 </style>

@@ -41,6 +41,7 @@ from .schemas import (
     OrderShipmentPayload,
     OrderStockPayload,
     PartPayload,
+    PrintSettingsPayload,
     ProductPayload,
     ProductionRunSchedulePayload,
     ProductionRunStatusPayload,
@@ -223,6 +224,8 @@ def operation_action(path: str, method: str) -> str:
         return "更新生产批次"
     if path.startswith("/api/system/production-settings"):
         return "修改生产设置"
+    if path.startswith("/api/system/print-settings"):
+        return "修改打印设置"
     if path.startswith("/api/backups"):
         return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
     return f"{method} 操作"
@@ -657,6 +660,43 @@ def update_production_settings(
     db.commit()
     db.refresh(row)
     return production_settings_dict(row)
+
+
+def print_settings_dict(settings: ProductionSetting) -> dict:
+    return {
+        "paper_preset": settings.print_paper_preset,
+        "width_mm": settings.print_width_mm,
+        "height_mm": settings.print_height_mm,
+        "updated_at": settings.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/system/print-settings")
+def print_settings(db: Session = Depends(get_db)):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return print_settings_dict(row)
+
+
+@app.put("/api/system/print-settings")
+def update_print_settings(
+    payload: PrintSettingsPayload,
+    db: Session = Depends(get_db),
+):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+    row.print_paper_preset = payload.paper_preset
+    row.print_width_mm = round(payload.width_mm, 1)
+    row.print_height_mm = round(payload.height_mm, 1)
+    db.commit()
+    db.refresh(row)
+    return print_settings_dict(row)
 
 
 @app.get("/api/production/runs")

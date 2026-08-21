@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue"
 import { useRoute } from "vue-router"
 import {
   api,
+  formatDate,
   formatTime,
   money,
   productQty,
@@ -12,6 +13,7 @@ import {
   useLiveRefresh
 } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import { printWithSavedSize } from "./print"
 
 const route = useRoute()
 const loading = ref(false)
@@ -100,8 +102,8 @@ function open(row: any) {
   detail.value = row
   drawer.value = true
 }
-function printDocument() {
-  window.print()
+async function printDocument() {
+  await printWithSavedSize()
 }
 function applyFilters() {
   filterDrawer.value = false
@@ -271,13 +273,25 @@ useLiveRefresh(() => load(true))
       size="min(820px, 98vw)"
     >
       <div v-if="detail" class="print-sheet">
-        <h1>{{ scopeTitle }}{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
+        <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
         <el-descriptions :column="2" border>
           <el-descriptions-item label="单号">
             {{ detail.transaction_no }}
           </el-descriptions-item>
           <el-descriptions-item label="日期">
-            {{ formatTime(detail.occurred_at) }}
+            {{ formatDate(detail.occurred_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item
+            v-if="detail.counterparty_name"
+            :label="direction === 'inbound' ? '供应商' : '收货单位'"
+          >
+            {{ detail.counterparty_name }}
+          </el-descriptions-item>
+          <el-descriptions-item v-if="detail.counterparty_phone" label="联系电话">
+            {{ detail.counterparty_phone }}
+          </el-descriptions-item>
+          <el-descriptions-item v-if="detail.counterparty_address" label="地址" :span="2">
+            {{ detail.counterparty_address }}
           </el-descriptions-item>
           <el-descriptions-item
             v-if="detail.related_production_run_no"
@@ -290,22 +304,13 @@ useLiveRefresh(() => load(true))
             <el-descriptions-item label="订单号" :span="2">
               {{ detail.related_order_no || '-' }}
             </el-descriptions-item>
-            <el-descriptions-item label="客户" :span="2">
-              {{ detail.counterparty_name || '-' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="电话">
-              {{ detail.counterparty_phone || '-' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="地址">
-              {{ detail.counterparty_address || '-' }}
-            </el-descriptions-item>
           </template>
         </el-descriptions>
         <el-table :data="detail.lines" border style="margin-top: 18px">
-          <el-table-column prop="sku" label="编码" width="130" />
+          <el-table-column prop="sku" label="编码" min-width="130" />
           <el-table-column prop="name" label="物料" min-width="150" />
           <el-table-column prop="spec" label="规格" min-width="120" />
-          <el-table-column label="数量" width="110" align="right">
+          <el-table-column label="数量" min-width="110" align="right">
             <template #default="{ row }">
               {{
                 row.kind === 'PRODUCT'
@@ -314,23 +319,33 @@ useLiveRefresh(() => load(true))
               }}
             </template>
           </el-table-column>
-          <el-table-column prop="unit" label="单位" width="70" />
-          <el-table-column label="单价" width="110" align="right">
+          <el-table-column prop="unit" label="单位" min-width="70" />
+          <el-table-column label="单价" min-width="110" align="right">
             <template #default="{ row }">
               {{ row.unit_price == null ? '-' : money(row.unit_price) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="金额" min-width="120" align="right">
+            <template #default="{ row }">
+              {{ row.line_total == null ? '-' : money(row.line_total) }}
             </template>
           </el-table-column>
         </el-table>
         <p class="document-notes">
           备注：{{ detail.notes || '-' }}
         </p>
+        <div class="history-signature-row">
+          <span>制单：{{ detail.operator || '________________' }}</span>
+          <span>仓管：________________</span>
+          <span>审核：________________</span>
+        </div>
       </div>
       <template #footer>
         <el-button @click="drawer = false">
           关闭
         </el-button>
         <el-button type="primary" @click="printDocument">
-          打印 A4
+          打印
         </el-button>
       </template>
     </el-drawer>
@@ -338,6 +353,7 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
+@page { size: 297mm 210mm; margin: 0; }
 .card-head .operation-scope-switch {
   margin-bottom: 0;
   align-self: center;
@@ -352,7 +368,18 @@ useLiveRefresh(() => load(true))
   margin-top: 18px;
   color: var(--el-text-color-regular);
 }
+.history-signature-row { display: flex; justify-content: space-between; gap: 32px; margin-top: 30px; color: var(--el-text-color-regular); }
 @media print {
+  :global(html), :global(body) { width: var(--erp-print-page-width, 297mm); height: var(--erp-print-page-height, 210mm); margin: 0 !important; overflow: visible !important; background: #fff !important; }
+  :global(.el-overlay), :global(.el-drawer), :global(.el-drawer__body) {
+    position: static !important;
+    inset: auto !important;
+    width: auto !important;
+    height: auto !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    transform: none !important;
+  }
   :global(body *) {
     visibility: hidden !important;
   }
@@ -361,13 +388,19 @@ useLiveRefresh(() => load(true))
     visibility: visible !important;
   }
   .print-sheet {
-    position: fixed;
-    inset: 0;
-    width: 210mm;
-    min-height: 297mm;
-    padding: 15mm;
+    position: absolute;
+    top: var(--erp-print-margin, 8mm);
+    left: var(--erp-print-margin, 8mm);
+    width: 277mm;
+    min-height: 0;
+    padding: 0;
     color: #000;
     background: #fff;
+    transform: scale(var(--erp-print-scale, 1));
+    transform-origin: top left;
+    print-color-adjust: exact;
   }
+  .print-sheet :deep(.el-table__header),
+  .print-sheet :deep(.el-table__body) { width: 100% !important; }
 }
 </style>
