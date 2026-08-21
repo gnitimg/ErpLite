@@ -9,8 +9,12 @@ const loading = ref(false)
 const route = useRoute()
 const rows = ref<any[]>([])
 const filterDrawer = ref(false)
+const inboundDrawer = ref(false)
+const saving = ref(false)
+const activePart = ref<any>(null)
 const keyword = ref("")
 const filters = reactive({ stockStatus: "" })
+const inboundForm = reactive({ quantity: 1, unit_cost: 0, notes: "" })
 const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" : "PART")
 const pageTitle = computed(() => kind.value === "PRODUCT" ? "产品库存" : "零件库存")
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
@@ -37,6 +41,42 @@ function applyFilters() {
 function resetFilters() {
   filters.stockStatus = ""
   applyFilters()
+}
+function openInbound(row: any) {
+  activePart.value = row
+  inboundForm.quantity = Number(row.shortage_qty) > 0
+    ? Number(row.shortage_qty)
+    : 1
+  inboundForm.unit_cost = Number(row.cost_price || 0)
+  inboundForm.notes = Number(row.shortage_qty) > 0
+    ? `补足当前订单生产缺口 ${displayQty(row.shortage_qty)} ${row.unit}`
+    : "零件快捷入库"
+  inboundDrawer.value = true
+}
+async function submitInbound() {
+  if (Number(inboundForm.quantity) <= 0) {
+    return ElMessage.warning("入库数量必须大于 0")
+  }
+  saving.value = true
+  try {
+    await api("/api/stock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        item_id: activePart.value.id,
+        quantity: Number(inboundForm.quantity),
+        unit_cost: Number(inboundForm.unit_cost),
+        notes: inboundForm.notes,
+        consume_bom: false
+      })
+    })
+    ElMessage.success("零件已入库，入库单和缺口数量已自动更新")
+    inboundDrawer.value = false
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    saving.value = false
+  }
 }
 onMounted(load)
 watch(() => route.name, () => load())
@@ -86,6 +126,14 @@ useLiveRefresh(() => load(true))
             </b>
           </template>
         </el-table-column>
+        <el-table-column label="订单缺口" width="125" align="right">
+          <template #default="{ row }">
+            <b :class="row.gap_qty < 0 ? 'number-negative' : ''">
+              {{ displayQty(row.gap_qty) }}
+            </b>
+            {{ row.unit }}
+          </template>
+        </el-table-column>
         <el-table-column label="安全库存" width="100" align="right">
           <template #default="{ row }">
             {{ displayQty(row.min_stock) }}
@@ -119,6 +167,13 @@ useLiveRefresh(() => load(true))
             <strong>{{ money(row.stock_qty * row.cost_price) }}</strong>
           </template>
         </el-table-column>
+        <el-table-column v-if="kind === 'PART'" label="操作" width="90" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openInbound(row)">
+              入库
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
@@ -137,6 +192,58 @@ useLiveRefresh(() => load(true))
           </el-button>
         </div>
       </el-form>
+    </el-drawer>
+
+    <el-drawer
+      v-model="inboundDrawer"
+      title="零件快捷入库"
+      size="min(520px, 96vw)"
+    >
+      <el-descriptions v-if="activePart" :column="1" border>
+        <el-descriptions-item label="零件">
+          {{ activePart.sku }} · {{ activePart.name }}
+        </el-descriptions-item>
+        <el-descriptions-item label="当前库存">
+          {{ displayQty(activePart.stock_qty) }} {{ activePart.unit }}
+        </el-descriptions-item>
+        <el-descriptions-item label="生产总需求">
+          {{ displayQty(activePart.order_required_qty) }} {{ activePart.unit }}
+        </el-descriptions-item>
+        <el-descriptions-item label="当前缺口">
+          <b :class="activePart.gap_qty < 0 ? 'number-negative' : ''">
+            {{ displayQty(activePart.gap_qty) }} {{ activePart.unit }}
+          </b>
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-form label-position="top" style="margin-top: 20px">
+        <el-form-item label="本次入库数量" required>
+          <el-input-number
+            v-model="inboundForm.quantity"
+            :min="0.001"
+            :precision="3"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="入库单位成本">
+          <el-input-number
+            v-model="inboundForm.unit_cost"
+            :min="0"
+            :precision="2"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="inboundForm.notes" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <div class="drawer-footer">
+        <el-button @click="inboundDrawer = false">
+          取消
+        </el-button>
+        <el-button type="primary" :loading="saving" @click="submitInbound">
+          确认入库并生成入库单
+        </el-button>
+      </div>
     </el-drawer>
   </div>
 </template>

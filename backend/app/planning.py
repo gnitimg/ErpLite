@@ -506,7 +506,10 @@ def production_demand_summary(db: Session) -> list[dict]:
     ]
 
 
-def purchase_requirement_summary(db: Session) -> list[dict]:
+def purchase_requirement_summary(
+    db: Session,
+    shortages_only: bool = True,
+) -> list[dict]:
     """将全部未完成生产需求按 BOM 展开并全局汇总，同一库存只扣一次。"""
     demands = production_demand_summary(db)
     required: dict[int, dict] = {}
@@ -539,6 +542,6 @@ def purchase_requirement_summary(db: Session) -> list[dict]:
             max(row["total_required"] - row["current_stock"], 0), 6
         )
         row["involved_products"] = "、".join(row.pop("products")[:5])
-        if row["shortage_quantity"] > 0:
+        if not shortages_only or row["shortage_quantity"] > 0:
             result.append(row)
     return sorted(result, key=lambda row: (-row["shortage_quantity"], row["sku"]))

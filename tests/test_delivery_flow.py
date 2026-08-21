@@ -12,9 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
 from app.main import (
+    _document_rows,
     _ship_order,
     cancel_order,
     complete_production_run,
+    inventory,
     update_order,
 )
 from app.models import (
@@ -96,6 +98,9 @@ def test_partial_inventory_reserves_only_available_and_plans_remaining():
         assert customer_order.items[0].reserved_quantity == 80
         assert customer_order.items[0].production_required_quantity == 20
         assert db.query(ProductionRun).one().planned_quantity == 20
+        row = inventory("PRODUCT", False, None, "", db)[0]
+        assert row["order_required_qty"] == 20
+        assert row["gap_qty"] == -20
 
 
 def test_shared_part_purchase_shortage_is_globally_aggregated():
@@ -123,6 +128,9 @@ def test_shared_part_purchase_shortage_is_globally_aggregated():
         assert len(requirements) == 1
         assert requirements[0]["total_required"] == 300
         assert requirements[0]["shortage_quantity"] == 150
+        row = inventory("PART", False, None, "", db)[0]
+        assert row["order_required_qty"] == 300
+        assert row["gap_qty"] == -150
 
 
 @pytest.mark.parametrize(
@@ -164,6 +172,20 @@ def test_completion_accepts_under_or_over_production(
         assert finished.stock_qty - customer_order.items[0].reserved_quantity == expected_free
         inbound = db.get(StockTransaction, result["transaction_id"])
         assert inbound.related_production_run_id == planned.id
+        assert inbound.transaction_type == "ASSEMBLY_IN"
+        assert len(inbound.lines) == 1
+        assert inbound.lines[0].item_id == finished.id
+        consumption = db.get(
+            StockTransaction,
+            result["consumption_transaction_id"],
+        )
+        assert consumption.transaction_type == "PRODUCTION_OUT"
+        assert len(consumption.lines) == 1
+        assert consumption.lines[0].item_id == part.id
+        assert consumption.lines[0].quantity_change == -actual * 2
+        assert len(_document_rows(db, "INBOUND", "PRODUCT")) == 1
+        assert len(_document_rows(db, "OUTBOUND", "PART", "零件X")) == 1
+        assert _document_rows(db, "INBOUND", "PART") == []
         assert sum(allocation.quantity for allocation in planned.allocations) == min(actual, 100)
 
 

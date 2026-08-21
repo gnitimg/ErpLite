@@ -6,14 +6,14 @@
 
 - 零件档案：编码、规格、单位、成本与安全库存。
 - 产品目录：用表格选择组成零件和单台用量。
-- 待购买按全部生产缺口全局汇总；批次完工按实际产量倒冲 BOM 并自动生成生产入库单。
+- 待购买按全部生产缺口全局汇总；批次审核时允许修改实际合格数，随后自动生成零件生产耗用出库单和产品生产入库单。
 - 零件或产品手工出库，严格禁止负库存。
 - 客户订单：草稿、确认、部分出库、整单出库和完成；首次出库后冻结订单业务内容。
 - 客单按“要求交期”由近到远分配产品库存；库存不足时自动汇总 BOM 零件缺口，零件齐备后生产入库并预留成品，再执行客单出库。
 - 产品档案维护成本价和参考价；新建客单默认带入参考价，允许逐单修改成交价，并展示折扣率与优惠金额。
 - 零件默认采用库存备料，少数零件可标记为“按单即买”，并在客单缺料明细中区分显示。
 - 客单列表支持按客单号、客户名称/电话模糊搜索，并可在筛选侧栏按状态和日期范围过滤。
-- 实时库存、低库存预警、库存成本与完整流水。
+- 实时库存、低库存预警、库存成本与完整流水；零件和产品库存直接显示订单缺口，负数使用红色提示。
 - 库存管理按零件库存、产品库存和样品库存拆分；库存流水归入日志分组，摘要留在表格，完整字段在右侧详情栏查看。
 - 产品数量统一为正整数（客单、生产和产品出入库均进行前后端校验），BOM 零件用量仍支持小数。
 - 出入库作业支持按单个零件/产品办理，也支持按客户订单自动补齐缺口零件或将已预留产品一次性出库。
@@ -38,7 +38,7 @@
 1. 产品目录保存 BOM，零件和产品统一进入物料主数据。
 2. 客单保存产品、整数数量、参考价、本单成交价和要求交期；确认后按交期优先分配现有产品库存。
 3. 产品不足时先按产品汇总生产缺口，再按 BOM 全局汇总零件缺口；原料不足不阻止排产，但 ETA 标记为暂不可承诺。
-4. 批次完工在同一事务中按实际数量扣减 BOM、增加成品、写入库单、重分配预留并重排剩余需求。
+4. 批次完工审核在同一事务中按实际合格数量扣减 BOM、增加成品、分别写零件出库单和产品入库单、重分配预留并重排剩余需求。
 5. 客单可整单、单产品或指定部分数量出库；每次仅扣本单预留并生成独立销售出库单，全部发完后自动完成。
 5. 手工出入库、产品生产、客单补料/出库和样品调整都会生成库存流水；所有写接口另写系统操作日志。
 6. 任何普通库存扣减都禁止产生负数；MySQL 使用行级锁串行处理同一物料的并发库存写入，避免局域网多用户同时操作时发生丢失更新。
@@ -49,7 +49,7 @@
 
 ### 期初库存与一笔多物料流水
 
-“期初库存”是系统开始正式记账前，将现场盘点结存一次性录入后的起点，不是采购或生产。一次盘点通常同时包含多种零件和产品，因此一张期初库存流水可以有多条物料明细；同理，一次产品生产会同时记录“产品入库”和全部 BOM 零件“出库”。它们属于一个原子业务，应保存在同一个流水单号下，便于整体审计和回滚，而不是拆成互不关联的多张流水。
+“期初库存”是系统开始正式记账前，将现场盘点结存一次性录入后的起点，不是采购或生产。一次盘点通常同时包含多种零件和产品，因此一张期初库存流水可以有多条物料明细。生产审核则在同一数据库事务中生成两张关联同一生产批次的单据：零件生产耗用出库单和产品生产入库单；任一步失败都会整体回滚。
 
 仓库正式使用前，应先按实际盘点数录入期初库存。系统不再默认写入演示物料或演示期初库存；只有在 `.env` 显式设置 `ERP_SEED_DEMO=1` 且数据库完全为空时，才会创建 README 示例数据。已经存在的演示流水不会被升级程序自动删除，以免误删真实数据；可在确认无业务数据后恢复空库，或将其作为测试数据保留。
 
@@ -160,11 +160,11 @@ MySQL 暂未启动时，页面与无验证码登录仍可使用；依赖库存�
 2. 确认客单后，系统按要求交期、订单日期、客单创建顺序分配现有产品库存并记录预留。
 3. 产品不足的部分按产品汇总为待生产需求；系统再将 BOM 零件按零件全局汇总形成“待购买”，原料不足仍会生成机器排期。
 4. 同一产品尽量合成连续批次。批次产量再按要求交期、订单日期和创建顺序分给客单，产品级 ETA 是累计供给达到该明细需求的时刻，客单 ETA 取全部产品 ETA 的最大值。
-5. 到“业务处理 → 生产入库”选择待完工批次，只填实际数量、完成日期和备注；不需要开始、暂停或报工。
+5. 到“业务处理 → 生产入库”审核待完工批次，可修改实际合格数量并填写完成日期和备注；审核后 BOM 零件自动出库，产品自动入库。
 6. BOM 未配置、原材料不足或产品未维护日产能力时，页面明确标记 ETA 不可靠或暂不可计算，不会把机器模拟时间冒充可靠交期。
 7. 客单按剩余未出库数量预留库存，可整单、单产品或部分出库；每次生成独立出库单，全部出完才进入 `FULFILLED`。
 
-历史入库单和出库单保存订单、客户和物料快照。产品或客户资料以后改名，不会改写已经发生的历史单据。
+历史入库单和出库单保存订单、客户和物料快照。单据页提供零件/产品子页签、模糊搜索和侧栏筛选；关联订单与客户信息只在销售出库单详情中展示。产品或客户资料以后改名，不会改写已经发生的历史单据。
 
 ### ETA 算法边界
 
@@ -211,12 +211,12 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | 待购买 | `GET /api/purchase/requirements` |
 | 生产计划与排期 | `GET /api/production/demands`、`GET /api/production/runs`、`PUT/DELETE /api/production/runs/{id}/schedule` |
 | 生产入库 | `POST /api/production/runs/{id}/complete`；实际产量允许与计划不同 |
-| 库存 | `GET /api/inventory` |
+| 库存 | `GET /api/inventory`；返回订单需求、缺口和可快捷入库数量 |
 | 出入库 | `POST /api/stock/inbound`、`POST /api/stock/outbound` |
 | 流水 | `GET /api/stock/transactions` |
 | 操作日志 | `GET /api/operation-logs`、`GET /api/operation-logs/actions` |
 | 客单 | `GET/POST/PUT /api/orders`，以及 `confirm/ship/ship-all/cancel`；`availability` 返回已订、已出、剩余、预留、待生产和 ETA |
-| 入/出库单 | `GET /api/documents/inbound`、`GET /api/documents/outbound` |
+| 入/出库单 | `GET /api/documents/inbound`、`GET /api/documents/outbound`；支持零件/产品、关键词、类型和日期筛选 |
 | 数据备份 | `GET/POST /api/backups`、`GET /api/backups/{filename}/download`、`POST /api/backups/{filename}/restore` |
 
 ### 列表筛选参数
@@ -225,8 +225,8 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 |---|---|---|
 | `GET /api/parts` | `keyword`、`stock_status` | `keyword` 模糊匹配零件 SKU/名称/规格；`stock_status` 可选 `LOW`（库存小于等于安全库存）或 `NORMAL`（库存高于安全库存） |
 | `GET /api/products` | `keyword`、`stock_status`、`bom_status` | `keyword` 模糊匹配产品 SKU/名称/规格；库存状态同上；`bom_status` 可选 `CONFIGURED`（已配置 BOM）或 `EMPTY`（未配置 BOM） |
-| `GET /api/inventory` | `keyword`、`kind`、`stock_status`、`low_stock` | `keyword` 模糊匹配物料 SKU/名称/规格；`kind` 可选 `PART` 或 `PRODUCT`；库存状态同上。保留 `low_stock=true` 兼容旧调用，同时传入时以 `stock_status` 为准 |
-| `GET /api/stock/transactions` | `keyword`、`transaction_type`、`start_date`、`end_date`、`limit` | `keyword` 模糊匹配流水号、物料 SKU/名称或备注；类型精确匹配（如 `PURCHASE_IN`、`ASSEMBLY_IN`、`MANUAL_IN`、`MANUAL_OUT`、`SALE_OUT`、`OPENING`）；日期格式为 `YYYY-MM-DD` 且包含起止当日；`limit` 范围为 1–500 |
+| `GET /api/inventory` | `keyword`、`kind`、`stock_status`、`low_stock` | `keyword` 模糊匹配物料 SKU/名称/规格；`kind` 可选 `PART` 或 `PRODUCT`；返回 `order_required_qty`、正数 `shortage_qty` 和用于界面显示的零或负数 `gap_qty`。保留 `low_stock=true` 兼容旧调用 |
+| `GET /api/stock/transactions` | `keyword`、`transaction_type`、`start_date`、`end_date`、`limit` | `keyword` 模糊匹配流水号、物料 SKU/名称或备注；类型精确匹配（如 `PURCHASE_IN`、`PRODUCTION_OUT`、`ASSEMBLY_IN`、`MANUAL_IN`、`MANUAL_OUT`、`SALE_OUT`、`OPENING`）；日期格式为 `YYYY-MM-DD` 且包含起止当日；`limit` 范围为 1–500 |
 
 ## 当前边界
 

@@ -7,7 +7,7 @@
 1. 零件和产品都是库存物料，统一保存在 `inventory_items`。
 2. 产品组成由 `product_bom_items` 保存；每行表示生产 1 单位产品所需的零件数量。
 3. `inventory_items.stock_qty` 是快速读取的实时结存，但任何修改必须和 `stock_transactions`、`stock_transaction_items` 流水在同一数据库事务中完成。
-4. 产品生产入库是一笔复合流水：成品为正数，BOM 零件按“入库数量 × 单台用量”为负数；任何零件不足时整笔失败。
+4. 产品生产审核在一个数据库事务中生成两笔流水：BOM 零件自动形成生产耗用出库，合格成品形成生产入库；任何零件不足时两笔都失败。
 5. 客单确认后按要求交期创建成品预留；预留基数始终是 `quantity - shipped_quantity`。订单允许多次出库，全部出完才进入 `FULFILLED`。
 6. 当前版本禁止负库存。已产生业务历史的物料采用停用而非物理删除。
 7. 同一笔库存业务涉及的全部物料按 ID 固定顺序加行锁，结存和流水在同一事务中写入。
@@ -48,7 +48,7 @@
 
 ### `stock_transactions` / `stock_transaction_items`
 
-库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。一笔生产入库同时记录成品增加与 BOM 零件减少，并通过 `related_production_run_id` 关联批次；每次订单出库独立关联订单。
+库存业务流水头与明细。明细使用带符号的 `quantity_change`：正数入库，负数出库。生产审核按实际合格数量生成 `PRODUCTION_OUT` 零件耗用单和 `ASSEMBLY_IN` 产品入库单，两者通过 `related_production_run_id` 关联同一批次；只有销售出库通过 `related_order_id` 关联订单。
 
 单据头保存订单号、客户名称、电话、地址和经办人快照；单据行保存 SKU、名称、规格、单位以及可选成交价快照。旧流水快照允许为空，读取时回退当前主数据；新流水始终写快照，因此历史单据不会被后续主数据改名影响。
 

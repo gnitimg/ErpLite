@@ -1,64 +1,146 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, onMounted, reactive, ref, watch } from "vue"
 import { useRoute } from "vue-router"
-import { api, formatTime, money, productQty, qty, txLabels, useLiveRefresh } from "./api"
+import {
+  api,
+  formatTime,
+  money,
+  productQty,
+  qty,
+  txLabels,
+  useLiveRefresh
+} from "./api"
+import ListToolbar from "./components/ListToolbar.vue"
 
 const route = useRoute()
 const loading = ref(false)
 const rows = ref<any[]>([])
 const detail = ref<any>(null)
 const drawer = ref(false)
-const direction = computed(() => String(route.meta.documentDirection || "inbound").toLowerCase())
+const filterDrawer = ref(false)
+const keyword = ref("")
+const scope = ref("PART")
+const filters = reactive({ transactionType: "", dateRange: [] as string[] })
+const direction = computed(() =>
+  String(route.meta.documentDirection || "inbound").toLowerCase()
+)
 const title = computed(() => direction.value === "inbound" ? "入库单" : "出库单")
+const scopeTitle = computed(() => scope.value === "PART" ? "零件" : "产品")
+const activeFilterCount = computed(() =>
+  Number(Boolean(filters.transactionType)) + Number(filters.dateRange.length > 0)
+)
+const transactionOptions = computed(() => {
+  if (direction.value === "inbound" && scope.value === "PART") {
+    return ["PURCHASE_IN", "OPENING"]
+  }
+  if (direction.value === "inbound") {
+    return ["ASSEMBLY_IN", "MANUAL_IN", "OPENING"]
+  }
+  if (scope.value === "PART") {
+    return ["PRODUCTION_OUT", "MANUAL_OUT"]
+  }
+  return ["SALE_OUT", "MANUAL_OUT"]
+})
+
 async function load(silent = false) {
   if (!silent) loading.value = true
+  const params = new URLSearchParams({ scope: scope.value })
+  if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
+  if (filters.transactionType) {
+    params.set("transaction_type", filters.transactionType)
+  }
+  if (filters.dateRange[0]) params.set("start_date", filters.dateRange[0])
+  if (filters.dateRange[1]) params.set("end_date", filters.dateRange[1])
   try {
-    rows.value = await api(`/api/documents/${direction.value}`)
+    rows.value = await api(`/api/documents/${direction.value}?${params}`)
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
     if (!silent) loading.value = false
   }
 }
+function materialSummary(row: any) {
+  return row.lines
+    .slice(0, 3)
+    .map((line: any) => `${line.name} × ${Math.abs(line.quantity_change)}`)
+    .join("、")
+}
 function open(row: any) {
-  detail.value = row; drawer.value = true
+  detail.value = row
+  drawer.value = true
 }
 function printDocument() {
   window.print()
 }
+function applyFilters() {
+  filterDrawer.value = false
+  load()
+}
+function resetFilters() {
+  filters.transactionType = ""
+  filters.dateRange = []
+  applyFilters()
+}
 onMounted(load)
-watch(direction, () => load())
+watch(direction, () => {
+  scope.value = "PART"
+  filters.transactionType = ""
+  filters.dateRange = []
+  load()
+})
+watch(scope, () => {
+  filters.transactionType = ""
+  load()
+})
 useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page document-page">
-    <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-button :loading="loading" @click="load()">
-          <el-icon><Refresh /></el-icon>刷新
-        </el-button>
-      </div><router-link to="/operations/stock-operations">
+    <ListToolbar
+      v-model="keyword"
+      placeholder="搜索单号、物料编码、名称、规格或客户"
+      :filter-count="activeFilterCount"
+      :loading="loading"
+      @search="load"
+      @filter="filterDrawer = true"
+      @refresh="load"
+    >
+      <router-link to="/operations/stock-operations">
         <el-button type="primary">
           {{ direction === 'inbound' ? '开入库单' : '办理出库' }}
         </el-button>
       </router-link>
-    </div>
+    </ListToolbar>
+
     <section class="content-card">
       <div class="card-head">
-        <h3>{{ title }}</h3><span>单据内容使用发生时快照，后续主数据修改不会改变历史</span>
-      </div><el-table v-loading="loading" :data="rows" empty-text="暂无单据">
+        <h3>{{ title }}</h3>
+      </div>
+      <el-tabs v-model="scope" class="document-tabs">
+        <el-tab-pane :label="`零件${title}`" name="PART" />
+        <el-tab-pane :label="`产品${title}`" name="PRODUCT" />
+      </el-tabs>
+      <el-table v-loading="loading" :data="rows" empty-text="暂无单据">
         <el-table-column prop="transaction_no" label="单号" min-width="190">
           <template #default="{ row }">
             <span class="mono">{{ row.transaction_no }}</span>
           </template>
-        </el-table-column><el-table-column label="业务类型" width="120">
+        </el-table-column>
+        <el-table-column label="业务类型" width="130">
           <template #default="{ row }">
             {{ txLabels[row.transaction_type] || row.transaction_type }}
           </template>
         </el-table-column>
-        <el-table-column prop="related_order_no" label="关联订单" min-width="160" />
+        <el-table-column label="物料摘要" min-width="260">
+          <template #default="{ row }">
+            {{ materialSummary(row) }}
+            <span v-if="row.lines.length > 3" class="muted">
+              等 {{ row.lines.length }} 项
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column
           prop="related_production_run_no"
           label="生产批次"
@@ -69,7 +151,7 @@ useLiveRefresh(() => load(true))
             {{ formatTime(row.occurred_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90">
+        <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">
               查看
@@ -78,31 +160,88 @@ useLiveRefresh(() => load(true))
         </el-table-column>
       </el-table>
     </section>
+
+    <el-drawer
+      v-model="filterDrawer"
+      :title="`筛选${scopeTitle}${title}`"
+      size="min(420px, 92vw)"
+    >
+      <el-form label-position="top">
+        <el-form-item label="业务类型">
+          <el-select
+            v-model="filters.transactionType"
+            clearable
+            placeholder="全部类型"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="value in transactionOptions"
+              :key="value"
+              :label="txLabels[value] || value"
+              :value="value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="发生日期">
+          <el-date-picker
+            v-model="filters.dateRange"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            range-separator="至"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <div class="filter-drawer-footer">
+          <el-button @click="resetFilters">
+            重置
+          </el-button>
+          <el-button type="primary" @click="applyFilters">
+            应用筛选
+          </el-button>
+        </div>
+      </el-form>
+    </el-drawer>
+
     <el-drawer
       v-model="drawer"
       class="document-drawer"
-      :title="`${title} · ${detail?.transaction_no || ''}`"
+      :title="`${scopeTitle}${title} · ${detail?.transaction_no || ''}`"
       size="min(820px, 98vw)"
     >
       <div v-if="detail" class="print-sheet">
-        <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1><el-descriptions :column="2" border>
+        <h1>{{ scopeTitle }}{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
+        <el-descriptions :column="2" border>
           <el-descriptions-item label="单号">
             {{ detail.transaction_no }}
-          </el-descriptions-item><el-descriptions-item label="日期">
-            {{ formatTime(detail.occurred_at) }}
-          </el-descriptions-item><el-descriptions-item label="订单号">
-            {{ detail.related_order_no || '-' }}
-          </el-descriptions-item><el-descriptions-item label="生产批次">
-            {{ detail.related_production_run_no || '-' }}
-          </el-descriptions-item><el-descriptions-item label="客户" :span="2">
-            {{ detail.counterparty_name || '-' }}
-          </el-descriptions-item><el-descriptions-item label="电话">
-            {{ detail.counterparty_phone || '-' }}
-          </el-descriptions-item><el-descriptions-item label="地址">
-            {{ detail.counterparty_address || '-' }}
           </el-descriptions-item>
+          <el-descriptions-item label="日期">
+            {{ formatTime(detail.occurred_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item
+            v-if="detail.related_production_run_no"
+            label="生产批次"
+            :span="2"
+          >
+            {{ detail.related_production_run_no }}
+          </el-descriptions-item>
+          <template v-if="detail.transaction_type === 'SALE_OUT'">
+            <el-descriptions-item label="订单号" :span="2">
+              {{ detail.related_order_no || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="客户" :span="2">
+              {{ detail.counterparty_name || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="电话">
+              {{ detail.counterparty_phone || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="地址">
+              {{ detail.counterparty_address || '-' }}
+            </el-descriptions-item>
+          </template>
         </el-descriptions>
-        <el-table :data="detail.lines" border style="margin-top:18px">
+        <el-table :data="detail.lines" border style="margin-top: 18px">
           <el-table-column prop="sku" label="编码" width="130" />
           <el-table-column prop="name" label="物料" min-width="150" />
           <el-table-column prop="spec" label="规格" min-width="120" />
@@ -121,13 +260,16 @@ useLiveRefresh(() => load(true))
               {{ row.unit_price == null ? '-' : money(row.unit_price) }}
             </template>
           </el-table-column>
-        </el-table><p class="document-notes">
+        </el-table>
+        <p class="document-notes">
           备注：{{ detail.notes || '-' }}
         </p>
-      </div><template #footer>
+      </div>
+      <template #footer>
         <el-button @click="drawer = false">
           关闭
-        </el-button><el-button type="primary" @click="printDocument">
+        </el-button>
+        <el-button type="primary" @click="printDocument">
           打印 A4
         </el-button>
       </template>
@@ -136,6 +278,9 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
+.document-tabs {
+  padding: 0 22px;
+}
 .print-sheet h1 {
   margin: 0 0 22px;
   text-align: center;

@@ -45,23 +45,13 @@ async function completeRun() {
   saving.value = true
   try {
     await api(`/api/production/runs/${activeRun.value.id}/complete`, { method: "POST", body: JSON.stringify(form) })
-    ElMessage.success("生产入库成功，BOM 已倒冲并生成生产入库单")
+    ElMessage.success("审核通过，零件已自动出库，合格品已入库并生成两张单据")
     completionDrawer.value = false
     await load()
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
     saving.value = false
-  }
-}
-async function cancelRun(row: any) {
-  try {
-    await ElMessageBox.confirm(`取消批次“${row.run_no}”后，未完成数量会自动回到生产缺口。`, "取消生产批次", { type: "warning" })
-    await api(`/api/production/runs/${row.id}/status`, { method: "PUT", body: JSON.stringify({ status: "CANCELLED" }) })
-    ElMessage.success("批次已取消，计划已自动重排")
-    await load()
-  } catch (error: any) {
-    if (error !== "cancel") ElMessage.error(error.message)
   }
 }
 const involvedOrders = (row: any) => [...new Set(row.allocations.map((item: any) => item.order_no))].join("、") || "自由库存"
@@ -82,7 +72,7 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>生产入库 / 待完工批次</h3><span>现场只需回填实际完工数量</span>
+        <h3>生产入库审核</h3><span>审核合格数量后，零件自动出库、产品自动入库</span>
       </div>
       <el-table v-loading="loading" :data="visibleRows" empty-text="当前没有待完工生产批次">
         <el-table-column prop="run_no" label="批次号" min-width="180">
@@ -124,18 +114,16 @@ useLiveRefresh(() => load(true))
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
             <el-button v-if="['PLANNED', 'RUNNING'].includes(row.status)" link type="primary" @click="openCompletion(row)">
-              完工入库
-            </el-button><el-button v-if="['PLANNED', 'RUNNING'].includes(row.status)" link type="danger" @click="cancelRun(row)">
-              取消
+              审核入库
             </el-button><span v-else class="muted">{{ row.status === 'COMPLETED' ? '已入库' : '已取消' }}</span>
           </template>
         </el-table-column>
       </el-table>
     </section>
-    <el-drawer v-model="completionDrawer" title="生产完工入库" size="min(520px, 96vw)">
+    <el-drawer v-model="completionDrawer" title="审核生产入库" size="min(520px, 96vw)">
       <el-descriptions v-if="activeRun" :column="1" border>
         <el-descriptions-item label="批次">
           {{ activeRun.run_no }}
@@ -146,7 +134,7 @@ useLiveRefresh(() => load(true))
         </el-descriptions-item>
       </el-descriptions>
       <el-form label-position="top" style="margin-top: 20px">
-        <el-form-item label="实际完成数量" required>
+        <el-form-item label="实际合格入库数量" required>
           <el-input-number v-model="form.actual_quantity" :min="1" :precision="0" style="width:100%" />
         </el-form-item><el-form-item label="完成日期" required>
           <el-date-picker v-model="form.completion_date" type="date" value-format="YYYY-MM-DD" style="width:100%" />
@@ -158,7 +146,7 @@ useLiveRefresh(() => load(true))
         <el-button @click="completionDrawer = false">
           取消
         </el-button><el-button type="primary" :loading="saving" @click="completeRun">
-          确认入库
+          审核通过并入库
         </el-button>
       </div>
     </el-drawer>

@@ -722,7 +722,7 @@ def complete_production_run(
     if not run.product.bom_components:
         raise HTTPException(409, "产品未配置 BOM，不能办理生产入库")
     actual = int(payload.actual_quantity)
-    changes = [
+    component_changes = [
         (
             component.part,
             -float(component.quantity) * actual,
@@ -730,14 +730,22 @@ def complete_production_run(
         )
         for component in run.product.bom_components
     ]
-    changes.append((run.product, actual, run.product.cost_price))
-    tx = create_transaction(
+    occurred_at = datetime.combine(payload.completion_date, time.min)
+    consumption_tx = create_transaction(
+        db,
+        "PRODUCTION_OUT",
+        component_changes,
+        payload.notes or f"生产批次 {run.run_no} BOM 自动耗用",
+        related_production_run_id=run.id,
+        occurred_at=occurred_at,
+    )
+    inbound_tx = create_transaction(
         db,
         "ASSEMBLY_IN",
-        changes,
+        [(run.product, actual, run.product.cost_price)],
         payload.notes or f"生产批次 {run.run_no} 完工入库",
         related_production_run_id=run.id,
-        occurred_at=datetime.combine(payload.completion_date, time.min),
+        occurred_at=occurred_at,
     )
     run.produced_quantity = actual
     run.status = "COMPLETED"
@@ -756,7 +764,8 @@ def complete_production_run(
     plan = recalculate_production_plan(db)
     db.commit()
     return {
-        "transaction_id": tx.id,
+        "transaction_id": inbound_tx.id,
+        "consumption_transaction_id": consumption_tx.id,
         "run_id": run.id,
         "planned_quantity": run.planned_quantity,
         "actual_quantity": actual,
@@ -900,12 +909,38 @@ def inventory(
             or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
         )
     items = db.scalars(query.order_by(InventoryItem.kind, InventoryItem.sku)).all()
+    product_demands = {
+        row["product_id"]: row
+        for row in production_demand_summary(db)
+    }
+    part_requirements = {
+        row["part_id"]: row
+        for row in purchase_requirement_summary(db, shortages_only=False)
+    }
     rows = []
     for item in items:
         data = item_dict(item)
         reserved = reserved_product_quantity(db, item.id) if item.kind == "PRODUCT" else 0
+        requirement = (
+            product_demands.get(item.id, {})
+            if item.kind == "PRODUCT"
+            else part_requirements.get(item.id, {})
+        )
+        required_qty = (
+            requirement.get("total_production_required", 0)
+            if item.kind == "PRODUCT"
+            else requirement.get("total_required", 0)
+        )
+        shortage_qty = (
+            required_qty
+            if item.kind == "PRODUCT"
+            else requirement.get("shortage_quantity", 0)
+        )
         data["reserved_qty"] = reserved
         data["available_qty"] = max(float(item.stock_qty) - reserved, 0)
+        data["order_required_qty"] = required_qty
+        data["shortage_qty"] = shortage_qty
+        data["gap_qty"] = -shortage_qty if shortage_qty > 0 else 0
         rows.append(data)
     return rows
 
@@ -943,34 +978,129 @@ def stock_transactions(
     return [transaction_dict(tx) for tx in txs]
 
 
-def _document_rows(db: Session, direction: Literal["INBOUND", "OUTBOUND"]):
+def _document_rows(
+    db: Session,
+    direction: Literal["INBOUND", "OUTBOUND"],
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+):
     types = (
         ("PURCHASE_IN", "ASSEMBLY_IN", "MANUAL_IN", "OPENING")
         if direction == "INBOUND"
-        else ("SALE_OUT", "MANUAL_OUT")
+        else ("SALE_OUT", "MANUAL_OUT", "PRODUCTION_OUT", "ASSEMBLY_IN")
     )
-    rows = db.scalars(
+    direction_filter = (
+        StockTransactionItem.quantity_change > 0
+        if direction == "INBOUND"
+        else StockTransactionItem.quantity_change < 0
+    )
+    line_filter = direction_filter
+    if scope:
+        line_filter = and_(
+            line_filter,
+            StockTransactionItem.item.has(InventoryItem.kind == scope),
+        )
+    query = (
         select(StockTransaction)
-        .where(StockTransaction.transaction_type.in_(types))
+        .where(
+            StockTransaction.transaction_type.in_(types),
+            StockTransaction.lines.any(line_filter),
+        )
         .options(
             selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
             selectinload(StockTransaction.related_order),
             selectinload(StockTransaction.related_production_run),
         )
-        .order_by(StockTransaction.occurred_at.desc())
-        .limit(500)
+    )
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        item_keyword = or_(
+            StockTransactionItem.sku_snapshot.ilike(token),
+            StockTransactionItem.name_snapshot.ilike(token),
+            StockTransactionItem.spec_snapshot.ilike(token),
+            StockTransactionItem.item.has(or_(
+                InventoryItem.sku.ilike(token),
+                InventoryItem.name.ilike(token),
+                InventoryItem.spec.ilike(token),
+            )),
+        )
+        query = query.where(or_(
+            StockTransaction.transaction_no.ilike(token),
+            StockTransaction.order_no_snapshot.ilike(token),
+            StockTransaction.counterparty_name_snapshot.ilike(token),
+            StockTransaction.notes.ilike(token),
+            StockTransaction.lines.any(item_keyword),
+        ))
+    if transaction_type and transaction_type.strip():
+        query = query.where(
+            StockTransaction.transaction_type == transaction_type.strip().upper()
+        )
+    if start_date:
+        query = query.where(
+            StockTransaction.occurred_at >= datetime.combine(start_date, time.min)
+        )
+    if end_date:
+        query = query.where(
+            StockTransaction.occurred_at <= datetime.combine(end_date, time.max)
+        )
+    transactions = db.scalars(
+        query.order_by(StockTransaction.occurred_at.desc()).limit(500)
     ).all()
-    return [transaction_dict(row) for row in rows]
+    result = []
+    for transaction in transactions:
+        data = transaction_dict(transaction)
+        data["lines"] = [
+            line
+            for line in data["lines"]
+            if (line["quantity_change"] > 0) == (direction == "INBOUND")
+            and (scope is None or line["kind"] == scope)
+        ]
+        if data["lines"]:
+            result.append(data)
+    return result
 
 
 @app.get("/api/documents/inbound")
-def inbound_documents(db: Session = Depends(get_db)):
-    return _document_rows(db, "INBOUND")
+def inbound_documents(
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return _document_rows(
+        db,
+        "INBOUND",
+        scope,
+        keyword,
+        transaction_type,
+        start_date,
+        end_date,
+    )
 
 
 @app.get("/api/documents/outbound")
-def outbound_documents(db: Session = Depends(get_db)):
-    return _document_rows(db, "OUTBOUND")
+def outbound_documents(
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return _document_rows(
+        db,
+        "OUTBOUND",
+        scope,
+        keyword,
+        transaction_type,
+        start_date,
+        end_date,
+    )
 
 
 @app.post("/api/stock/inbound", status_code=201)

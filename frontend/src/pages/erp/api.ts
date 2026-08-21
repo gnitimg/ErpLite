@@ -143,6 +143,7 @@ export const txLabels: Record<string, string> = {
   PURCHASE_IN: "采购入库",
   MANUAL_IN: "成品入库",
   ASSEMBLY_IN: "生产入库",
+  PRODUCTION_OUT: "生产耗用出库",
   MANUAL_OUT: "手工出库",
   SALE_OUT: "客单出库",
   SAMPLE_ADJUST: "样品调整"
