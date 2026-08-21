@@ -231,6 +231,9 @@ def create_transaction(
     occurred_at: datetime | None = None,
     operator: str | None = None,
     price_snapshots: dict[int, tuple[float, float]] | None = None,
+    counterparty_name: str | None = None,
+    counterparty_phone: str | None = None,
+    counterparty_address: str | None = None,
 ) -> StockTransaction:
     if not changes:
         raise HTTPException(400, "库存流水至少需要一项物料变化")
@@ -285,9 +288,21 @@ def create_transaction(
         related_production_run_id=related_production_run_id,
         occurred_at=occurred_at or datetime.now(),
         order_no_snapshot=related_order.order_no if related_order else None,
-        counterparty_name_snapshot=related_order.customer_name if related_order else None,
-        counterparty_phone_snapshot=related_order.customer_phone if related_order else None,
-        counterparty_address_snapshot=related_order.customer_address if related_order else None,
+        counterparty_name_snapshot=(
+            counterparty_name.strip()
+            if counterparty_name is not None
+            else (related_order.customer_name if related_order else None)
+        ),
+        counterparty_phone_snapshot=(
+            counterparty_phone.strip()
+            if counterparty_phone is not None
+            else (related_order.customer_phone if related_order else None)
+        ),
+        counterparty_address_snapshot=(
+            counterparty_address.strip()
+            if counterparty_address is not None
+            else (related_order.customer_address if related_order else None)
+        ),
         operator_snapshot=operator,
     )
     db.add(tx)

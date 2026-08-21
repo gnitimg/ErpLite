@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
+import { useRouter } from "vue-router"
 import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
+
+const router = useRouter()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -153,6 +156,17 @@ function openShipment(row: any) {
   shipmentForm.notes = ""
   shipmentDrawer.value = true
 }
+function openStockDocument(row: any) {
+  workflowDrawer.value = false
+  router.push({ path: "/operations/stock-operations", query: { order_id: row.id } })
+}
+function viewOutboundDocuments(row: any) {
+  workflowDrawer.value = false
+  router.push({
+    path: "/logs/outbound-documents",
+    query: { keyword: row.order_no, scope: "PRODUCT" }
+  })
+}
 function fillShipmentLine(line: any) {
   line.quantity = Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
 }
@@ -199,7 +213,7 @@ useLiveRefresh(async () => {
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>客户订单</h3><span>出库后自动写入库存流水</span>
+        <h3>客户订单</h3>
       </div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无符合条件的客户订单">
         <el-table-column label="客单号" min-width="185">
@@ -241,7 +255,7 @@ useLiveRefresh(async () => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="310" fixed="right">
+        <el-table-column label="操作" min-width="160" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openWorkflow(row)">
               详情
@@ -250,32 +264,30 @@ useLiveRefresh(async () => {
               确认
             </el-button>
             <el-button
-              v-if="row.status === 'READY_TO_SHIP'"
-              link
-              type="success"
-              @click="action(row, 'ship-all')"
-            >
-              整单出库
-            </el-button>
-            <el-button
               v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(row.status)"
               link
               type="success"
-              @click="openShipment(row)"
+              @click="openStockDocument(row)"
             >
-              {{ row.status === 'PARTIALLY_SHIPPED' ? '继续出库' : '选择出库' }}
+              {{ row.status === 'PARTIALLY_SHIPPED' ? '继续开出库单' : '开出库单' }}
             </el-button>
             <el-button
-              v-if="!['FULFILLED', 'CANCELLED'].includes(row.status)"
+              v-if="row.status === 'FULFILLED'"
+              link
+              type="primary"
+              @click="viewOutboundDocuments(row)"
+            >
+              查看出库单
+            </el-button>
+            <span v-if="row.status === 'CANCELLED'" class="muted">已取消</span>
+            <el-button
+              v-if="!['DRAFT', 'READY_TO_SHIP', 'PARTIALLY_SHIPPED', 'FULFILLED', 'CANCELLED'].includes(row.status)"
               link
               type="danger"
               @click="action(row, 'cancel')"
             >
               取消
             </el-button>
-            <span v-if="['FULFILLED', 'CANCELLED'].includes(row.status)" class="muted">
-              已完结
-            </span>
           </template>
         </el-table-column>
       </el-table>
@@ -332,19 +344,18 @@ useLiveRefresh(async () => {
               确认并计算 ETA
             </el-button>
             <el-button
-              v-if="activeOrder.status === 'READY_TO_SHIP'"
+              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(activeOrder.status)"
               type="success"
-              @click="action(activeOrder, 'ship-all')"
+              @click="openStockDocument(activeOrder)"
             >
-              整单出库
+              {{ activeOrder.status === 'PARTIALLY_SHIPPED' ? '继续开出库单' : '开出库单' }}
             </el-button>
             <el-button
-              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(activeOrder.status)"
-              plain
-              type="success"
-              @click="openShipment(activeOrder)"
+              v-if="activeOrder.status === 'FULFILLED'"
+              type="primary"
+              @click="viewOutboundDocuments(activeOrder)"
             >
-              {{ activeOrder.status === 'PARTIALLY_SHIPPED' ? '继续出库' : '选择出库' }}
+              查看出库单
             </el-button>
             <el-button
               v-if="!['FULFILLED', 'CANCELLED'].includes(activeOrder.status)"
@@ -378,7 +389,7 @@ useLiveRefresh(async () => {
                 <div><span>订单金额</span><strong>{{ money(activeOrder.total_amount) }}</strong></div>
               </div>
               <div class="detail-section-head">
-                <strong>客户与交付信息</strong><span>客单建立时记录的信息</span>
+                <strong>客户与交付信息</strong>
               </div>
               <el-descriptions :column="2" border>
                 <el-descriptions-item label="客户">
@@ -396,7 +407,7 @@ useLiveRefresh(async () => {
                 </el-descriptions-item>
               </el-descriptions>
               <div v-if="workflow" class="detail-section-head">
-                <strong>当前处理建议</strong><span>根据库存、交期和 BOM 自动判断</span>
+                <strong>当前处理建议</strong>
               </div>
               <el-alert
                 v-if="workflow && !workflow.eta_reliable"
@@ -428,7 +439,7 @@ useLiveRefresh(async () => {
             </template>
             <div v-if="activeOrder" class="detail-page">
               <div class="detail-section-head detail-section-head-first">
-                <strong>成交明细</strong><span>参考价用于比价，本单价格为实际出库成交价</span>
+                <strong>成交明细</strong>
               </div>
               <el-table :data="activeOrder.items" border>
                 <el-table-column label="产品" min-width="210">
@@ -476,7 +487,7 @@ useLiveRefresh(async () => {
             </template>
             <div v-if="workflow" class="detail-page">
               <div class="detail-section-head detail-section-head-first">
-                <strong>履约进度</strong><span>按照交期优先级自动预留产品库存</span>
+                <strong>履约进度</strong>
               </div>
               <div class="workflow-panel">
                 <div class="workflow-steps">
@@ -515,7 +526,7 @@ useLiveRefresh(async () => {
                 show-icon
               />
               <div class="detail-section-head">
-                <strong>产品库存与预留</strong><span>交期相同的客单按下单时间排序</span>
+                <strong>产品库存与预留</strong>
               </div>
               <el-table :data="workflow.product_lines" border empty-text="暂无产品库存信息">
                 <el-table-column label="产品" min-width="220">
@@ -571,7 +582,7 @@ useLiveRefresh(async () => {
             </template>
             <div v-if="workflow" class="detail-page">
               <div class="detail-section-head detail-section-head-first">
-                <strong>零件需求与采购</strong><span>按 BOM 汇总全部缺货产品所需零件</span>
+                <strong>零件需求与采购</strong>
               </div>
               <el-alert v-if="workflow.next_action === 'PURCHASE'" title="存在零件缺口：按单采购零件应优先采购，其余零件办理常规入库后可重新检查。" type="warning" :closable="false" show-icon />
               <el-alert

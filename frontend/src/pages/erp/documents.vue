@@ -39,15 +39,15 @@ const activeFilterCount = computed(() =>
 )
 const transactionOptions = computed(() => {
   if (direction.value === "inbound" && scope.value === "PART") {
-    return ["PURCHASE_IN", "OPENING"]
+    return ["PURCHASE_IN", "GENERAL_IN", "OPENING"]
   }
   if (direction.value === "inbound") {
-    return ["ASSEMBLY_IN", "MANUAL_IN", "OPENING"]
+    return ["ASSEMBLY_IN", "MANUAL_IN", "GENERAL_IN", "OPENING"]
   }
   if (scope.value === "PART") {
-    return ["PRODUCTION_OUT", "MANUAL_OUT"]
+    return ["PRODUCTION_OUT", "MANUAL_OUT", "GENERAL_OUT"]
   }
-  return ["SALE_OUT", "MANUAL_OUT"]
+  return ["SALE_OUT", "MANUAL_OUT", "GENERAL_OUT"]
 })
 
 async function load(silent = false) {
@@ -114,6 +114,8 @@ function resetFilters() {
   applyFilters()
 }
 onMounted(() => {
+  keyword.value = typeof route.query.keyword === "string" ? route.query.keyword : ""
+  scope.value = route.query.scope === "PRODUCT" ? "PRODUCT" : "PART"
   load()
   loadItemOptions()
 })

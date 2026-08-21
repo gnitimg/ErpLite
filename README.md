@@ -16,7 +16,7 @@
 - 实时库存、低库存预警、库存成本与完整流水；零件和产品库存直接显示订单缺口，负数使用红色提示。
 - 库存管理按零件库存、产品库存和样品库存拆分；库存流水归入日志分组，摘要留在表格，完整字段在右侧详情栏查看。
 - 产品数量统一为正整数（客单、生产和产品出入库均进行前后端校验），BOM 零件用量仍支持小数。
-- 出入库作业支持按单个零件/产品办理，也支持按客户订单自动补齐缺口零件或将已预留产品一次性出库。
+- 出入库作业采用可打印的多行单据：可在同一张单中混合选择零件和产品，编辑往来单位、日期、数量与单价，并支持逐行清空和全部清空。
 - 样品库存归入“库存管理”并跟随产品目录自动生成；每个有效产品始终显示一行，新产品默认 300 件，结存可独立调整，为 0 时红色提示且不影响产品库存；每次变化会写入样品调整流水。
 - 产品生产和出入库作业归入“业务处理”；库存流水与覆盖所有写操作的系统操作日志统一归入独立“操作日志”分组。
 - 按物料出入库使用两段式选择：先选零件/产品类型，再按对应物料编码或名称检索。
@@ -162,7 +162,7 @@ MySQL 暂未启动时，页面与无验证码登录仍可使用；依赖库存�
 4. 同一产品尽量合成连续批次。批次产量再按要求交期、订单日期和创建顺序分给客单，产品级 ETA 是累计供给达到该明细需求的时刻，客单 ETA 取全部产品 ETA 的最大值。
 5. 到“业务处理 → 生产入库”审核待完工批次，可修改实际合格数量并填写完成日期和备注；审核后 BOM 零件自动出库，产品自动入库。
 6. BOM 未配置、原材料不足或产品未维护日产能力时，页面明确标记 ETA 不可靠或暂不可计算，不会把机器模拟时间冒充可靠交期。
-7. 客单按剩余未出库数量预留库存，可整单、单产品或部分出库；每次生成独立出库单，全部出完才进入 `FULFILLED`。
+7. 待出库客单通过“开出库单”进入统一单据页，客户、地址、剩余产品、预留数量和成交价自动回填且允许编辑；提交仍走订单发货事务，每次生成独立出库单，全部出完才进入 `FULFILLED`。已出库客单提供“查看出库单”快捷入口。
 
 历史入库单和出库单保存订单、客户和物料快照。单据页提供零件/产品子页签、模糊搜索和侧栏筛选；关联订单与客户信息只在销售出库单详情中展示。产品或客户资料以后改名，不会改写已经发生的历史单据。
 
@@ -212,10 +212,10 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | 生产计划与排期 | `GET /api/production/demands`、`GET /api/production/runs`、`PUT/DELETE /api/production/runs/{id}/schedule` |
 | 生产入库 | `POST /api/production/runs/{id}/complete`；实际产量允许与计划不同 |
 | 库存 | `GET /api/inventory`；返回订单需求、缺口和可快捷入库数量 |
-| 出入库 | `POST /api/stock/inbound`、`POST /api/stock/outbound` |
+| 出入库 | `POST /api/stock/documents` 创建普通多行入库单或出库单；保留 `POST /api/stock/inbound`、`POST /api/stock/outbound` 兼容旧入口 |
 | 流水 | `GET /api/stock/transactions` |
 | 操作日志 | `GET /api/operation-logs`、`GET /api/operation-logs/actions` |
-| 客单 | `GET/POST/PUT /api/orders`，以及 `confirm/ship/ship-all/cancel`；`availability` 返回已订、已出、剩余、预留、待生产和 ETA |
+| 客单 | `GET/POST/PUT /api/orders`、`GET /api/orders/{id}`，以及 `confirm/ship/ship-all/cancel`；`ship` 接收单据抬头、日期、经办人及逐行成交价，`availability` 返回已订、已出、剩余、预留、待生产和 ETA |
 | 入/出库单 | `GET /api/documents/inbound`、`GET /api/documents/outbound`；支持零件/产品、关键词、类型和日期筛选 |
 | 数据备份 | `GET/POST /api/backups`、`GET /api/backups/{filename}/download`、`POST /api/backups/{filename}/restore` |
 

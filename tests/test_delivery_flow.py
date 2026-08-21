@@ -16,6 +16,7 @@ from app.main import (
     _ship_order,
     cancel_order,
     complete_production_run,
+    create_stock_document,
     inventory,
     update_order,
 )
@@ -30,7 +31,13 @@ from app.models import (
     StockTransactionItem,
 )
 from app.planning import purchase_requirement_summary, recalculate_production_plan
-from app.schemas import OrderLinePayload, OrderPayload, ProductionCompletionPayload
+from app.schemas import (
+    OrderLinePayload,
+    OrderPayload,
+    ProductionCompletionPayload,
+    StockDocumentLinePayload,
+    StockDocumentPayload,
+)
 from app.services import (
     load_order,
     rebalance_product_reservations,
@@ -277,3 +284,72 @@ def test_first_shipment_freezes_order_and_snapshot_survives_master_rename():
         document = transaction_dict(transaction)
         assert document["counterparty_name"] == "客户甲"
         assert document["lines"][0]["name"] == "AAA"
+
+
+def test_multi_line_stock_document_updates_inventory_and_snapshots_header():
+    _engine, db = database()
+    with db:
+        first = InventoryItem(sku="A", name="零件A", kind="PART", stock_qty=2)
+        second = product(db, "B", stock=1)
+        db.add(first)
+        db.flush()
+
+        document = create_stock_document(
+            StockDocumentPayload(
+                direction="INBOUND",
+                counterparty_name="供应商甲",
+                counterparty_phone="021-1234",
+                counterparty_address="上海",
+                occurred_date=date(2026, 8, 21),
+                operator="仓管员",
+                notes="采购到货",
+                items=[
+                    StockDocumentLinePayload(item_id=first.id, quantity=3, unit_price=2.5),
+                    StockDocumentLinePayload(item_id=second.id, quantity=4, unit_price=9),
+                ],
+            ),
+            db,
+        )
+
+        assert document["transaction_type"] == "GENERAL_IN"
+        assert document["counterparty_name"] == "供应商甲"
+        assert document["operator"] == "仓管员"
+        assert first.stock_qty == 5
+        assert second.stock_qty == 5
+        assert len(document["lines"]) == 2
+        assert len(_document_rows(db, "INBOUND", "PART", transaction_type="GENERAL_IN")) == 1
+        assert len(_document_rows(db, "INBOUND", "PRODUCT", transaction_type="GENERAL_IN")) == 1
+
+
+def test_order_shipment_accepts_editable_document_header_and_price():
+    _engine, db = database()
+    with db:
+        finished = product(db, "P01", stock=10)
+        customer_order = order(db, "SO-1", [(finished, 10)])
+        rebalance_product_reservations(db, {finished.id})
+
+        result = _ship_order(
+            db,
+            customer_order.id,
+            {customer_order.items[0].id: 6},
+            notes="本次先发六台",
+            price_overrides={customer_order.items[0].id: 8.5},
+            occurred_at=datetime(2026, 8, 22),
+            operator="张三",
+            counterparty_name="编辑后的收货单位",
+            counterparty_phone="999",
+            counterparty_address="新地址",
+        )
+        transaction = db.scalar(
+            select(StockTransaction)
+            .where(StockTransaction.id == result["transaction_id"])
+            .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item))
+        )
+        document = transaction_dict(transaction)
+
+        assert result["transaction_no"] == document["transaction_no"]
+        assert document["counterparty_name"] == "编辑后的收货单位"
+        assert document["counterparty_address"] == "新地址"
+        assert document["operator"] == "张三"
+        assert document["lines"][0]["unit_price"] == 8.5
+        assert document["lines"][0]["line_total"] == 51

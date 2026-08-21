@@ -79,6 +79,31 @@ class StockPayload(BaseModel):
     production_run_id: int | None = None
 
 
+class StockDocumentLinePayload(BaseModel):
+    item_id: int
+    quantity: float = Field(gt=0)
+    unit_price: float = Field(default=0, ge=0)
+
+
+class StockDocumentPayload(BaseModel):
+    direction: Literal["INBOUND", "OUTBOUND"]
+    counterparty_name: str = Field(default="", max_length=120)
+    counterparty_phone: str = Field(default="", max_length=40)
+    counterparty_address: str = Field(default="", max_length=255)
+    occurred_date: date = Field(default_factory=date.today)
+    operator: str = Field(default="", max_length=120)
+    notes: str = Field(default="", max_length=500)
+    items: list[StockDocumentLinePayload] = Field(min_length=1)
+
+    @field_validator("items")
+    @classmethod
+    def unique_document_items(cls, value: list[StockDocumentLinePayload]):
+        ids = [line.item_id for line in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一张单据不能重复添加相同物料")
+        return value
+
+
 class OrderStockPayload(BaseModel):
     notes: str = Field(default="", max_length=500)
 
@@ -141,10 +166,16 @@ class ProductionCompletionPayload(BaseModel):
 class OrderShipmentLinePayload(BaseModel):
     order_item_id: int
     quantity: int = Field(gt=0)
+    unit_price: float | None = Field(default=None, ge=0)
 
 
 class OrderShipmentPayload(BaseModel):
     items: list[OrderShipmentLinePayload] = Field(min_length=1)
+    counterparty_name: str = Field(default="", max_length=120)
+    counterparty_phone: str = Field(default="", max_length=40)
+    counterparty_address: str = Field(default="", max_length=255)
+    occurred_date: date = Field(default_factory=date.today)
+    operator: str = Field(default="", max_length=120)
     notes: str = Field(default="", max_length=500)
 
     @field_validator("items")

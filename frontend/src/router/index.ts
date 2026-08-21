@@ -195,9 +195,9 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "stock-operations",
-        component: () => import("@/pages/erp/movements.vue"),
+        component: () => import("@/pages/erp/stock-document.vue"),
         name: "StockOperations",
-        meta: { title: "出入库作业", elIcon: "Sort", stockView: "operations", keepAlive: true }
+        meta: { title: "出入库作业", elIcon: "Sort", keepAlive: true }
       }
     ]
   },

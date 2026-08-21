@@ -47,6 +47,7 @@ from .schemas import (
     ProductionCompletionPayload,
     ProductionSettingsPayload,
     SamplePayload,
+    StockDocumentPayload,
     StockPayload,
 )
 from .planning import (
@@ -190,6 +191,8 @@ def operation_action(path: str, method: str) -> str:
         return "物料入库"
     if path == "/api/stock/outbound":
         return "物料出库"
+    if path == "/api/stock/documents":
+        return "出入库开单"
     if path.startswith("/api/orders"):
         if path.endswith("/confirm"):
             return "确认客单"
@@ -197,7 +200,7 @@ def operation_action(path: str, method: str) -> str:
             return "客单备货"
         if path.endswith("/receive-materials"):
             return "客单补料"
-        if path.endswith("/fulfill"):
+        if path.endswith(("/ship", "/ship-all", "/fulfill")):
             return "客单出库"
         if path.endswith("/cancel"):
             return "取消客单"
@@ -989,9 +992,9 @@ def _document_rows(
     end_date: date | None = None,
 ):
     types = (
-        ("PURCHASE_IN", "ASSEMBLY_IN", "MANUAL_IN", "OPENING")
+        ("PURCHASE_IN", "ASSEMBLY_IN", "MANUAL_IN", "GENERAL_IN", "OPENING")
         if direction == "INBOUND"
-        else ("SALE_OUT", "MANUAL_OUT", "PRODUCTION_OUT", "ASSEMBLY_IN")
+        else ("SALE_OUT", "MANUAL_OUT", "GENERAL_OUT", "PRODUCTION_OUT", "ASSEMBLY_IN")
     )
     direction_filter = (
         StockTransactionItem.quantity_change > 0
@@ -1175,6 +1178,79 @@ def outbound(payload: StockPayload, db: Session = Depends(get_db)):
     return transaction_dict(tx)
 
 
+@app.post("/api/stock/documents", status_code=201)
+def create_stock_document(
+    payload: StockDocumentPayload,
+    db: Session = Depends(get_db),
+):
+    item_ids = [line.item_id for line in payload.items]
+    items = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(item_ids),
+                InventoryItem.active.is_(True),
+                InventoryItem.kind.in_(("PART", "PRODUCT")),
+            )
+        ).all()
+    }
+    if len(items) != len(item_ids):
+        raise HTTPException(404, "单据中有物料不存在或已停用")
+
+    outbound = payload.direction == "OUTBOUND"
+    changes: list[tuple[InventoryItem, float, float]] = []
+    price_snapshots: dict[int, tuple[float, float]] = {}
+    affected_products: set[int] = set()
+    for line in payload.items:
+        item = items[line.item_id]
+        quantity = float(line.quantity)
+        if item.kind == "PRODUCT" and not quantity.is_integer():
+            raise HTTPException(422, f"{item.name} 的产品数量必须为正整数")
+        if outbound and item.kind == "PRODUCT":
+            reserved = reserved_product_quantity(db, item.id)
+            free_stock = max(float(item.stock_qty) - reserved, 0)
+            if quantity > free_stock + 1e-9:
+                raise HTTPException(
+                    409,
+                    f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留",
+                )
+        signed_quantity = -quantity if outbound else quantity
+        unit_cost = item.cost_price if outbound else (line.unit_price or item.cost_price)
+        changes.append((item, signed_quantity, unit_cost))
+        price_snapshots[item.id] = (
+            float(line.unit_price),
+            round(float(line.unit_price) * quantity, 2),
+        )
+        if item.kind == "PRODUCT":
+            affected_products.add(item.id)
+
+    tx = create_transaction(
+        db,
+        "GENERAL_OUT" if outbound else "GENERAL_IN",
+        changes,
+        payload.notes,
+        occurred_at=datetime.combine(payload.occurred_date, time.min),
+        operator=payload.operator,
+        price_snapshots=price_snapshots,
+        counterparty_name=payload.counterparty_name,
+        counterparty_phone=payload.counterparty_phone,
+        counterparty_address=payload.counterparty_address,
+    )
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+    recalculate_production_plan(db)
+    db.commit()
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
+    return transaction_dict(tx)
+
+
 @app.get("/api/orders")
 def orders(
     status: str | None = None,
@@ -1195,6 +1271,11 @@ def orders(
         query = query.where(SalesOrder.order_date <= end_date)
     rows = db.scalars(query.order_by(SalesOrder.required_date.asc(), SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
     return [order_dict(order) for order in rows]
+
+
+@app.get("/api/orders/{order_id}")
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    return order_dict(load_order(db, order_id))
 
 
 @app.post("/api/orders", status_code=201)
@@ -1314,6 +1395,12 @@ def _ship_order(
     order_id: int,
     requested: dict[int, int] | None,
     notes: str = "",
+    price_overrides: dict[int, float] | None = None,
+    occurred_at: datetime | None = None,
+    operator: str | None = None,
+    counterparty_name: str | None = None,
+    counterparty_phone: str | None = None,
+    counterparty_address: str | None = None,
 ) -> dict:
     query = (
         select(SalesOrder)
@@ -1360,9 +1447,10 @@ def _ship_order(
         if quantity > reserved:
             raise HTTPException(409, f"{line.product.name} 当前仅为本单预留 {reserved} {line.product.unit}")
         changes.append((line.product, -quantity, line.product.cost_price))
+        unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
         price_snapshots[line.product_id] = (
-            float(line.unit_price),
-            round(float(line.unit_price) * quantity, 2),
+            unit_price,
+            round(unit_price * quantity, 2),
         )
     tx = create_transaction(
         db,
@@ -1370,7 +1458,12 @@ def _ship_order(
         changes,
         notes or f"客单 {order.order_no} 出库",
         related_order_id=order.id,
+        occurred_at=occurred_at,
+        operator=operator,
         price_snapshots=price_snapshots,
+        counterparty_name=counterparty_name,
+        counterparty_phone=counterparty_phone,
+        counterparty_address=counterparty_address,
     )
     affected_products = set()
     for line_id, quantity in requested.items():
@@ -1384,6 +1477,7 @@ def _ship_order(
     return {
         "order": order_dict(load_order(db, order.id)),
         "transaction_id": tx.id,
+        "transaction_no": tx.transaction_no,
     }
 
 
@@ -1398,6 +1492,12 @@ def ship_order_lines(
         order_id,
         {line.order_item_id: line.quantity for line in payload.items},
         payload.notes,
+        {line.order_item_id: line.unit_price for line in payload.items if line.unit_price is not None},
+        datetime.combine(payload.occurred_date, time.min),
+        payload.operator,
+        payload.counterparty_name or None,
+        payload.counterparty_phone or None,
+        payload.counterparty_address or None,
     )
 
 
