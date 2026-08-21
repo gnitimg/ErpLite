@@ -226,6 +226,7 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | `GET /api/parts` | `keyword`、`stock_status` | `keyword` 模糊匹配零件 SKU/名称/规格；`stock_status` 可选 `LOW`（库存小于等于安全库存）或 `NORMAL`（库存高于安全库存） |
 | `GET /api/products` | `keyword`、`stock_status`、`bom_status` | `keyword` 模糊匹配产品 SKU/名称/规格；库存状态同上；`bom_status` 可选 `CONFIGURED`（已配置 BOM）或 `EMPTY`（未配置 BOM） |
 | `GET /api/inventory` | `keyword`、`kind`、`stock_status`、`low_stock` | `keyword` 模糊匹配物料 SKU/名称/规格；`kind` 可选 `PART` 或 `PRODUCT`；返回 `order_required_qty`、正数 `shortage_qty` 和用于界面显示的零或负数 `gap_qty`。保留 `low_stock=true` 兼容旧调用 |
+| `GET /api/documents/inbound`、`GET /api/documents/outbound` | `scope`、`item_id`、`keyword`、`transaction_type`、`start_date`、`end_date` | `scope` 区分零件与产品；`item_id` 按当前标签下的物料精确筛选；关键词匹配单号、订单号、客户或物料快照；日期包含起止当日 |
 | `GET /api/stock/transactions` | `keyword`、`transaction_type`、`start_date`、`end_date`、`limit` | `keyword` 模糊匹配流水号、物料 SKU/名称或备注；类型精确匹配（如 `PURCHASE_IN`、`PRODUCTION_OUT`、`ASSEMBLY_IN`、`MANUAL_IN`、`MANUAL_OUT`、`SALE_OUT`、`OPENING`）；日期格式为 `YYYY-MM-DD` 且包含起止当日；`limit` 范围为 1–500 |
 
 ## 当前边界

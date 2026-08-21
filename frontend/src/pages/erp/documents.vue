@@ -16,19 +16,26 @@ import ListToolbar from "./components/ListToolbar.vue"
 const route = useRoute()
 const loading = ref(false)
 const rows = ref<any[]>([])
+const itemOptions = ref<any[]>([])
 const detail = ref<any>(null)
 const drawer = ref(false)
 const filterDrawer = ref(false)
 const keyword = ref("")
 const scope = ref("PART")
-const filters = reactive({ transactionType: "", dateRange: [] as string[] })
+const filters = reactive({
+  itemId: undefined as number | undefined,
+  transactionType: "",
+  dateRange: [] as string[]
+})
 const direction = computed(() =>
   String(route.meta.documentDirection || "inbound").toLowerCase()
 )
 const title = computed(() => direction.value === "inbound" ? "入库单" : "出库单")
 const scopeTitle = computed(() => scope.value === "PART" ? "零件" : "产品")
 const activeFilterCount = computed(() =>
-  Number(Boolean(filters.transactionType)) + Number(filters.dateRange.length > 0)
+  Number(Boolean(filters.itemId))
+  + Number(Boolean(filters.transactionType))
+  + Number(filters.dateRange.length > 0)
 )
 const transactionOptions = computed(() => {
   if (direction.value === "inbound" && scope.value === "PART") {
@@ -47,17 +54,40 @@ async function load(silent = false) {
   if (!silent) loading.value = true
   const params = new URLSearchParams({ scope: scope.value })
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
+  if (filters.itemId) params.set("item_id", String(filters.itemId))
   if (filters.transactionType) {
     params.set("transaction_type", filters.transactionType)
   }
   if (filters.dateRange[0]) params.set("start_date", filters.dateRange[0])
   if (filters.dateRange[1]) params.set("end_date", filters.dateRange[1])
   try {
-    rows.value = await api(`/api/documents/${direction.value}?${params}`)
+    const response = await api<any[]>(`/api/documents/${direction.value}?${params}`)
+    const inbound = direction.value === "inbound"
+    rows.value = response
+      .map(row => ({
+        ...row,
+        lines: (row.lines || []).filter((line: any) =>
+          line.kind === scope.value
+          && (Number(line.quantity_change) > 0) === inbound
+        )
+      }))
+      .filter(row =>
+        row.lines.length > 0
+        && (!filters.itemId || row.lines.some(
+          (line: any) => line.item_id === filters.itemId
+        ))
+      )
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
     if (!silent) loading.value = false
+  }
+}
+async function loadItemOptions() {
+  try {
+    itemOptions.value = await api(`/api/inventory?kind=${scope.value}`)
+  } catch (error: any) {
+    ElMessage.error(error.message)
   }
 }
 function materialSummary(row: any) {
@@ -78,19 +108,26 @@ function applyFilters() {
   load()
 }
 function resetFilters() {
+  filters.itemId = undefined
   filters.transactionType = ""
   filters.dateRange = []
   applyFilters()
 }
-onMounted(load)
+onMounted(() => {
+  load()
+  loadItemOptions()
+})
 watch(direction, () => {
   scope.value = "PART"
+  filters.itemId = undefined
   filters.transactionType = ""
   filters.dateRange = []
   load()
 })
 watch(scope, () => {
+  filters.itemId = undefined
   filters.transactionType = ""
+  loadItemOptions()
   load()
 })
 useLiveRefresh(() => load(true))
@@ -117,11 +154,16 @@ useLiveRefresh(() => load(true))
     <section class="content-card">
       <div class="card-head">
         <h3>{{ title }}</h3>
+        <el-segmented
+          v-model="scope"
+          :options="[
+            { label: '零件', value: 'PART' },
+            { label: '产品', value: 'PRODUCT' },
+          ]"
+          class="operation-scope-switch"
+        />
       </div>
-      <el-tabs v-model="scope" class="document-tabs">
-        <el-tab-pane :label="`零件${title}`" name="PART" />
-        <el-tab-pane :label="`产品${title}`" name="PRODUCT" />
-      </el-tabs>
+
       <el-table v-loading="loading" :data="rows" empty-text="暂无单据">
         <el-table-column prop="transaction_no" label="单号" min-width="190">
           <template #default="{ row }">
@@ -167,6 +209,22 @@ useLiveRefresh(() => load(true))
       size="min(420px, 92vw)"
     >
       <el-form label-position="top">
+        <el-form-item :label="scope === 'PART' ? '零件' : '产品'">
+          <el-select
+            v-model="filters.itemId"
+            filterable
+            clearable
+            :placeholder="scope === 'PART' ? '搜索并选择零件' : '搜索并选择产品'"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="item in itemOptions"
+              :key="item.id"
+              :label="`${item.sku} · ${item.name}`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="业务类型">
           <el-select
             v-model="filters.transactionType"
@@ -278,8 +336,9 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
-.document-tabs {
-  padding: 0 22px;
+.card-head .operation-scope-switch {
+  margin-bottom: 0;
+  align-self: center;
 }
 .print-sheet h1 {
   margin: 0 0 22px;

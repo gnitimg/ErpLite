@@ -983,6 +983,7 @@ def _document_rows(
     direction: Literal["INBOUND", "OUTBOUND"],
     scope: Literal["PART", "PRODUCT"] | None = None,
     keyword: str = "",
+    item_id: int | None = None,
     transaction_type: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -1003,6 +1004,8 @@ def _document_rows(
             line_filter,
             StockTransactionItem.item.has(InventoryItem.kind == scope),
         )
+    if item_id is not None:
+        line_filter = and_(line_filter, StockTransactionItem.item_id == item_id)
     query = (
         select(StockTransaction)
         .where(
@@ -1067,6 +1070,7 @@ def _document_rows(
 def inbound_documents(
     scope: Literal["PART", "PRODUCT"] | None = None,
     keyword: str = "",
+    item_id: int | None = None,
     transaction_type: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -1077,6 +1081,7 @@ def inbound_documents(
         "INBOUND",
         scope,
         keyword,
+        item_id,
         transaction_type,
         start_date,
         end_date,
@@ -1087,6 +1092,7 @@ def inbound_documents(
 def outbound_documents(
     scope: Literal["PART", "PRODUCT"] | None = None,
     keyword: str = "",
+    item_id: int | None = None,
     transaction_type: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -1097,6 +1103,7 @@ def outbound_documents(
         "OUTBOUND",
         scope,
         keyword,
+        item_id,
         transaction_type,
         start_date,
         end_date,

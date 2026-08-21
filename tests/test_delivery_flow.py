@@ -185,6 +185,18 @@ def test_completion_accepts_under_or_over_production(
         assert consumption.lines[0].quantity_change == -actual * 2
         assert len(_document_rows(db, "INBOUND", "PRODUCT")) == 1
         assert len(_document_rows(db, "OUTBOUND", "PART", "零件X")) == 1
+        assert len(_document_rows(
+            db,
+            "OUTBOUND",
+            "PART",
+            item_id=part.id,
+        )) == 1
+        assert _document_rows(
+            db,
+            "OUTBOUND",
+            "PART",
+            item_id=finished.id,
+        ) == []
         assert _document_rows(db, "INBOUND", "PART") == []
         assert sum(allocation.quantity for allocation in planned.allocations) == min(actual, 100)
 
