@@ -32,36 +32,46 @@ interface Payment {
 const loading = ref(false)
 const tab = ref("receivables")
 const keyword = ref("")
-const rows = ref<any[]>([])
+const receivableRows = ref<Receivable[]>([])
+const paymentRows = ref<Payment[]>([])
 const paymentDialog = ref(false)
 const allocateDialog = ref(false)
-const paymentForm = reactive({ customer_name: "", amount: 0, payment_date: "", method: "BANK_TRANSFER", notes: "" })
+const paymentForm = reactive({ customer_name: "", amount: 0, payment_date: "", method: "TRANSFER", notes: "" })
 const allocateForm = reactive({ payment_id: 0, receivable_id: 0, amount: 0 })
 const availableReceivables = ref<Receivable[]>([])
 
-const statusLabels: Record<string, string> = { OPEN: "待核销", SETTLED: "已结清", CANCELLED: "已取消" }
-const statusTypes: Record<string, string> = { OPEN: "warning", SETTLED: "success", CANCELLED: "info" }
+const statusLabels: Record<string, string> = { OPEN: "待核销", PARTIAL: "部分核销", SETTLED: "已结清", CANCELLED: "已取消" }
+const statusTypes: Record<string, string> = { OPEN: "primary", PARTIAL: "warning", SETTLED: "success", CANCELLED: "info" }
+const methodLabels: Record<string, string> = { TRANSFER: "银行转账", CASH: "现金", OTHER: "其他" }
+
+const rows = computed<(Receivable | Payment)[]>(() => (tab.value === "receivables" ? receivableRows.value : paymentRows.value))
 
 const filteredRows = computed(() => {
   const token = keyword.value.trim().toLowerCase()
-  return rows.value.filter((row: any) => {
+  return rows.value.filter((row) => {
     if (!token) return true
     if (tab.value === "receivables") {
-      return `${row.receivable_no} ${row.order_no} ${row.customer_name}`.toLowerCase().includes(token)
+      const r = row as Receivable
+      return `${r.receivable_no} ${r.order_no} ${r.customer_name}`.toLowerCase().includes(token)
     }
-    return `${row.payment_no} ${row.customer_name}`.toLowerCase().includes(token)
+    const p = row as Payment
+    return `${p.payment_no} ${p.customer_name}`.toLowerCase().includes(token)
   })
 })
 
-const totalReceivable = computed(() => rows.value.reduce((s: number, r: any) => s + (r.amount - (r.settled_amount || 0)), 0))
-const totalSettled = computed(() => rows.value.reduce((s: number, r: any) => s + (r.settled_amount || 0), 0))
+const openReceivables = computed(() => receivableRows.value.filter(r => r.status !== "CANCELLED"))
+const totalReceivable = computed(() => openReceivables.value.reduce((s, r) => s + (r.amount - (r.settled_amount || 0)), 0))
+const totalSettled = computed(() => openReceivables.value.reduce((s, r) => s + (r.settled_amount || 0), 0))
 
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    rows.value = tab.value === "receivables"
-      ? await api("/api/finance/receivables")
-      : await api("/api/finance/payments")
+    const [receivables, payments] = await Promise.all([
+      api<Receivable[]>("/api/finance/receivables"),
+      api<Payment[]>("/api/finance/payments")
+    ])
+    receivableRows.value = receivables
+    paymentRows.value = payments
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
@@ -85,7 +95,7 @@ async function createPayment() {
 
 async function openAllocateDialog(payment: Payment) {
   availableReceivables.value = await api("/api/finance/receivables")
-  availableReceivables.value = availableReceivables.value.filter((r: Receivable) => r.status === "OPEN" && r.customer_name === payment.customer_name)
+  availableReceivables.value = availableReceivables.value.filter((r: Receivable) => (r.status === "OPEN" || r.status === "PARTIAL") && r.customer_name === payment.customer_name)
   allocateForm.payment_id = payment.id
   allocateForm.receivable_id = 0
   allocateForm.amount = payment.amount - payment.allocated_amount
@@ -164,6 +174,9 @@ useLiveRefresh(() => load(true))
           <el-table-column label="客户" prop="customer_name" min-width="120" />
           <el-table-column label="收款金额" prop="amount" width="120" align="right" />
           <el-table-column label="已核销" prop="allocated_amount" width="120" align="right" />
+          <el-table-column label="收款方式" width="100">
+            <template #default="{ row }">{{ methodLabels[row.method] || row.method }}</template>
+          </el-table-column>
           <el-table-column label="收款日期" prop="payment_date" width="120" />
           <el-table-column label="操作" width="100" fixed="right">
             <template #default="{ row }">
@@ -181,9 +194,9 @@ useLiveRefresh(() => load(true))
         <el-form-item label="收款日期"><el-date-picker v-model="paymentForm.payment_date" type="date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
         <el-form-item label="收款方式">
           <el-select v-model="paymentForm.method" style="width:100%">
-            <el-option label="银行转账" value="BANK_TRANSFER" />
+            <el-option label="银行转账" value="TRANSFER" />
             <el-option label="现金" value="CASH" />
-            <el-option label="支票" value="CHECK" />
+            <el-option label="其他" value="OTHER" />
           </el-select>
         </el-form-item>
         <el-form-item label="备注"><el-input v-model="paymentForm.notes" type="textarea" /></el-form-item>

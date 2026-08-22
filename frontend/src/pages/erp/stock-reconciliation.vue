@@ -79,7 +79,7 @@ useLiveRefresh(() => load(true))
   <div class="erp-page">
     <ListToolbar v-model="keyword" placeholder="搜索SKU、名称" :loading="loading" @refresh="load" @update:model-value="applyFilter" />
 
-    <el-alert class="list-page-alert" title="录入实际盘点数量后点击"提交对账"，系统将自动生成库存调整流水记录差异。" type="info" :closable="false" show-icon />
+    <el-alert class="list-page-alert" title="录入实际盘点数量后点击「提交对账」，系统将自动生成库存调整流水记录差异。" type="info" :closable="false" show-icon />
 
     <div class="content-card">
       <div class="card-head">

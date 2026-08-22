@@ -7,14 +7,14 @@ import ListToolbar from "./components/ListToolbar.vue"
 interface CalendarException {
   id: number
   exception_date: string
-  is_working: boolean
+  is_working_day: boolean
   note: string
 }
 
 const loading = ref(false)
 const rows = ref<CalendarException[]>([])
 const dialog = ref(false)
-const form = reactive({ exception_date: "", is_working: false, note: "" })
+const form = reactive({ exception_date: "", is_working_day: false, note: "" })
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -59,7 +59,7 @@ useLiveRefresh(() => load(true))
 <template>
   <div class="erp-page">
     <ListToolbar :loading="loading" @refresh="load">
-      <el-button type="primary" @click="dialog = true; form.exception_date = ''; form.is_working = false; form.note = ''">
+      <el-button type="primary" @click="dialog = true; form.exception_date = ''; form.is_working_day = false; form.note = ''">
         <el-icon><Plus /></el-icon>新增例外
       </el-button>
     </ListToolbar>
@@ -74,7 +74,7 @@ useLiveRefresh(() => load(true))
         <el-table-column label="日期" prop="exception_date" width="160" />
         <el-table-column label="类型" width="120">
           <template #default="{ row }">
-            <el-tag :type="row.is_working ? 'success' : 'danger'" size="small">{{ row.is_working ? '调班生产' : '休息日' }}</el-tag>
+            <el-tag :type="row.is_working_day ? 'success' : 'danger'" size="small">{{ row.is_working_day ? '调班生产' : '休息日' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="备注" prop="note" min-width="200" />
@@ -89,7 +89,7 @@ useLiveRefresh(() => load(true))
     <el-dialog v-model="dialog" title="新增日历例外" width="460px">
       <el-form label-position="top">
         <el-form-item label="日期"><el-date-picker v-model="form.exception_date" type="date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
-        <el-form-item label="是否生产"><el-switch v-model="form.is_working" active-text="生产" inactive-text="休息" /></el-form-item>
+        <el-form-item label="是否生产"><el-switch v-model="form.is_working_day" active-text="生产" inactive-text="休息" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.note" /></el-form-item>
       </el-form>
       <template #footer>

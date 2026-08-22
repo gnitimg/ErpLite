@@ -1,13 +1,16 @@
 import { onActivated, onBeforeUnmount, onDeactivated, onMounted } from "vue"
+import { getToken } from "@/common/utils/local-storage"
 
 const clientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
 
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken()
   const response = await fetch(path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
       "X-ERP-Client-ID": clientId,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.headers || {})
     }
   })
