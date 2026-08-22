@@ -454,8 +454,11 @@ def _recalculate_plan_impl(
         )
         .options(selectinload(ProductionRun.allocations))
     ).all()
-    # 自主补库存计划同样是未来供给。新客单在计划创建后进入时，
-    # 将尚未分配的计划产量按交期补给订单，避免系统重复生成同产品批次。
+    # 所有仍会产出的固定批次都是未来供给：RUNNING、人工锁定 PLANNED、自主补库存。
+    # 取消订单后留下的空余产量（planned - active allocations）按完成时间依次补给
+    # 新需求，绝不重复创建同产品新批次。已 COMPLETED/CANCELLED/TERMINATED 的
+    # 批次不会进入 fixed_runs，天然不算供给。RUNNING 厚版暂无实时进度，按
+    # planned_quantity 计。
     allocated_by_line: dict[int, float] = defaultdict(float)
     for run in fixed_runs:
         for allocation in run.allocations:
@@ -467,13 +470,13 @@ def _recalculate_plan_impl(
         if float(line.production_required_quantity or 0) > 1e-9
     ]
     for run in sorted(fixed_runs, key=lambda row: (row.planned_end_at, row.id)):
-        if run.source_type != "REPLENISHMENT" or run.status != "PLANNED":
-            continue
         remaining_supply = max(
             int(run.planned_quantity)
             - sum(int(allocation.quantity) for allocation in run.allocations),
             0,
         )
+        if remaining_supply <= 0:
+            continue
         sequence = max(
             (allocation.sequence for allocation in run.allocations),
             default=0,
