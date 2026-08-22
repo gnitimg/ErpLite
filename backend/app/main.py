@@ -2609,6 +2609,17 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
             409,
             f"{original.transaction_type} 流水不支持通用冲销；生产/外协业务请使用专属逆操作",
         )
+    # 入库类冲销会从库存减回数量：若该批货物已被后续业务消耗，
+    # 冲销会把库存打负并产生错误的成本回滚，必须拒绝。
+    if original.transaction_type in {"GENERAL_IN", "MANUAL_IN", "PURCHASE_IN"}:
+        for line in original.lines:
+            if line.quantity_change <= 0:
+                continue
+            if float(line.item.stock_qty) + 1e-9 < float(line.quantity_change):
+                raise HTTPException(
+                    409,
+                    f"{line.sku_snapshot or line.item.sku} 该批入库库存已被后续业务消耗，不能直接冲销。",
+                )
     if original.transaction_type == "SALE_OUT":
         receivable = db.scalar(
             select(Receivable)

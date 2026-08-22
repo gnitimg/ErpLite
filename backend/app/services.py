@@ -368,6 +368,17 @@ def create_transaction(
                 item.stock_qty = round(new_stock, 6)
                 if new_stock > 1e-9:
                     item.cost_price = round(new_value / new_stock, 2)
+            elif delta < 0 and unit_cost > 0:
+                # 出库/冲销按传入的快照成本退出库存价值：
+                # - 冲销原入库时传原始 unit_cost，库存数量和成本一起回到入库前；
+                # - 普通出库传当前均价，价值按比例减少、均价保持不变。
+                old_stock = float(item.stock_qty)
+                old_value = old_stock * float(item.cost_price)
+                new_value = max(old_value + float(delta) * float(unit_cost), 0)
+                new_stock = old_stock + float(delta)
+                item.stock_qty = round(new_stock, 6)
+                if new_stock > 1e-9:
+                    item.cost_price = round(new_value / new_stock, 2)
             else:
                 item.stock_qty = round(item.stock_qty + delta, 6)
         price, line_total = (price_snapshots or {}).get(item.id, (None, None))

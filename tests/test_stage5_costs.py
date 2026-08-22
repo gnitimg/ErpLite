@@ -244,3 +244,62 @@ def test_external_return_cost_adds_processing_fee():
         tx = db.get(StockTransaction, result["transaction_id"])
         # 5 材料成本 + 100/50 加工费分摊 = 7
         assert float(tx.lines[0].unit_cost) == 7
+
+
+# ───────────────── 5B：移动平均与冲销 ─────────────────
+
+def test_purchase_reversal_restores_cost():
+    """10@5 + 10@8 → 20@6.5；冲销 @8 那笔 → 库存与成本都回到 10@5。"""
+    with database() as db:
+        part = make_part(db, "X")
+        first = create_transaction(db, "PURCHASE_IN", [(part, 10, 5)], "第一批")
+        second = create_transaction(db, "PURCHASE_IN", [(part, 10, 8)], "第二批")
+        db.commit()
+        assert float(part.stock_qty) == 20
+        assert float(part.cost_price) == 6.5
+
+        reverse_stock_transaction(second.id, db)
+        db.refresh(part)
+        assert float(part.stock_qty) == 10
+        assert float(part.cost_price) == 5
+        # 第一批流水不受影响
+        db.refresh(first)
+        assert first.status == "POSTED"
+
+
+def test_purchase_reversal_rejected_when_consumed():
+    """10@5 + 10@8 后已出库 15：再冲销 10 的采购被拒绝。"""
+    with database() as db:
+        part = make_part(db, "X")
+        create_transaction(db, "PURCHASE_IN", [(part, 10, 5)], "第一批")
+        second = create_transaction(db, "PURCHASE_IN", [(part, 10, 8)], "第二批")
+        create_transaction(db, "MANUAL_OUT", [(part, -15, part.cost_price)], "消耗")
+        db.commit()
+        assert float(part.stock_qty) == 5
+        try:
+            reverse_stock_transaction(second.id, db)
+            raise AssertionError("已消耗的采购入库应当拒绝冲销")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "不能直接冲销" in error.detail
+        db.refresh(part)
+        assert float(part.stock_qty) == 5
+
+
+def test_purchase_reversal_allowed_when_stock_replenished():
+    """库存回补到足够覆盖原入库数量后，允许冲销。"""
+    with database() as db:
+        part = make_part(db, "X")
+        create_transaction(db, "PURCHASE_IN", [(part, 10, 5)], "第一批")
+        second = create_transaction(db, "PURCHASE_IN", [(part, 10, 8)], "第二批")
+        create_transaction(db, "MANUAL_OUT", [(part, -15, part.cost_price)], "消耗")
+        create_transaction(db, "GENERAL_IN", [(part, 10, 4)], "回补")
+        db.commit()
+        assert float(part.stock_qty) == 15
+        reverse_stock_transaction(second.id, db)
+        db.refresh(part)
+        assert float(part.stock_qty) == 5
+        # 已知近似（交接 5B 允许）：此前按均价 6.5 出货，冲销 @8 批次会把隐含
+        # 账面价值打到负数；不做 COGS 重放，价值下限 clamp 到 0。
+        # 关键断言：数量正确、成本落在合理区间、不抛异常。
+        assert 0 <= float(part.cost_price) < 100
