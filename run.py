@@ -423,6 +423,8 @@ def start_backend(dev: bool) -> ProcessGroup:
     env = os.environ.copy()
     env.setdefault("ERP_MYSQL_HOST", MYSQL_HOST)
     env.setdefault("ERP_MYSQL_PORT", str(MYSQL_PORT))
+    # run.py 知道运行模式：生产模式启动时后端会强制要求 ERP_JWT_SECRET 等鉴权配置。
+    env.setdefault("ERP_ENV", "dev" if dev else "production")
 
     info(f"启动后端 (http://{BACKEND_HOST}:{BACKEND_PORT}) ...")
     creationflags = 0

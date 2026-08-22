@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
-import { api, formatTime, useLiveRefresh } from "./api"
+import { api, apiBlob, formatTime, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 
 interface BackupRow {
@@ -66,8 +66,18 @@ async function createBackup() {
   }
 }
 
-function download(row: any) {
-  window.location.assign(`/api/backups/${encodeURIComponent(row.filename)}/download`)
+async function download(row: any) {
+  try {
+    const blob = await apiBlob(`/api/backups/${encodeURIComponent(row.filename)}/download`)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = row.filename
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error: any) {
+    ElMessage.error(error.message || "下载失败")
+  }
 }
 
 async function restore(row: any) {

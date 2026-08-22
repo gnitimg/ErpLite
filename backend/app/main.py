@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import SessionLocal, engine, get_db, run_migrations
@@ -100,7 +101,19 @@ from .services import (
     transaction_dict,
     verify_password,
 )
-from .auth import create_access_token, verify_token, get_current_user, require_user, require_admin, extract_token
+from .auth import (
+    authenticated_username,
+    create_access_token,
+    emergency_admin_credentials,
+    extract_token,
+    load_user,
+    matches_emergency_admin,
+    require_admin,
+    required_role_for,
+    role_allows,
+    validate_auth_config,
+    verify_token,
+)
 
 
 StockStatus = Literal["LOW", "NORMAL"]
@@ -109,6 +122,8 @@ BomStatus = Literal["CONFIGURED", "EMPTY"]
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 生产环境缺少 JWT 密钥等致命鉴权配置时，拒绝启动。
+    validate_auth_config()
     try:
         run_migrations()
         with SessionLocal() as db:
@@ -132,6 +147,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def enforce_rbac(request: Request, call_next):
+    """统一 RBAC 门卫：所有 /api 业务路径按角色放行，公开路径直接通过。
+
+    顺序上位于 CORS 内层、审计广播外层——被拒绝的请求不进入业务处理器，
+    也不产生操作日志（避免未认证扫描刷爆审计表）。实时刷新信号 /api/events
+    仅广播变更事件、不含业务数据，保持公开以兼容 EventSource 无法携带
+    Authorization 头的限制。
+    """
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    required = required_role_for(path, request.method)
+    if required is None:
+        return await call_next(request)
+    token = extract_token(request)
+    if not token:
+        return JSONResponse(status_code=401, content={"detail": "需要登录后操作"})
+    try:
+        payload = verify_token(token)
+    except HTTPException as error:
+        return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+    role = str(payload.get("role") or "VIEWER")
+    if not role_allows(role, required):
+        return JSONResponse(status_code=403, content={"detail": f"当前角色（{role}）无权执行该操作"})
+    return await call_next(request)
+
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=enforce_rbac)
 
 
 class ChangeEventHub:
@@ -190,7 +235,7 @@ async def broadcast_successful_writes(request: Request, call_next):
         try:
             with SessionLocal() as audit_db:
                 audit_db.add(OperationLog(
-                    username=request.headers.get("x-erp-operator", "仓库管理员")[:120],
+                    username=authenticated_username(request),
                     action=operation_action(request.url.path, request.method),
                     target=request.url.path[:255],
                     method=request.method,
@@ -403,18 +448,29 @@ async def data_change_events(request: Request):
 
 
 @app.post("/api/v1/auth/login")
-def login(payload: LoginPayload, db: Session = Depends(get_db)):
+def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)):
     user = db.scalar(
         select(User).where(User.username == payload.username.strip(), User.active.is_(True))
     )
     if user and verify_password(payload.password, user.password_hash):
         token = create_access_token(user.id, user.username, user.role, user.display_name or user.username)
         return {"code": 0, "data": {"token": token, "username": user.username, "display_name": user.display_name or user.username, "role": user.role}, "message": "success"}
-    env_username = os.getenv("ERP_ADMIN_USER", "admin")
-    env_password = os.getenv("ERP_ADMIN_PASSWORD", "12345678")
-    if payload.username == env_username and payload.password == env_password:
-        token = create_access_token(0, env_username, "ADMIN", "仓库管理员")
-        return {"code": 0, "data": {"token": token, "username": env_username, "display_name": "仓库管理员", "role": "ADMIN"}, "message": "success"}
+    # Break-glass 应急管理员：默认关闭，仅显式开启且凭据满足强度要求时可用，登录留独立审计记录。
+    credentials = emergency_admin_credentials()
+    if credentials and matches_emergency_admin(payload.username, payload.password, credentials):
+        db.add(OperationLog(
+            username=credentials[0][:120],
+            action="应急管理员登录",
+            target="/api/v1/auth/login",
+            method="POST",
+            path="/api/v1/auth/login",
+            ip_address=client_ip(request)[:64],
+            status="SUCCESS",
+            detail="Break-glass 应急管理员通过环境变量凭据登录",
+        ))
+        db.commit()
+        token = create_access_token(0, credentials[0], "ADMIN", "应急管理员")
+        return {"code": 0, "data": {"token": token, "username": credentials[0], "display_name": "应急管理员", "role": "ADMIN"}, "message": "success"}
     raise HTTPException(401, "用户名或密码错误")
 
 
@@ -422,19 +478,21 @@ def login(payload: LoginPayload, db: Session = Depends(get_db)):
 def current_user(request: Request, db: Session = Depends(get_db)):
     token = extract_token(request)
     if not token:
-        env_username = os.getenv("ERP_ADMIN_USER", "admin")
-        return {"code": 0, "data": {"username": env_username, "display_name": "仓库管理员", "role": "ADMIN", "permissions": []}, "message": "success"}
+        raise HTTPException(401, "未登录")
     try:
         payload = verify_token(token)
-    except HTTPException:
-        env_username = os.getenv("ERP_ADMIN_USER", "admin")
-        return {"code": 0, "data": {"username": env_username, "display_name": "仓库管理员", "role": "ADMIN", "permissions": []}, "message": "success"}
+    except HTTPException as error:
+        raise HTTPException(401, "登录状态无效，请重新登录") from error
     user_id = int(payload.get("sub", "0"))
     if user_id > 0:
-        user = db.scalar(select(User).where(User.id == user_id))
-        if user and user.active:
-            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "permissions": []}, "message": "success"}
-    return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": payload.get("role", ""), "permissions": []}, "message": "success"}
+        user = load_user(db, user_id)
+        if user:
+            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": []}, "message": "success"}
+        raise HTTPException(401, "登录状态无效，请重新登录")
+    if payload.get("role") == "ADMIN":
+        # 应急管理员令牌（sub=0）：签发时已通过强度校验并留有审计记录。
+        return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": []}, "message": "success"}
+    raise HTTPException(401, "登录状态无效，请重新登录")
 
 
 @app.get("/api/dashboard")
@@ -2547,7 +2605,8 @@ def reconcile_stock(
 
 
 @app.get("/api/backups")
-def backups():
+def backups(request: Request):
+    require_admin(request)
     return list_backup_archives()
 
 
@@ -2769,7 +2828,8 @@ def create_backup(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/api/backups/{filename}/download")
-def download_backup(filename: str):
+def download_backup(filename: str, request: Request):
+    require_admin(request)
     try:
         path = resolve_backup_file(filename)
     except BackupError as error:

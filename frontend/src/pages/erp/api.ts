@@ -1,30 +1,65 @@
 import { onActivated, onBeforeUnmount, onDeactivated, onMounted } from "vue"
-import { getToken } from "@/common/utils/local-storage"
+import { getToken, removeToken } from "@/common/utils/local-storage"
 
 const clientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
 
-export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+function redirectToLogin() {
+  const base = import.meta.env.BASE_URL || "/"
+  window.location.href = `${base.endsWith("/") ? base : `${base}/`}#/login`
+}
+
+async function errorMessage(response: Response) {
+  let message = `请求失败（${response.status}）`
+  try {
+    const data = await response.json()
+    message = typeof data.detail === "string" ? data.detail : message
+  } catch {
+    // Keep the HTTP fallback message.
+  }
+  return message
+}
+
+function bearerHeaders(extra: Record<string, string> = {}) {
   const token = getToken()
+  return {
+    "X-ERP-Client-ID": clientId,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra
+  }
+}
+
+export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-ERP-Client-ID": clientId,
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {})
+      ...bearerHeaders(),
+      ...(options.headers as Record<string, string> | undefined || {})
     }
   })
-  if (!response.ok) {
-    let message = `请求失败（${response.status}）`
-    try {
-      const data = await response.json()
-      message = typeof data.detail === "string" ? data.detail : message
-    } catch {
-      // Keep the HTTP fallback message.
-    }
-    throw new Error(message)
+  if (response.status === 401) {
+    removeToken()
+    redirectToLogin()
   }
+  if (!response.ok) throw new Error(await errorMessage(response))
   return response.status === 204 ? (undefined as T) : response.json()
+}
+
+/** 下载文件：带 Bearer 头取回二进制（浏览器直链无法携带 Authorization）。 */
+export async function apiBlob(path: string, options: RequestInit = {}): Promise<Blob> {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...bearerHeaders(),
+      ...(options.headers as Record<string, string> | undefined || {})
+    }
+  })
+  if (response.status === 401) {
+    removeToken()
+    redirectToLogin()
+  }
+  if (!response.ok) throw new Error(await errorMessage(response))
+  return response.blob()
 }
 
 export interface DataChangeEvent {

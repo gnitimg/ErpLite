@@ -1,0 +1,268 @@
+"""鉴权与 RBAC 端到端测试。
+
+经 TestClient 走真实 HTTP 中间件链（RBAC 门卫 + 审计广播），验证：
+- 登录仅认 User 表与显式开启的应急管理员，旧 env 后门凭据彻底失效；
+- /api/v1/users/me 无令牌/坏令牌返回 401，绝不再回落 ADMIN；
+- 业务 API 按ADMIN / OPERATOR / VIEWER 执行角色门槛；
+- 备份（含下载）仅 ADMIN；
+- 操作日志用户名来自已验证 JWT；
+- 生产环境缺少 ERP_JWT_SECRET 拒绝启动。
+"""
+from pathlib import Path
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+
+import app.main as main_module
+from app.auth import (
+    create_access_token,
+    emergency_admin_credentials,
+    required_role_for,
+    validate_auth_config,
+)
+from app.database import Base, get_db
+from app.models import OperationLog, User
+from app.services import hash_password
+
+
+client = TestClient(main_module.app)
+
+
+@pytest.fixture()
+def db(monkeypatch):
+    # StaticPool + check_same_thread=False：TestClient 的工作线程与测试线程必须共享
+    # 同一个内存库连接，否则各自看到的是空数据库。
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+
+    # 依赖覆盖必须用干净签名的函数包装：sessionmaker 自身的 __init__ 带 **local_kw
+    # 等形参，直接作为依赖会让 FastAPI 尝试注入它们（422 missing query local_kw）。
+    def override_get_db():
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    main_module.app.dependency_overrides[get_db] = override_get_db
+    monkeypatch.setattr(main_module, "SessionLocal", factory)
+    yield factory
+    main_module.app.dependency_overrides.pop(get_db, None)
+
+
+def add_user(factory, username: str, role: str, password: str = "pass-123456") -> User:
+    with factory() as session:
+        user = User(
+            username=username,
+            password_hash=hash_password(password),
+            display_name=username,
+            role=role,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def login_token(username: str, password: str) -> str | None:
+    response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
+    return response.json()["data"]["token"]
+
+
+def auth(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ───────────────────────── 登录 ─────────────────────────
+
+def test_login_with_user_table_credentials(db):
+    add_user(db, "op1", "OPERATOR")
+    response = client.post("/api/v1/auth/login", json={"username": "op1", "password": "pass-123456"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["role"] == "OPERATOR"
+    assert data["token"]
+
+
+def test_login_wrong_password_rejected(db):
+    add_user(db, "op1", "OPERATOR")
+    response = client.post("/api/v1/auth/login", json={"username": "op1", "password": "wrong"})
+    assert response.status_code == 401
+
+
+def test_legacy_env_admin_backdoor_removed(db, monkeypatch):
+    """即使环境里残留旧的 ERP_ADMIN_USER/ERP_ADMIN_PASSWORD，也不允许登录。"""
+    monkeypatch.setenv("ERP_ADMIN_USER", "admin")
+    monkeypatch.setenv("ERP_ADMIN_PASSWORD", "12345678")
+    monkeypatch.delenv("ERP_ENABLE_EMERGENCY_ADMIN", raising=False)
+    response = client.post("/api/v1/auth/login", json={"username": "admin", "password": "12345678"})
+    assert response.status_code == 401
+
+
+# ───────────────────────── 应急管理员 ─────────────────────────
+
+def test_emergency_admin_disabled_by_default(db, monkeypatch):
+    monkeypatch.delenv("ERP_ENABLE_EMERGENCY_ADMIN", raising=False)
+    monkeypatch.delenv("ERP_EMERGENCY_ADMIN_USER", raising=False)
+    monkeypatch.delenv("ERP_EMERGENCY_ADMIN_PASSWORD", raising=False)
+    assert emergency_admin_credentials() is None
+    response = client.post("/api/v1/auth/login", json={"username": "emg", "password": "whatever-long-password"})
+    assert response.status_code == 401
+
+
+def test_emergency_admin_enabled_and_audited(db, monkeypatch):
+    monkeypatch.setenv("ERP_ENABLE_EMERGENCY_ADMIN", "1")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emg")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_PASSWORD", "break-glass-pass-123")
+    response = client.post("/api/v1/auth/login", json={"username": "emg", "password": "break-glass-pass-123"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["role"] == "ADMIN"
+    with db() as session:
+        logs = session.scalars(select(OperationLog).where(OperationLog.action == "应急管理员登录")).all()
+        assert len(logs) == 1
+        assert logs[0].username == "emg"
+    # 应急管理员令牌可用于 users/me。
+    me = client.get("/api/v1/users/me", headers=auth(data["token"]))
+    assert me.status_code == 200
+    assert me.json()["data"]["role"] == "ADMIN"
+
+
+def test_emergency_admin_weak_password_rejected(db, monkeypatch):
+    monkeypatch.setenv("ERP_ENABLE_EMERGENCY_ADMIN", "1")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emg")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_PASSWORD", "short")
+    assert emergency_admin_credentials() is None
+    response = client.post("/api/v1/auth/login", json={"username": "emg", "password": "short"})
+    assert response.status_code == 401
+
+
+# ───────────────────────── users/me ─────────────────────────
+
+def test_users_me_without_token_returns_401(db):
+    response = client.get("/api/v1/users/me")
+    assert response.status_code == 401
+
+
+def test_users_me_with_invalid_token_returns_401(db):
+    response = client.get("/api/v1/users/me", headers=auth("not-a-jwt"))
+    assert response.status_code == 401
+
+
+def test_users_me_with_valid_token_returns_real_user(db):
+    add_user(db, "viewer1", "VIEWER")
+    token = login_token("viewer1", "pass-123456")
+    response = client.get("/api/v1/users/me", headers=auth(token))
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["username"] == "viewer1"
+    assert data["role"] == "VIEWER"
+
+
+# ───────────────────────── RBAC 中间件 ─────────────────────────
+
+def test_required_role_rules():
+    assert required_role_for("/api/v1/auth/login", "POST") is None
+    assert required_role_for("/api/health", "GET") is None
+    # EventSource 无法携带 Authorization 头，实时刷新信号保持公开（不含业务数据）。
+    assert required_role_for("/api/events", "GET") is None
+    assert required_role_for("/api/orders", "GET") == "VIEWER"
+    assert required_role_for("/api/orders", "POST") == "OPERATOR"
+    assert required_role_for("/api/users", "GET") == "ADMIN"
+    assert required_role_for("/api/backups/x.zip/download", "GET") == "ADMIN"
+    assert required_role_for("/api/system/production-settings", "GET") == "VIEWER"
+    assert required_role_for("/api/system/production-settings", "PUT") == "ADMIN"
+    assert required_role_for("/api/system/print-settings", "PUT") == "ADMIN"
+    assert required_role_for("/api/system/calendar/exceptions", "GET") == "VIEWER"
+    assert required_role_for("/api/system/calendar/exceptions", "POST") == "OPERATOR"
+
+
+def test_business_api_requires_login(db):
+    response = client.get("/api/orders")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "需要登录后操作"
+
+
+def test_invalid_token_rejected_at_gateway(db):
+    response = client.get("/api/orders", headers=auth("bad.token.value"))
+    assert response.status_code == 401
+
+
+def test_viewer_can_read_but_not_write(db):
+    add_user(db, "viewer1", "VIEWER")
+    token = login_token("viewer1", "pass-123456")
+    reading = client.get("/api/orders", headers=auth(token))
+    assert reading.status_code == 200
+    writing = client.post("/api/parts", headers=auth(token), json={"sku": "V01", "name": "只读测试料"})
+    assert writing.status_code == 403
+
+
+def test_operator_write_allowed_and_audited_with_jwt_username(db):
+    add_user(db, "op1", "OPERATOR")
+    token = login_token("op1", "pass-123456")
+    response = client.post("/api/parts", headers=auth(token), json={"sku": "P9001", "name": "审计测试料"})
+    assert response.status_code == 201
+    with db() as session:
+        logs = session.scalars(
+            select(OperationLog).where(OperationLog.path == "/api/parts", OperationLog.method == "POST")
+        ).all()
+        assert logs, "写操作必须留下审计日志"
+        assert {log.username for log in logs} == {"op1"}
+
+
+def test_backup_endpoints_admin_only(db):
+    add_user(db, "viewer1", "VIEWER")
+    add_user(db, "op1", "OPERATOR")
+    add_user(db, "boss", "ADMIN")
+    assert client.get("/api/backups").status_code == 401
+    viewer_token = login_token("viewer1", "pass-123456")
+    operator_token = login_token("op1", "pass-123456")
+    admin_token = login_token("boss", "pass-123456")
+    assert client.get("/api/backups", headers=auth(viewer_token)).status_code == 403
+    assert client.get("/api/backups", headers=auth(operator_token)).status_code == 403
+    assert client.get("/api/backups", headers=auth(admin_token)).status_code == 200
+    # 备份下载同样仅 ADMIN；非 ADMIN 在网关即被拒绝。
+    download_url = "/api/backups/not-exists.zip/download"
+    assert client.get(download_url, headers=auth(operator_token)).status_code == 403
+
+
+def test_user_management_requires_admin(db):
+    add_user(db, "op1", "OPERATOR")
+    operator_token = login_token("op1", "pass-123456")
+    response = client.get("/api/users", headers=auth(operator_token))
+    assert response.status_code == 403
+
+
+# ───────────────────────── JWT 密钥配置 ─────────────────────────
+
+def test_production_refuses_to_start_without_secret(monkeypatch):
+    monkeypatch.setenv("ERP_ENV", "production")
+    monkeypatch.delenv("ERP_JWT_SECRET", raising=False)
+    with pytest.raises(RuntimeError):
+        validate_auth_config()
+
+
+def test_production_starts_with_secret(monkeypatch):
+    monkeypatch.setenv("ERP_ENV", "production")
+    monkeypatch.setenv("ERP_JWT_SECRET", "a-proper-random-secret")
+    monkeypatch.delenv("ERP_ENABLE_EMERGENCY_ADMIN", raising=False)
+    validate_auth_config()
+
+
+def test_token_roundtrip_in_same_process(db):
+    token = create_access_token(7, "u7", "OPERATOR", "U7")
+    response = client.get("/api/orders", headers=auth(token))
+    # 令牌有效则不再 401/403（列表可能为空）。
+    assert response.status_code == 200
