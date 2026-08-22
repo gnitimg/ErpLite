@@ -405,6 +405,7 @@ class OperationLog(Base):
     ip_address: Mapped[str] = mapped_column(String(64), default="", index=True)
     status: Mapped[str] = mapped_column(String(20), default="SUCCESS", index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
+    business_summary: Mapped[str] = mapped_column(String(500), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 
@@ -463,3 +464,90 @@ class ProductionCalendarException(Base):
     is_working_day: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class Receivable(Base):
+    """应收账款记录，出库时自动生成。"""
+
+    __tablename__ = "receivables"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    receivable_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sales_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    customer_name: Mapped[str] = mapped_column(String(120), index=True)
+    amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    settled_amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    order: Mapped[SalesOrder | None] = relationship()
+    allocations: Mapped[list["PaymentAllocation"]] = relationship(
+        cascade="all, delete-orphan", back_populates="receivable"
+    )
+
+    __table_args__ = (Index("ix_receivables_status_created", "status", "created_at"),)
+
+
+class Payment(Base):
+    """付款记录，可分配核销到多笔应收。"""
+
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payment_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    customer_name: Mapped[str] = mapped_column(String(120), index=True)
+    amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    allocated_amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    payment_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
+    method: Mapped[str] = mapped_column(String(20), default="TRANSFER")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    allocations: Mapped[list["PaymentAllocation"]] = relationship(
+        cascade="all, delete-orphan", back_populates="payment"
+    )
+
+    __table_args__ = (Index("ix_payments_customer_date", "customer_name", "payment_date"),)
+
+
+class PaymentAllocation(Base):
+    """付款到应收的核销分配记录。"""
+
+    __tablename__ = "payment_allocations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payment_id: Mapped[int] = mapped_column(
+        ForeignKey("payments.id", ondelete="CASCADE"), index=True
+    )
+    receivable_id: Mapped[int] = mapped_column(
+        ForeignKey("receivables.id", ondelete="CASCADE"), index=True
+    )
+    amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    payment: Mapped[Payment] = relationship(back_populates="allocations")
+    receivable: Mapped[Receivable] = relationship(back_populates="allocations")
+
+    __table_args__ = (
+        UniqueConstraint("payment_id", "receivable_id", name="uq_payment_receivable"),
+    )
+
+
+class User(Base):
+    """系统用户，支持角色权限和密码验证。"""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(200), default="")
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    role: Mapped[str] = mapped_column(String(20), default="OPERATOR", index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

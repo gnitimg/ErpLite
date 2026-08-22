@@ -284,3 +284,38 @@ class CalendarExceptionPayload(BaseModel):
     exception_date: date
     is_working_day: bool = False
     note: str = Field(default="", max_length=200)
+
+
+class PaymentPayload(BaseModel):
+    customer_name: str = Field(min_length=1, max_length=120)
+    amount: float = Field(gt=0)
+    payment_date: date = Field(default_factory=date.today)
+    method: Literal["CASH", "TRANSFER", "OTHER"] = "TRANSFER"
+    notes: str = Field(default="", max_length=500)
+
+
+class PaymentAllocationPayload(BaseModel):
+    receivable_id: int
+    amount: float = Field(gt=0)
+
+
+class UserPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=1, max_length=120)
+    display_name: str = Field(default="", max_length=120)
+    role: Literal["ADMIN", "OPERATOR", "VIEWER"] = "OPERATOR"
+
+    @field_validator("username")
+    @classmethod
+    def strip_username(cls, value: str):
+        value = value.strip()
+        if not value:
+            raise ValueError("用户名不能为空")
+        return value
+
+
+class UserUpdatePayload(BaseModel):
+    display_name: str = Field(default="", max_length=120)
+    role: Literal["ADMIN", "OPERATOR", "VIEWER"] = "OPERATOR"
+    active: bool = True
+    password: str | None = Field(default=None, min_length=1, max_length=120)

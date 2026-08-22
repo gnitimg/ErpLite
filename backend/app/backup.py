@@ -16,6 +16,8 @@ from .models import (
     Mold,
     OperationLog,
     OrderReturn,
+    Payment,
+    PaymentAllocation,
     ProductBomItem,
     ProductMold,
     ProductionAllocation,
@@ -26,16 +28,18 @@ from .models import (
     ProductionRun,
     ProductionSetting,
     PurchaseCommitment,
+    Receivable,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
     StockTransaction,
     StockTransactionItem,
+    User,
 )
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 16
+BACKUP_SCHEMA_VERSION = 17
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -56,9 +60,17 @@ BACKUP_TABLES = (
     ExternalProcessingBatch.__table__,
     PurchaseCommitment.__table__,
     ProductionCalendarException.__table__,
+    Receivable.__table__,
+    Payment.__table__,
+    PaymentAllocation.__table__,
+    User.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    PaymentAllocation.__table__,
+    Payment.__table__,
+    Receivable.__table__,
+    User.__table__,
     ProductionCalendarException.__table__,
     PurchaseCommitment.__table__,
     ExternalProcessingBatch.__table__,
@@ -291,6 +303,14 @@ def _load_archive(path: Path) -> dict[str, Any]:
         for row in tables.get("production_settings", []):
             row.setdefault("working_weekdays", "1,2,3,4,5")
         tables.setdefault("production_calendar_exceptions", [])
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 16:
+        for row in tables.get("operation_logs", []):
+            row.setdefault("business_summary", "")
+        tables.setdefault("receivables", [])
+        tables.setdefault("payments", [])
+        tables.setdefault("payment_allocations", [])
+        tables.setdefault("users", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

@@ -1,5 +1,7 @@
 from datetime import date, datetime
+import hashlib
 import logging
+import secrets
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -74,8 +76,23 @@ def operation_log_dict(log: OperationLog) -> dict:
         "ip_address": log.ip_address,
         "status": log.status,
         "detail": log.detail,
+        "business_summary": log.business_summary or "",
         "created_at": log.created_at.isoformat(),
     }
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    hash_value = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return f"{salt}${hash_value.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    if not stored or "$" not in stored:
+        return False
+    salt, expected_hash = stored.split("$", 1)
+    hash_value = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
+    return secrets.compare_digest(hash_value.hex(), expected_hash)
 
 
 def serial(prefix: str) -> str:

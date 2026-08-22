@@ -27,6 +27,8 @@ from .models import (
     InventoryItem,
     OperationLog,
     OrderReturn,
+    Payment,
+    PaymentAllocation,
     ProductBomItem,
     ProductionAllocation,
     ProductionCalendarException,
@@ -34,11 +36,13 @@ from .models import (
     ProductionRun,
     ProductionSetting,
     PurchaseCommitment,
+    Receivable,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
     StockTransaction,
     StockTransactionItem,
+    User,
 )
 from .schemas import (
     BackupRestorePayload,
@@ -53,6 +57,8 @@ from .schemas import (
     OrderShipmentPayload,
     OrderStockPayload,
     PartPayload,
+    PaymentAllocationPayload,
+    PaymentPayload,
     PrintSettingsPayload,
     ProductPayload,
     ProductionRunSchedulePayload,
@@ -64,6 +70,8 @@ from .schemas import (
     SamplePayload,
     StockDocumentPayload,
     StockPayload,
+    UserPayload,
+    UserUpdatePayload,
 )
 from .planning import (
     _recalculate_plan_impl,
@@ -77,6 +85,7 @@ from .services import (
     create_transaction,
     client_ip,
     ensure_sku_available,
+    hash_password,
     item_dict,
     load_order,
     operation_log_dict,
@@ -88,6 +97,7 @@ from .services import (
     seed_demo,
     serial,
     transaction_dict,
+    verify_password,
 )
 
 
@@ -250,6 +260,12 @@ def operation_action(path: str, method: str) -> str:
         return "修改生产设置"
     if path.startswith("/api/system/print-settings"):
         return "修改打印设置"
+    if path.startswith("/api/finance"):
+        if path.endswith("/allocate"):
+            return "核销付款"
+        return "登记付款"
+    if path.startswith("/api/users"):
+        return {"POST": "新建用户", "PUT": "编辑用户", "DELETE": "停用用户"}.get(method, "用户管理")
     if path.startswith("/api/backups"):
         return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
     return f"{method} 操作"
@@ -383,12 +399,17 @@ async def data_change_events(request: Request):
 
 
 @app.post("/api/v1/auth/login")
-def login(payload: LoginPayload):
-    username = os.getenv("ERP_ADMIN_USER", "admin")
-    password = os.getenv("ERP_ADMIN_PASSWORD", "12345678")
-    if payload.username != username or payload.password != password:
-        raise HTTPException(401, "用户名或密码错误")
-    return {"code": 0, "data": {"token": "lite-erp-local-admin"}, "message": "success"}
+def login(payload: LoginPayload, db: Session = Depends(get_db)):
+    user = db.scalar(
+        select(User).where(User.username == payload.username.strip(), User.active.is_(True))
+    )
+    if user and verify_password(payload.password, user.password_hash):
+        return {"code": 0, "data": {"token": f"erp-user-{user.id}", "username": user.username, "display_name": user.display_name or user.username, "role": user.role}, "message": "success"}
+    env_username = os.getenv("ERP_ADMIN_USER", "admin")
+    env_password = os.getenv("ERP_ADMIN_PASSWORD", "12345678")
+    if payload.username == env_username and payload.password == env_password:
+        return {"code": 0, "data": {"token": "lite-erp-local-admin", "username": env_username, "display_name": "仓库管理员", "role": "ADMIN"}, "message": "success"}
+    raise HTTPException(401, "用户名或密码错误")
 
 
 @app.get("/api/v1/users/me")
@@ -2212,11 +2233,23 @@ def _ship_order(
         counterparty_address=counterparty_address,
     )
     affected_products = set()
+    shipped_total = 0.0
     for line_id, quantity in requested.items():
         line = line_by_id[line_id]
         line.shipped_quantity = int(line.shipped_quantity or 0) + quantity
         affected_products.add(line.product_id)
+        unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
+        shipped_total += unit_price * quantity
     db.flush()
+    if shipped_total > 0:
+        db.add(Receivable(
+            receivable_no=serial("AR"),
+            order_id=order.id,
+            customer_name=order.customer_name,
+            amount=round(shipped_total, 2),
+            status="OPEN",
+            notes=f"客单 {order.order_no} 出库应收",
+        ))
     rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
@@ -2392,6 +2425,212 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
 @app.get("/api/backups")
 def backups():
     return list_backup_archives()
+
+
+def receivable_dict(row: Receivable) -> dict:
+    return {
+        "id": row.id,
+        "receivable_no": row.receivable_no,
+        "order_id": row.order_id,
+        "customer_name": row.customer_name,
+        "amount": float(row.amount),
+        "settled_amount": float(row.settled_amount or 0),
+        "remaining_amount": float(row.amount) - float(row.settled_amount or 0),
+        "status": row.status,
+        "notes": row.notes,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/finance/receivables")
+def list_receivables(
+    status: str | None = None,
+    keyword: str = "",
+    db: Session = Depends(get_db),
+):
+    query = select(Receivable)
+    if status and status.strip():
+        query = query.where(Receivable.status == status.strip().upper())
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(
+            Receivable.receivable_no.ilike(token),
+            Receivable.customer_name.ilike(token),
+        ))
+    rows = db.scalars(query.order_by(Receivable.created_at.desc())).all()
+    return [receivable_dict(row) for row in rows]
+
+
+def payment_dict(row: Payment) -> dict:
+    return {
+        "id": row.id,
+        "payment_no": row.payment_no,
+        "customer_name": row.customer_name,
+        "amount": float(row.amount),
+        "allocated_amount": float(row.allocated_amount or 0),
+        "remaining_amount": float(row.amount) - float(row.allocated_amount or 0),
+        "payment_date": row.payment_date.isoformat(),
+        "method": row.method,
+        "notes": row.notes,
+        "created_at": row.created_at.isoformat(),
+        "allocations": [
+            {
+                "id": alloc.id,
+                "receivable_id": alloc.receivable_id,
+                "amount": float(alloc.amount),
+            }
+            for alloc in row.allocations
+        ],
+    }
+
+
+@app.get("/api/finance/payments")
+def list_payments(
+    keyword: str = "",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    query = select(Payment).options(selectinload(Payment.allocations))
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(
+            Payment.payment_no.ilike(token),
+            Payment.customer_name.ilike(token),
+        ))
+    if start_date:
+        query = query.where(Payment.payment_date >= start_date)
+    if end_date:
+        query = query.where(Payment.payment_date <= end_date)
+    rows = db.scalars(query.order_by(Payment.payment_date.desc(), Payment.id.desc())).all()
+    return [payment_dict(row) for row in rows]
+
+
+@app.post("/api/finance/payments", status_code=201)
+def create_payment(
+    payload: PaymentPayload,
+    db: Session = Depends(get_db),
+):
+    payment = Payment(
+        payment_no=serial("PAY"),
+        customer_name=payload.customer_name.strip(),
+        amount=round(payload.amount, 2),
+        payment_date=payload.payment_date,
+        method=payload.method,
+        notes=payload.notes.strip(),
+    )
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+    return payment_dict(payment)
+
+
+@app.post("/api/finance/payments/{payment_id}/allocate", status_code=201)
+def allocate_payment(
+    payment_id: int,
+    payload: PaymentAllocationPayload,
+    db: Session = Depends(get_db),
+):
+    payment = db.scalar(
+        select(Payment)
+        .where(Payment.id == payment_id)
+        .options(selectinload(Payment.allocations))
+    )
+    if not payment:
+        raise HTTPException(404, "付款记录不存在")
+    receivable = db.scalar(
+        select(Receivable)
+        .where(Receivable.id == payload.receivable_id)
+        .options(selectinload(Receivable.allocations))
+    )
+    if not receivable:
+        raise HTTPException(404, "应收记录不存在")
+    payment_remaining = float(payment.amount) - float(payment.allocated_amount or 0)
+    receivable_remaining = float(receivable.amount) - float(receivable.settled_amount or 0)
+    if payload.amount > payment_remaining + 1e-9:
+        raise HTTPException(409, f"付款剩余可分配 {payment_remaining:.2f}，不足以分配 {payload.amount:.2f}")
+    if payload.amount > receivable_remaining + 1e-9:
+        raise HTTPException(409, f"应收剩余可核销 {receivable_remaining:.2f}，不足以核销 {payload.amount:.2f}")
+    allocation = PaymentAllocation(
+        payment_id=payment.id,
+        receivable_id=receivable.id,
+        amount=round(payload.amount, 2),
+    )
+    db.add(allocation)
+    payment.allocated_amount = round(float(payment.allocated_amount or 0) + payload.amount, 2)
+    receivable.settled_amount = round(float(receivable.settled_amount or 0) + payload.amount, 2)
+    if float(receivable.settled_amount) >= float(receivable.amount) - 1e-9:
+        receivable.status = "SETTLED"
+    elif float(receivable.settled_amount) > 0:
+        receivable.status = "PARTIAL"
+    db.commit()
+    db.refresh(payment)
+    return payment_dict(payment)
+
+
+@app.get("/api/users")
+def list_users(db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(User).where(User.active.is_(True)).order_by(User.id)
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "username": row.username,
+            "display_name": row.display_name,
+            "role": row.role,
+            "active": row.active,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/users", status_code=201)
+def create_user(payload: UserPayload, db: Session = Depends(get_db)):
+    existing = db.scalar(select(User).where(User.username == payload.username.strip()))
+    if existing:
+        raise HTTPException(409, "用户名已存在")
+    user = User(
+        username=payload.username.strip(),
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name.strip(),
+        role=payload.role,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+    }
+
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: int, payload: UserUpdatePayload, db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    user.display_name = payload.display_name.strip()
+    user.role = payload.role
+    user.active = payload.active
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    user.active = False
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/backups", status_code=201)
