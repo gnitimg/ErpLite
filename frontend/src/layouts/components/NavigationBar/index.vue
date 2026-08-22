@@ -19,6 +19,8 @@ const appStore = useAppStore()
 
 const userStore = useUserStore()
 
+const router = useRouter()
+
 const settingsStore = useSettingsStore()
 
 const { showNotify, showThemeSwitch, showScreenfull, showSearchMenu } = storeToRefs(settingsStore)
@@ -51,15 +53,9 @@ function toggleSidebar() {
         </div>
         <template #dropdown>
           <el-dropdown-menu>
-            <a target="_blank" href="https://github.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>GitHub</el-dropdown-item>
-            </a>
-            <a target="_blank" href="https://gitee.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>Gitee</el-dropdown-item>
-            </a>
-            <a target="_blank" href="https://atomgit.com/un-pany/v3-admin-vite">
-              <el-dropdown-item>AtomGit</el-dropdown-item>
-            </a>
+            <el-dropdown-item @click="router.push('/settings/theme')">
+              <el-icon><Brush /></el-icon>主题设置
+            </el-dropdown-item>
             <el-dropdown-item divided @click="userStore.logout">
               退出登录
             </el-dropdown-item>

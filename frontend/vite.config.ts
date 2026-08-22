@@ -2,7 +2,6 @@
 
 import { resolve } from "node:path"
 import vue from "@vitejs/plugin-vue"
-import UnoCSS from "unocss/vite"
 import AutoImport from "unplugin-auto-import/vite"
 import SvgComponent from "unplugin-svg-component/vite"
 import { ElementPlusResolver } from "unplugin-vue-components/resolvers"
@@ -68,8 +67,7 @@ export default defineConfig(({ mode }) => {
            */
           manualChunks: {
             vue: ["vue", "vue-router", "pinia"],
-            element: ["element-plus", "@element-plus/icons-vue"],
-            vxe: ["vxe-table"]
+            element: ["element-plus", "@element-plus/icons-vue"]
           }
         }
       },
@@ -126,8 +124,6 @@ export default defineConfig(({ mode }) => {
         dts: true,
         dtsDir: resolve(__dirname, "types/auto")
       }),
-      // 原子化 CSS
-      UnoCSS(),
       // 自动按需导入 API
       AutoImport({
         imports: ["vue", "vue-router", "pinia"],
@@ -139,8 +135,8 @@ export default defineConfig(({ mode }) => {
         dts: "types/auto/components.d.ts",
         resolvers: [ElementPlusResolver({ importStyle: false })]
       }),
-      // 为项目开启 MCP Server
-      ViteMcp()
+      // MCP 仅服务于本地开发，不参与 ERP 生产构建。
+      ...(mode === "development" ? [ViteMcp()] : [])
     ],
     // Configuring Vitest: https://cn.vitest.dev/config
     test: {

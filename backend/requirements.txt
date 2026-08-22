@@ -5,3 +5,4 @@ pydantic==2.11.7
 PyMySQL==1.1.1
 cryptography==50.0.0
 python-dotenv==1.1.1
+alembic==1.16.5

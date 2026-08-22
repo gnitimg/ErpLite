@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
-from datetime import date, datetime, time
+import asyncio
+from datetime import date, datetime, time, timedelta
+import json
 import logging
 import os
 from pathlib import Path
@@ -10,19 +12,75 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "app"
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
-from .database import Base, SessionLocal, engine, get_db
-from .models import InventoryItem, ProductBomItem, SalesOrder, SalesOrderItem, StockTransaction, StockTransactionItem
-from .schemas import BackupRestorePayload, LoginPayload, OrderPayload, PartPayload, ProductPayload, StockPayload
-from .services import create_transaction, ensure_sku_available, item_dict, load_order, order_dict, seed_demo, serial, transaction_dict
+from .database import SessionLocal, engine, get_db, run_migrations
+from .models import (
+    ExternalProcessingBatch,
+    InventoryItem,
+    OperationLog,
+    OrderReturn,
+    ProductBomItem,
+    ProductionAllocation,
+    ProductionRun,
+    ProductionSetting,
+    SalesOrder,
+    SalesOrderItem,
+    StockReservation,
+    StockTransaction,
+    StockTransactionItem,
+)
+from .schemas import (
+    BackupRestorePayload,
+    ExternalProcessingReturnPayload,
+    ExternalProcessingSendPayload,
+    LoginPayload,
+    ManualProductionRunPayload,
+    OrderPayload,
+    OrderReturnPayload,
+    OrderShipmentPayload,
+    OrderStockPayload,
+    PartPayload,
+    PrintSettingsPayload,
+    ProductPayload,
+    ProductionRunSchedulePayload,
+    ProductionRunStatusPayload,
+    ProductionCompletionPayload,
+    ProductionSettingsPayload,
+    SamplePayload,
+    StockDocumentPayload,
+    StockPayload,
+)
+from .planning import (
+    list_production_runs,
+    production_demand_summary,
+    purchase_requirement_summary,
+    recalculate_production_plan,
+)
+from .services import (
+    RESERVATION_STATUSES,
+    create_transaction,
+    client_ip,
+    ensure_sku_available,
+    item_dict,
+    load_order,
+    operation_log_dict,
+    order_dict,
+    order_workflow_dict,
+    rebalance_product_reservations,
+    release_order_reservations,
+    reserved_product_quantity,
+    seed_demo,
+    serial,
+    transaction_dict,
+)
 
 
 StockStatus = Literal["LOW", "NORMAL"]
@@ -32,9 +90,13 @@ BomStatus = Literal["CONFIGURED", "EMPTY"]
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     try:
-        Base.metadata.create_all(bind=engine)
+        run_migrations()
         with SessionLocal() as db:
-            seed_demo(db)
+            if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
+                seed_demo(db)
+            # 迁移后的旧订单、预留和自动排期也必须立即回到同一业务事实。
+            recalculate_production_plan(db)
+            db.commit()
         _app.state.database_ready = True
     except SQLAlchemyError as error:
         _app.state.database_ready = False
@@ -50,6 +112,182 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ChangeEventHub:
+    """向当前进程中的浏览器连接广播轻量数据变更事件。"""
+
+    def __init__(self) -> None:
+        self._queues: set[asyncio.Queue[str]] = set()
+        self._sequence = 0
+
+    def subscribe(self) -> asyncio.Queue[str]:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=20)
+        self._queues.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
+        self._queues.discard(queue)
+
+    def publish(self, *, path: str, method: str, source: str) -> None:
+        self._sequence += 1
+        payload = json.dumps(
+            {
+                "id": self._sequence,
+                "path": path,
+                "method": method,
+                "source": source,
+                "occurred_at": datetime.now().isoformat(),
+            },
+            ensure_ascii=False,
+        )
+        for queue in tuple(self._queues):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(payload)
+
+
+change_events = ChangeEventHub()
+
+
+@app.middleware("http")
+async def broadcast_successful_writes(request: Request, call_next):
+    response = None
+    error = None
+    try:
+        response = await call_next(request)
+    except Exception as caught:
+        error = caught
+    is_write = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+    is_business_api = request.url.path.startswith("/api/")
+    is_log_api = request.url.path.startswith("/api/operation-logs")
+    is_login = request.url.path == "/api/v1/auth/login"
+    if is_write and is_business_api and not is_log_api:
+        status_code = response.status_code if response else 500
+        try:
+            with SessionLocal() as audit_db:
+                audit_db.add(OperationLog(
+                    username=request.headers.get("x-erp-operator", "仓库管理员")[:120],
+                    action=operation_action(request.url.path, request.method),
+                    target=request.url.path[:255],
+                    method=request.method,
+                    path=request.url.path[:255],
+                    ip_address=client_ip(request)[:64],
+                    status="SUCCESS" if status_code < 400 else "FAILED",
+                    detail=f"HTTP {status_code}",
+                ))
+                audit_db.commit()
+        except Exception as audit_error:
+            logging.getLogger("uvicorn.error").warning("记录操作日志失败: %s", audit_error)
+        if status_code < 400 and not is_login:
+            change_events.publish(
+                path=request.url.path,
+                method=request.method,
+                source=request.headers.get("x-erp-client-id", ""),
+            )
+    if error:
+        raise error
+    return response
+
+
+def operation_action(path: str, method: str) -> str:
+    if path == "/api/v1/auth/login":
+        return "登录"
+    if path == "/api/stock/inbound":
+        return "物料入库"
+    if path == "/api/stock/outbound":
+        return "物料出库"
+    if path == "/api/stock/documents":
+        return "出入库开单"
+    if path.startswith("/api/orders"):
+        if path.endswith("/confirm"):
+            return "确认客单"
+        if path.endswith("/prepare"):
+            return "客单备货"
+        if path.endswith("/receive-materials"):
+            return "客单补料"
+        if path.endswith(("/ship", "/ship-all", "/fulfill")):
+            return "客单出库"
+        if path.endswith("/returns"):
+            return "客单退货"
+        if path.endswith("/cancel"):
+            return "取消客单"
+        return "新建客单"
+    if path.startswith("/api/external-processing"):
+        return "外协回厂" if path.endswith("/return") else "外协送出"
+    if path.startswith("/api/parts"):
+        return {"POST": "新建零件", "PUT": "编辑零件", "DELETE": "停用零件"}.get(
+            method, "零件目录"
+        )
+    if path.startswith("/api/products"):
+        return {"POST": "新建产品", "PUT": "编辑产品", "DELETE": "停用产品"}.get(
+            method, "产品目录"
+        )
+    if path.startswith("/api/samples"):
+        return "调整样品库存"
+    if path.startswith("/api/production/plan"):
+        return "重算生产计划"
+    if path.startswith("/api/production/runs"):
+        if path.endswith("/schedule"):
+            return "调整订单排产"
+        return "更新生产批次"
+    if path.startswith("/api/system/production-settings"):
+        return "修改生产设置"
+    if path.startswith("/api/system/print-settings"):
+        return "修改打印设置"
+    if path.startswith("/api/backups"):
+        return "恢复数据备份" if path.endswith("/restore") else "创建数据备份"
+    return f"{method} 操作"
+
+
+@app.get("/api/operation-logs")
+def operation_logs(
+    keyword: str = "",
+    username: str = "",
+    action: str = "",
+    status: str = "",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    query = select(OperationLog)
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(
+            OperationLog.action.ilike(token),
+            OperationLog.target.ilike(token),
+            OperationLog.detail.ilike(token),
+            OperationLog.path.ilike(token),
+        ))
+    if username.strip():
+        query = query.where(OperationLog.username == username.strip())
+    if action.strip():
+        query = query.where(OperationLog.action == action.strip())
+    if status.strip():
+        query = query.where(OperationLog.status == status.strip())
+    if start_date:
+        query = query.where(OperationLog.created_at >= datetime.combine(start_date, time.min))
+    if end_date:
+        query = query.where(OperationLog.created_at <= datetime.combine(end_date, time.max))
+    rows = db.scalars(
+        query.order_by(OperationLog.created_at.desc(), OperationLog.id.desc()).limit(limit)
+    ).all()
+    return [operation_log_dict(row) for row in rows]
+
+
+@app.get("/api/operation-logs/actions")
+def operation_log_actions(db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(OperationLog.action)
+        .where(OperationLog.action != "")
+        .distinct()
+        .order_by(OperationLog.action)
+    ).all()
+    return list(rows)
 
 
 @app.exception_handler(SQLAlchemyError)
@@ -71,6 +309,7 @@ def list_items(
     include_bom: bool = False,
     stock_status: StockStatus | None = None,
     bom_status: BomStatus | None = None,
+    supply_mode: Literal["STOCK", "BUY_TO_ORDER"] | None = None,
 ) -> list[dict]:
     query = select(InventoryItem).where(InventoryItem.kind == kind, InventoryItem.active.is_(True))
     if keyword.strip():
@@ -79,22 +318,56 @@ def list_items(
             or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
         )
     if stock_status == "LOW":
-        query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty < InventoryItem.min_stock)
     elif stock_status == "NORMAL":
-        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty >= InventoryItem.min_stock)
     if bom_status == "CONFIGURED":
         query = query.where(InventoryItem.bom_components.any())
     elif bom_status == "EMPTY":
         query = query.where(~InventoryItem.bom_components.any())
+    if kind == "PART" and supply_mode:
+        query = query.where(InventoryItem.supply_mode == supply_mode)
     if include_bom:
         query = query.options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part))
     items = db.scalars(query.order_by(InventoryItem.id.desc())).all()
-    return [item_dict(item, include_bom) for item in items]
+    rows = []
+    for item in items:
+        data = item_dict(item, include_bom)
+        reserved = reserved_product_quantity(db, item.id) if item.kind == "PRODUCT" else 0
+        data["reserved_qty"] = reserved
+        data["available_qty"] = max(float(item.stock_qty) - reserved, 0)
+        rows.append(data)
+    return rows
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "lite-erp", "database": "ready" if getattr(app.state, "database_ready", False) else "unavailable"}
+
+
+@app.get("/api/events")
+async def data_change_events(request: Request):
+    async def stream():
+        queue = change_events.subscribe()
+        try:
+            yield "retry: 3000\n\n"
+            while not await request.is_disconnected():
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=20)
+                    yield f"event: data-change\ndata: {payload}\n\n"
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            change_events.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/v1/auth/login")
@@ -114,21 +387,84 @@ def current_user():
 @app.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db)):
     active = InventoryItem.active.is_(True)
+    regular_inventory = InventoryItem.kind.in_(["PART", "PRODUCT"])
     part_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PART")) or 0
     product_count = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.kind == "PRODUCT")) or 0
-    low_stock = db.scalar(select(func.count()).select_from(InventoryItem).where(active, InventoryItem.stock_qty <= InventoryItem.min_stock)) or 0
-    pending_orders = db.scalar(select(func.count()).select_from(SalesOrder).where(SalesOrder.status.in_(["DRAFT", "CONFIRMED"]))) or 0
-    inventory_value = db.scalar(select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active)) or 0
+    low_stock = db.scalar(
+        select(func.count())
+        .select_from(InventoryItem)
+        .where(active, regular_inventory, InventoryItem.stock_qty < InventoryItem.min_stock)
+    ) or 0
+    pending_orders = db.scalar(
+        select(func.count())
+        .select_from(SalesOrder)
+        .where(SalesOrder.status.in_([
+            "DRAFT", "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP",
+            "PARTIALLY_SHIPPED",
+        ]))
+    ) or 0
+    inventory_value = db.scalar(
+        select(func.sum(InventoryItem.stock_qty * InventoryItem.cost_price)).where(active, regular_inventory)
+    ) or 0
     recent_txs = db.scalars(
         select(StockTransaction)
-        .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order))
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+            selectinload(StockTransaction.related_production_run),
+        )
         .order_by(StockTransaction.occurred_at.desc()).limit(6)
     ).all()
-    low_items = db.scalars(select(InventoryItem).where(active, InventoryItem.stock_qty <= InventoryItem.min_stock).order_by(InventoryItem.stock_qty)).all()
+    low_items = db.scalars(
+        select(InventoryItem)
+        .where(active, regular_inventory, InventoryItem.stock_qty < InventoryItem.min_stock)
+        .order_by(InventoryItem.stock_qty)
+    ).all()
+    pending_order_rows = db.scalars(
+        select(SalesOrder)
+        .where(SalesOrder.status.in_([
+            "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP",
+            "PARTIALLY_SHIPPED",
+        ]))
+        .options(
+            selectinload(SalesOrder.items)
+            .selectinload(SalesOrderItem.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+        .order_by(SalesOrder.required_date, SalesOrder.order_date, SalesOrder.id)
+    ).all()
+    purchase_todos = purchase_requirement_summary(db)
+    production_todos = production_demand_summary(db)
+    shipping_todos: list[dict] = []
+    for order in pending_order_rows:
+        workflow = order_workflow_dict(db, order)
+        todo = {
+            "order_id": order.id,
+            "order_no": order.order_no,
+            "customer_name": order.customer_name,
+            "required_date": (order.required_date or order.order_date).isoformat(),
+        }
+        if workflow["ready_to_ship"] and any(
+            row["remaining_quantity"] > 0 for row in workflow["product_lines"]
+        ):
+            shipping_todos.append({**todo, "lines": workflow["product_lines"]})
+
     return {
-        "metrics": {"parts": part_count, "products": product_count, "low_stock": low_stock, "pending_orders": pending_orders, "inventory_value": inventory_value},
+        "metrics": {
+            "parts": part_count,
+            "products": product_count,
+            "low_stock": low_stock,
+            "pending_orders": pending_orders,
+            "inventory_value": inventory_value,
+        },
         "recent_transactions": [transaction_dict(tx) for tx in recent_txs],
         "low_stock_items": [item_dict(item) for item in low_items[:8]],
+        "todos": {
+            "purchase": purchase_todos,
+            "production": production_todos,
+            "shipping": shipping_todos,
+        },
     }
 
 
@@ -136,9 +472,10 @@ def dashboard(db: Session = Depends(get_db)):
 def parts(
     keyword: str = "",
     stock_status: StockStatus | None = None,
+    supply_mode: Literal["STOCK", "BUY_TO_ORDER"] | None = None,
     db: Session = Depends(get_db),
 ):
-    return list_items(db, "PART", keyword, stock_status=stock_status)
+    return list_items(db, "PART", keyword, stock_status=stock_status, supply_mode=supply_mode)
 
 
 @app.post("/api/parts", status_code=201)
@@ -173,6 +510,53 @@ def delete_part(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@app.get("/api/samples")
+def samples(keyword: str = "", db: Session = Depends(get_db)):
+    query = select(InventoryItem).where(
+        InventoryItem.kind == "PRODUCT",
+        InventoryItem.active.is_(True),
+    )
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(
+            or_(
+                InventoryItem.sku.ilike(token),
+                InventoryItem.name.ilike(token),
+                InventoryItem.spec.ilike(token),
+            )
+        )
+    products = db.scalars(query.order_by(InventoryItem.sku)).all()
+    return [item_dict(product) for product in products]
+
+
+@app.put("/api/samples/{item_id}")
+def update_sample(
+    item_id: int,
+    payload: SamplePayload,
+    db: Session = Depends(get_db),
+):
+    product = find_item(db, item_id, "PRODUCT")
+    stock_delta = payload.stock_qty - int(product.sample_stock_qty or 0)
+    product.sample_stock_qty = payload.stock_qty
+    if stock_delta:
+        transaction = StockTransaction(
+            transaction_no=serial("ST"),
+            transaction_type="SAMPLE_ADJUST",
+            notes=f"{product.name} 样品库存调整为 {payload.stock_qty} {product.unit}",
+        )
+        db.add(transaction)
+        db.flush()
+        db.add(StockTransactionItem(
+            transaction_id=transaction.id,
+            item_id=product.id,
+            quantity_change=stock_delta,
+            unit_cost=0,
+        ))
+    db.commit()
+    db.refresh(product)
+    return item_dict(product)
+
+
 @app.get("/api/products")
 def products(
     keyword: str = "",
@@ -185,11 +569,29 @@ def products(
 
 def save_product(db: Session, payload: ProductPayload, product: InventoryItem | None = None) -> InventoryItem:
     ensure_sku_available(db, payload.sku, product.id if product else None)
+    if (
+        product
+        and product.requires_external_processing
+        and not payload.requires_external_processing
+        and (int(product.semi_finished_qty or 0) + int(product.processing_qty or 0) > 0)
+    ):
+        raise HTTPException(409, "该产品仍有半成品或外协在途，不能关闭外协工序")
     part_ids = [line.part_id for line in payload.components]
-    parts = {part.id: part for part in db.scalars(select(InventoryItem).where(InventoryItem.id.in_(part_ids), InventoryItem.kind == "PART", InventoryItem.active.is_(True))).all()} if part_ids else {}
+    parts = {
+        part.id: part
+        for part in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(part_ids),
+                InventoryItem.kind == "PART",
+                InventoryItem.active.is_(True),
+            )
+        ).all()
+    } if part_ids else {}
     if len(parts) != len(part_ids):
         raise HTTPException(400, "BOM 中包含无效零件")
     values = payload.model_dump(exclude={"components"})
+    if not payload.requires_external_processing:
+        values["external_process_name"] = ""
     if product is None:
         product = InventoryItem(kind="PRODUCT", stock_qty=0, **values)
         db.add(product)
@@ -200,9 +602,21 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
         product.bom_components.clear()
         db.flush()
     product.sku = product.sku.upper()
-    product.bom_components = [ProductBomItem(part_id=line.part_id, quantity=line.quantity) for line in payload.components]
+    product.bom_components = [
+        ProductBomItem(part_id=line.part_id, quantity=line.quantity)
+        for line in payload.components
+    ]
+    db.flush()
+    recalculate_production_plan(db)
     db.commit()
-    return db.scalar(select(InventoryItem).where(InventoryItem.id == product.id).options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part)))
+    return db.scalar(
+        select(InventoryItem)
+        .where(InventoryItem.id == product.id)
+        .options(
+            selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+    )
 
 
 @app.post("/api/products", status_code=201)
@@ -232,6 +646,642 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+def production_settings_dict(settings: ProductionSetting) -> dict:
+    return {
+        "line_count": settings.line_count,
+        "schedule_auto_snap": settings.schedule_auto_snap,
+        "updated_at": settings.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/system/production-settings")
+def production_settings(db: Session = Depends(get_db)):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1, line_count=1)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return production_settings_dict(row)
+
+
+@app.put("/api/system/production-settings")
+def update_production_settings(
+    payload: ProductionSettingsPayload,
+    db: Session = Depends(get_db),
+):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+    row.line_count = payload.line_count
+    row.schedule_auto_snap = payload.schedule_auto_snap
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    db.refresh(row)
+    return production_settings_dict(row)
+
+
+def print_settings_dict(settings: ProductionSetting) -> dict:
+    return {
+        "paper_preset": settings.print_paper_preset,
+        "width_mm": settings.print_width_mm,
+        "height_mm": settings.print_height_mm,
+        "updated_at": settings.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/system/print-settings")
+def print_settings(db: Session = Depends(get_db)):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return print_settings_dict(row)
+
+
+@app.put("/api/system/print-settings")
+def update_print_settings(
+    payload: PrintSettingsPayload,
+    db: Session = Depends(get_db),
+):
+    row = db.get(ProductionSetting, 1)
+    if row is None:
+        row = ProductionSetting(id=1)
+        db.add(row)
+    row.print_paper_preset = payload.paper_preset
+    row.print_width_mm = round(payload.width_mm, 1)
+    row.print_height_mm = round(payload.height_mm, 1)
+    db.commit()
+    db.refresh(row)
+    return print_settings_dict(row)
+
+
+@app.get("/api/production/runs")
+def production_runs(status: str | None = None, db: Session = Depends(get_db)):
+    return list_production_runs(db, status)
+
+
+@app.post("/api/production/plan/recalculate")
+def recalculate_plan(db: Session = Depends(get_db)):
+    """系统维护用；正常业务写入会自动重算。"""
+    result = recalculate_production_plan(db)
+    db.commit()
+    return result
+
+
+@app.post("/api/production/runs/manual", status_code=201)
+def create_manual_production_run(
+    payload: ManualProductionRunPayload,
+    db: Session = Depends(get_db),
+):
+    """创建独立于客单缺口的补库存生产计划。"""
+    product = db.get(InventoryItem, payload.product_id)
+    if not product or product.kind != "PRODUCT" or not product.active:
+        raise HTTPException(404, "产品不存在")
+    daily_capacity = int(product.daily_capacity or 0)
+    if daily_capacity <= 0:
+        raise HTTPException(409, "该产品未配置单机日产能，请先在产品目录中设置")
+    if not product.bom_components:
+        raise HTTPException(409, "该产品未配置 BOM，不能创建生产计划")
+
+    settings = db.get(ProductionSetting, 1)
+    line_count = max(int(settings.line_count if settings else 1), 1)
+    if payload.line_slot > line_count:
+        raise HTTPException(400, "生产位超出系统设置的可用范围")
+
+    today = date.today()
+    planned_start = datetime.combine(payload.planned_start_date, time.min)
+    if payload.planned_start_date == today:
+        planned_start = datetime.now().replace(second=0, microsecond=0)
+    elif payload.planned_start_date < today:
+        raise HTTPException(400, "计划开始日期不能早于今天")
+    duration_seconds = max(
+        float(payload.planned_quantity) / daily_capacity * 86400,
+        60,
+    )
+    planned_end = planned_start + timedelta(seconds=duration_seconds)
+
+    line_conflict = db.scalar(
+        select(ProductionRun.id).where(
+            _active_schedule_condition(),
+            ProductionRun.line_slot == payload.line_slot,
+            ProductionRun.planned_start_at < planned_end,
+            ProductionRun.planned_end_at > planned_start,
+        ).limit(1)
+    )
+    if line_conflict:
+        raise HTTPException(409, "该生产位在所选日期已有确认排期")
+
+    mold_slot = None
+    for slot in range(1, max(int(product.mold_count or 1), 1) + 1):
+        conflict = db.scalar(
+            select(ProductionRun.id).where(
+                _active_schedule_condition(),
+                ProductionRun.product_id == product.id,
+                ProductionRun.mold_slot == slot,
+                ProductionRun.planned_start_at < planned_end,
+                ProductionRun.planned_end_at > planned_start,
+            ).limit(1)
+        )
+        if not conflict:
+            mold_slot = slot
+            break
+    if mold_slot is None:
+        raise HTTPException(409, "该产品在所选日期没有可用模具")
+
+    # 先刷新订单缺口，再把自主计划优先覆盖交期最近的缺口；
+    # 超出订单需求的产量在完工后自然进入自由库存。
+    recalculate_production_plan(db)
+    run = ProductionRun(
+        run_no=serial("PR"),
+        product_id=product.id,
+        line_slot=payload.line_slot,
+        mold_slot=mold_slot,
+        planned_quantity=payload.planned_quantity,
+        produced_quantity=0,
+        planned_start_at=planned_start,
+        planned_end_at=planned_end,
+        effective_daily_capacity=daily_capacity,
+        schedule_locked=True,
+        source_type="REPLENISHMENT",
+        notes=payload.notes.strip(),
+        status="PLANNED",
+    )
+    db.add(run)
+    db.flush()
+
+    remaining = payload.planned_quantity
+    sequence = 1
+    order_lines = db.scalars(
+        select(SalesOrderItem)
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .where(
+            SalesOrder.status.in_(RESERVATION_STATUSES),
+            SalesOrderItem.product_id == product.id,
+            SalesOrderItem.production_required_quantity > 0,
+        )
+        .order_by(
+            SalesOrder.required_date,
+            SalesOrder.order_date,
+            SalesOrder.id,
+            SalesOrderItem.id,
+        )
+    ).all()
+    for line in order_lines:
+        quantity = min(int(line.production_required_quantity or 0), remaining)
+        if quantity <= 0:
+            continue
+        db.add(ProductionAllocation(
+            production_run_id=run.id,
+            order_item_id=line.id,
+            quantity=quantity,
+            sequence=sequence,
+            estimated_completion_at=planned_end,
+        ))
+        remaining -= quantity
+        sequence += 1
+        if remaining <= 0:
+            break
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return next(row for row in list_production_runs(db) if row["id"] == run.id)
+
+
+@app.put("/api/production/runs/{run_id}/status")
+def update_production_run_status(
+    run_id: int,
+    payload: ProductionRunStatusPayload,
+    db: Session = Depends(get_db),
+):
+    run = db.scalar(
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(
+            selectinload(ProductionRun.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+        .with_for_update()
+    )
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if payload.status == "RUNNING":
+        if run.status != "PLANNED":
+            raise HTTPException(409, "只有待生产批次可以开始生产")
+        if not run.product.bom_components:
+            raise HTTPException(409, "产品未配置 BOM，不能开始生产")
+        component_changes = [
+            (
+                component.part,
+                -float(component.quantity) * int(run.planned_quantity),
+                component.part.cost_price,
+            )
+            for component in run.product.bom_components
+        ]
+        consumption_tx = create_transaction(
+            db,
+            "PRODUCTION_OUT",
+            component_changes,
+            f"生产批次 {run.run_no} 开工领料，BOM 自动出库",
+            related_production_run_id=run.id,
+            occurred_at=datetime.now(),
+        )
+        run.status = "RUNNING"
+        run.schedule_locked = True
+        run.actual_start_at = datetime.now()
+    else:
+        if run.status not in {"PLANNED", "RUNNING"}:
+            raise HTTPException(409, "该生产批次已结束，不能取消")
+        run.status = "CANCELLED"
+    recalculate_production_plan(db)
+    db.commit()
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "status": run.status,
+        "consumption_transaction_id": (
+            consumption_tx.id if payload.status == "RUNNING" else None
+        ),
+    }
+
+
+@app.get("/api/production/demands")
+def production_demands(db: Session = Depends(get_db)):
+    return production_demand_summary(db)
+
+
+@app.get("/api/purchase/requirements")
+def purchase_requirements(db: Session = Depends(get_db)):
+    return purchase_requirement_summary(db)
+
+
+@app.post("/api/production/runs/{run_id}/complete", status_code=201)
+def complete_production_run(
+    run_id: int,
+    payload: ProductionCompletionPayload,
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(
+            selectinload(ProductionRun.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part),
+            selectinload(ProductionRun.allocations),
+        )
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    run = db.scalar(query)
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status not in {"PLANNED", "RUNNING"}:
+        raise HTTPException(409, "只有待完工批次可以办理生产入库")
+    if not run.product.bom_components:
+        raise HTTPException(409, "产品未配置 BOM，不能办理生产入库")
+    actual = int(payload.actual_quantity)
+    occurred_at = datetime.combine(payload.completion_date, time.min)
+    consumption_tx = db.scalar(
+        select(StockTransaction)
+        .where(
+            StockTransaction.related_production_run_id == run.id,
+            StockTransaction.transaction_type == "PRODUCTION_OUT",
+        )
+        .order_by(StockTransaction.id.desc())
+    )
+    if consumption_tx is None:
+        # 兼容升级前已经开工的历史批次；新版批次均在“开始生产”时完成领料。
+        component_changes = [
+            (
+                component.part,
+                -float(component.quantity) * actual,
+                component.part.cost_price,
+            )
+            for component in run.product.bom_components
+        ]
+        consumption_tx = create_transaction(
+            db,
+            "PRODUCTION_OUT",
+            component_changes,
+            payload.notes or f"生产批次 {run.run_no} 历史开工领料补记",
+            related_production_run_id=run.id,
+            occurred_at=run.actual_start_at or occurred_at,
+        )
+    elif actual != int(run.planned_quantity):
+        # 开工按计划数领料；完工数量有差异时只补记差额，保证 BOM 耗用仍与
+        # 实际合格数量一致。少产退料为正数，超产补领为负数。
+        variance = actual - int(run.planned_quantity)
+        create_transaction(
+            db,
+            "PRODUCTION_OUT" if variance > 0 else "PRODUCTION_RETURN",
+            [
+                (
+                    component.part,
+                    -float(component.quantity) * variance,
+                    component.part.cost_price,
+                )
+                for component in run.product.bom_components
+            ],
+            payload.notes or (
+                f"生产批次 {run.run_no} 超产补领"
+                if variance > 0
+                else f"生产批次 {run.run_no} 少产退料"
+            ),
+            related_production_run_id=run.id,
+            occurred_at=occurred_at,
+        )
+    external_required = bool(run.product.requires_external_processing)
+    inbound_tx = create_transaction(
+        db,
+        "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
+        [(run.product, actual, run.product.cost_price)],
+        payload.notes or (
+            f"生产批次 {run.run_no} 半成品入库，待{run.product.external_process_name}"
+            if external_required
+            else f"生产批次 {run.run_no} 完工入库"
+        ),
+        related_production_run_id=run.id,
+        occurred_at=occurred_at,
+        apply_inventory=not external_required,
+    )
+    if external_required:
+        run.product.semi_finished_qty = int(run.product.semi_finished_qty or 0) + actual
+    run.produced_quantity = actual
+    run.status = "COMPLETED"
+    run.actual_end_at = datetime.combine(payload.completion_date, time.min)
+    # 实际少产时，历史分配也只能记录本批次真正完成的数量；剩余缺口由重算生成新批次。
+    allocatable = actual
+    for allocation in sorted(run.allocations, key=lambda row: row.sequence):
+        fulfilled = min(int(allocation.quantity), allocatable)
+        if fulfilled <= 0:
+            db.delete(allocation)
+            continue
+        allocation.quantity = fulfilled
+        allocation.estimated_completion_at = run.actual_end_at
+        allocatable -= fulfilled
+    if not external_required:
+        rebalance_product_reservations(db, {run.product_id})
+    plan = recalculate_production_plan(db)
+    db.commit()
+    return {
+        "transaction_id": inbound_tx.id,
+        "consumption_transaction_id": consumption_tx.id,
+        "run_id": run.id,
+        "planned_quantity": run.planned_quantity,
+        "actual_quantity": actual,
+        "excess_quantity": max(actual - int(run.planned_quantity), 0),
+        "inventory_bucket": "SEMI_FINISHED" if external_required else "FINISHED",
+        "plan": plan,
+    }
+
+
+def external_batch_dict(batch: ExternalProcessingBatch) -> dict:
+    return {
+        "id": batch.id,
+        "batch_no": batch.batch_no,
+        "product_id": batch.product_id,
+        "product_sku": batch.product.sku,
+        "product_name": batch.product.name,
+        "unit": batch.product.unit,
+        "process_name": batch.process_name_snapshot,
+        "supplier": batch.supplier,
+        "quantity": batch.quantity,
+        "returned_quantity": batch.returned_quantity,
+        "remaining_quantity": max(batch.quantity - batch.returned_quantity, 0),
+        "status": batch.status,
+        "notes": batch.notes,
+        "sent_at": batch.sent_at.isoformat(),
+        "returned_at": batch.returned_at.isoformat() if batch.returned_at else None,
+    }
+
+
+@app.get("/api/external-processing")
+def external_processing(db: Session = Depends(get_db)):
+    products = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.kind == "PRODUCT",
+            InventoryItem.active.is_(True),
+            InventoryItem.requires_external_processing.is_(True),
+        )
+        .order_by(InventoryItem.sku)
+    ).all()
+    batches = db.scalars(
+        select(ExternalProcessingBatch)
+        .options(selectinload(ExternalProcessingBatch.product))
+        .order_by(ExternalProcessingBatch.sent_at.desc(), ExternalProcessingBatch.id.desc())
+    ).all()
+    return {
+        "products": [item_dict(product) for product in products],
+        "batches": [external_batch_dict(batch) for batch in batches],
+    }
+
+
+@app.post("/api/external-processing/send", status_code=201)
+def send_external_processing(
+    payload: ExternalProcessingSendPayload,
+    db: Session = Depends(get_db),
+):
+    product = db.get(InventoryItem, payload.product_id)
+    if not product or product.kind != "PRODUCT" or not product.active:
+        raise HTTPException(404, "产品不存在")
+    if not product.requires_external_processing or not product.external_process_name:
+        raise HTTPException(409, "该产品未配置外协工序")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    outbound_tx = create_transaction(
+        db,
+        "PROCESS_OUT",
+        [(product, -payload.quantity, product.cost_price)],
+        payload.notes or f"{product.external_process_name}外协送出",
+        occurred_at=occurred_at,
+        counterparty_name=payload.supplier,
+        apply_inventory=False,
+    )
+    if int(product.semi_finished_qty or 0) < payload.quantity:
+        raise HTTPException(
+            409,
+            f"{product.name} 半成品不足，当前 {int(product.semi_finished_qty or 0)} {product.unit}",
+        )
+    product.semi_finished_qty = int(product.semi_finished_qty or 0) - payload.quantity
+    product.processing_qty = int(product.processing_qty or 0) + payload.quantity
+    batch = ExternalProcessingBatch(
+        batch_no=serial("EP"),
+        product_id=product.id,
+        process_name_snapshot=product.external_process_name,
+        supplier=payload.supplier.strip(),
+        quantity=payload.quantity,
+        outbound_transaction_id=outbound_tx.id,
+        notes=payload.notes.strip(),
+        sent_at=occurred_at,
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    batch.product = product
+    return external_batch_dict(batch)
+
+
+@app.post("/api/external-processing/{batch_id}/return", status_code=201)
+def return_external_processing(
+    batch_id: int,
+    payload: ExternalProcessingReturnPayload,
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(ExternalProcessingBatch)
+        .where(ExternalProcessingBatch.id == batch_id)
+        .options(selectinload(ExternalProcessingBatch.product))
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    batch = db.scalar(query)
+    if not batch:
+        raise HTTPException(404, "外协批次不存在")
+    remaining = max(batch.quantity - batch.returned_quantity, 0)
+    if payload.quantity > remaining:
+        raise HTTPException(409, f"本批次最多还能回厂 {remaining} {batch.product.unit}")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    inbound_tx = create_transaction(
+        db,
+        "PROCESS_RETURN_IN",
+        [(batch.product, payload.quantity, batch.product.cost_price)],
+        payload.notes or f"{batch.process_name_snapshot}外协回厂",
+        occurred_at=occurred_at,
+        counterparty_name=batch.supplier,
+    )
+    if int(batch.product.processing_qty or 0) < payload.quantity:
+        raise HTTPException(409, "产品外协在途数量异常，请刷新后重试")
+    batch.product.processing_qty = int(batch.product.processing_qty or 0) - payload.quantity
+    batch.returned_quantity += payload.quantity
+    batch.status = "RETURNED" if batch.returned_quantity >= batch.quantity else "PARTIALLY_RETURNED"
+    batch.returned_at = occurred_at
+    rebalance_product_reservations(db, {batch.product_id})
+    plan = recalculate_production_plan(db)
+    db.commit()
+    return {
+        "batch": external_batch_dict(batch),
+        "transaction_id": inbound_tx.id,
+        "plan": plan,
+    }
+
+
+def _active_schedule_condition():
+    return or_(
+        ProductionRun.status == "RUNNING",
+        and_(
+            ProductionRun.status == "PLANNED",
+            ProductionRun.schedule_locked.is_(True),
+        ),
+    )
+
+
+@app.put("/api/production/runs/{run_id}/schedule")
+def update_production_run_schedule(
+    run_id: int,
+    payload: ProductionRunSchedulePayload,
+    db: Session = Depends(get_db),
+):
+    run = db.scalar(
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(selectinload(ProductionRun.allocations))
+        .with_for_update()
+    )
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status != "PLANNED":
+        raise HTTPException(409, "只有待生产批次可以调整排期")
+    settings = db.get(ProductionSetting, 1)
+    line_count = max(int(settings.line_count if settings else 1), 1)
+    if payload.line_slot > line_count:
+        raise HTTPException(400, "生产位超出系统设置的可用范围")
+
+    planned_start = payload.planned_start_at
+    if planned_start.tzinfo is not None:
+        planned_start = planned_start.astimezone().replace(tzinfo=None)
+    if planned_start < datetime.now() - timedelta(minutes=1):
+        raise HTTPException(400, "排产开始时间不能早于当前时间")
+    duration_seconds = max(
+        float(run.planned_quantity)
+        / max(float(run.effective_daily_capacity), 1e-9)
+        * 86400,
+        60,
+    )
+    planned_end = planned_start + timedelta(seconds=duration_seconds)
+
+    line_conflict = db.scalar(
+        select(ProductionRun.id).where(
+            ProductionRun.id != run.id,
+            _active_schedule_condition(),
+            ProductionRun.line_slot == payload.line_slot,
+            ProductionRun.planned_start_at < planned_end,
+            ProductionRun.planned_end_at > planned_start,
+        ).limit(1)
+    )
+    if line_conflict:
+        raise HTTPException(409, "该生产位在所选时间段已有确认排期")
+
+    mold_count = max(int(run.product.mold_count or 1), 1)
+    chosen_mold_slot = None
+    preferred_slots = [run.mold_slot] + [
+        slot for slot in range(1, mold_count + 1) if slot != run.mold_slot
+    ]
+    for mold_slot in preferred_slots:
+        mold_conflict = db.scalar(
+            select(ProductionRun.id).where(
+                ProductionRun.id != run.id,
+                _active_schedule_condition(),
+                ProductionRun.product_id == run.product_id,
+                ProductionRun.mold_slot == mold_slot,
+                ProductionRun.planned_start_at < planned_end,
+                ProductionRun.planned_end_at > planned_start,
+            ).limit(1)
+        )
+        if not mold_conflict:
+            chosen_mold_slot = mold_slot
+            break
+    if chosen_mold_slot is None:
+        raise HTTPException(409, "该产品在所选时间段没有可用模具")
+
+    time_shift = planned_start - run.planned_start_at
+    run.line_slot = payload.line_slot
+    run.mold_slot = chosen_mold_slot
+    run.planned_start_at = planned_start
+    run.planned_end_at = planned_end
+    run.schedule_locked = True
+    for allocation in run.allocations:
+        if allocation.estimated_completion_at:
+            allocation.estimated_completion_at += time_shift
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return next(
+        row for row in list_production_runs(db) if row["id"] == run_id
+    )
+
+
+@app.delete("/api/production/runs/{run_id}/schedule")
+def unlock_production_run_schedule(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = db.get(ProductionRun, run_id)
+    if not run:
+        raise HTTPException(404, "生产批次不存在")
+    if run.status != "PLANNED":
+        raise HTTPException(409, "只有待生产批次可以恢复自动排期")
+    run.schedule_locked = False
+    recalculate_production_plan(db)
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/inventory")
 def inventory(
     kind: str | None = None,
@@ -240,20 +1290,56 @@ def inventory(
     keyword: str = "",
     db: Session = Depends(get_db),
 ):
-    query = select(InventoryItem).where(InventoryItem.active.is_(True))
+    query = select(InventoryItem).where(
+        InventoryItem.active.is_(True),
+        InventoryItem.kind.in_(["PART", "PRODUCT"]),
+    )
     if kind in {"PART", "PRODUCT"}:
         query = query.where(InventoryItem.kind == kind)
     if stock_status == "LOW" or (stock_status is None and low_stock):
-        query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty < InventoryItem.min_stock)
     elif stock_status == "NORMAL":
-        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty >= InventoryItem.min_stock)
     if keyword.strip():
         token = f"%{keyword.strip()}%"
         query = query.where(
             or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
         )
     items = db.scalars(query.order_by(InventoryItem.kind, InventoryItem.sku)).all()
-    return [item_dict(item) for item in items]
+    product_demands = {
+        row["product_id"]: row
+        for row in production_demand_summary(db)
+    }
+    part_requirements = {
+        row["part_id"]: row
+        for row in purchase_requirement_summary(db, shortages_only=False)
+    }
+    rows = []
+    for item in items:
+        data = item_dict(item)
+        reserved = reserved_product_quantity(db, item.id) if item.kind == "PRODUCT" else 0
+        requirement = (
+            product_demands.get(item.id, {})
+            if item.kind == "PRODUCT"
+            else part_requirements.get(item.id, {})
+        )
+        required_qty = (
+            requirement.get("total_production_required", 0)
+            if item.kind == "PRODUCT"
+            else requirement.get("total_required", 0)
+        )
+        shortage_qty = (
+            required_qty
+            if item.kind == "PRODUCT"
+            else requirement.get("shortage_quantity", 0)
+        )
+        data["reserved_qty"] = reserved
+        data["available_qty"] = max(float(item.stock_qty) - reserved, 0)
+        data["order_required_qty"] = required_qty
+        data["shortage_qty"] = shortage_qty
+        data["gap_qty"] = -shortage_qty if shortage_qty > 0 else 0
+        rows.append(data)
+    return rows
 
 
 @app.get("/api/stock/transactions")
@@ -289,30 +1375,280 @@ def stock_transactions(
     return [transaction_dict(tx) for tx in txs]
 
 
+def _document_rows(
+    db: Session,
+    direction: Literal["INBOUND", "OUTBOUND"],
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    item_id: int | None = None,
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+):
+    types = (
+        (
+            "PURCHASE_IN", "ASSEMBLY_IN", "SEMI_FINISHED_IN",
+            "PROCESS_RETURN_IN", "SALE_RETURN_IN", "MANUAL_IN",
+            "GENERAL_IN", "OPENING",
+        )
+        if direction == "INBOUND"
+        else (
+            "SALE_OUT", "PROCESS_OUT", "MANUAL_OUT", "GENERAL_OUT",
+            "PRODUCTION_OUT", "ASSEMBLY_IN",
+        )
+    )
+    direction_filter = (
+        StockTransactionItem.quantity_change > 0
+        if direction == "INBOUND"
+        else StockTransactionItem.quantity_change < 0
+    )
+    line_filter = direction_filter
+    if scope:
+        line_filter = and_(
+            line_filter,
+            StockTransactionItem.item.has(InventoryItem.kind == scope),
+        )
+    if item_id is not None:
+        line_filter = and_(line_filter, StockTransactionItem.item_id == item_id)
+    query = (
+        select(StockTransaction)
+        .where(
+            StockTransaction.transaction_type.in_(types),
+            StockTransaction.lines.any(line_filter),
+        )
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+            selectinload(StockTransaction.related_production_run),
+        )
+    )
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        item_keyword = or_(
+            StockTransactionItem.sku_snapshot.ilike(token),
+            StockTransactionItem.name_snapshot.ilike(token),
+            StockTransactionItem.spec_snapshot.ilike(token),
+            StockTransactionItem.item.has(or_(
+                InventoryItem.sku.ilike(token),
+                InventoryItem.name.ilike(token),
+                InventoryItem.spec.ilike(token),
+            )),
+        )
+        query = query.where(or_(
+            StockTransaction.transaction_no.ilike(token),
+            StockTransaction.order_no_snapshot.ilike(token),
+            StockTransaction.counterparty_name_snapshot.ilike(token),
+            StockTransaction.notes.ilike(token),
+            StockTransaction.lines.any(item_keyword),
+        ))
+    if transaction_type and transaction_type.strip():
+        query = query.where(
+            StockTransaction.transaction_type == transaction_type.strip().upper()
+        )
+    if start_date:
+        query = query.where(
+            StockTransaction.occurred_at >= datetime.combine(start_date, time.min)
+        )
+    if end_date:
+        query = query.where(
+            StockTransaction.occurred_at <= datetime.combine(end_date, time.max)
+        )
+    transactions = db.scalars(
+        query.order_by(StockTransaction.occurred_at.desc()).limit(500)
+    ).all()
+    result = []
+    for transaction in transactions:
+        data = transaction_dict(transaction)
+        data["lines"] = [
+            line
+            for line in data["lines"]
+            if (line["quantity_change"] > 0) == (direction == "INBOUND")
+            and (scope is None or line["kind"] == scope)
+        ]
+        if data["lines"]:
+            result.append(data)
+    return result
+
+
+@app.get("/api/documents/inbound")
+def inbound_documents(
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    item_id: int | None = None,
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return _document_rows(
+        db,
+        "INBOUND",
+        scope,
+        keyword,
+        item_id,
+        transaction_type,
+        start_date,
+        end_date,
+    )
+
+
+@app.get("/api/documents/outbound")
+def outbound_documents(
+    scope: Literal["PART", "PRODUCT"] | None = None,
+    keyword: str = "",
+    item_id: int | None = None,
+    transaction_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return _document_rows(
+        db,
+        "OUTBOUND",
+        scope,
+        keyword,
+        item_id,
+        transaction_type,
+        start_date,
+        end_date,
+    )
+
+
 @app.post("/api/stock/inbound", status_code=201)
 def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
+    if item.kind == "PRODUCT" and not float(payload.quantity).is_integer():
+        raise HTTPException(422, "产品入库数量必须为正整数")
     changes: list[tuple[InventoryItem, float, float]] = []
     tx_type = "PURCHASE_IN" if item.kind == "PART" else "MANUAL_IN"
+    if payload.production_run_id is not None:
+        raise HTTPException(410, "生产批次请从“生产入库”页面办理完工入库")
     if item.kind == "PRODUCT" and payload.consume_bom:
-        product = db.scalar(select(InventoryItem).where(InventoryItem.id == item.id).options(selectinload(InventoryItem.bom_components).selectinload(ProductBomItem.part)))
+        product = db.scalar(
+            select(InventoryItem)
+            .where(InventoryItem.id == item.id)
+            .options(
+                selectinload(InventoryItem.bom_components)
+                .selectinload(ProductBomItem.part)
+            )
+        )
         if not product.bom_components:
             raise HTTPException(409, "产品还没有 BOM，不能按 BOM 生产入库")
         changes.extend((line.part, -line.quantity * payload.quantity, line.part.cost_price) for line in product.bom_components)
         tx_type = "ASSEMBLY_IN"
     changes.append((item, payload.quantity, payload.unit_cost or item.cost_price))
     tx = create_transaction(db, tx_type, changes, payload.notes)
+    if item.kind == "PRODUCT":
+        # 新增成品必须立即按交期流向活动订单。
+        rebalance_product_reservations(db, {item.id})
+    # 零件到货、普通成品入库都会改变待购买、可承诺库存或 ETA。
+    recalculate_production_plan(db)
     db.commit()
-    tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
     return transaction_dict(tx)
 
 
 @app.post("/api/stock/outbound", status_code=201)
 def outbound(payload: StockPayload, db: Session = Depends(get_db)):
     item = find_item(db, payload.item_id)
+    if item.kind == "PRODUCT":
+        if not float(payload.quantity).is_integer():
+            raise HTTPException(422, "产品出库数量必须为正整数")
+        reserved = reserved_product_quantity(db, item.id)
+        free_stock = max(float(item.stock_qty) - reserved, 0)
+        if payload.quantity > free_stock + 1e-9:
+            raise HTTPException(409, f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留")
     tx = create_transaction(db, "MANUAL_OUT", [(item, -payload.quantity, item.cost_price)], payload.notes)
+    recalculate_production_plan(db)
     db.commit()
-    tx = db.scalar(select(StockTransaction).where(StockTransaction.id == tx.id).options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item), selectinload(StockTransaction.related_order)))
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
+    return transaction_dict(tx)
+
+
+@app.post("/api/stock/documents", status_code=201)
+def create_stock_document(
+    payload: StockDocumentPayload,
+    db: Session = Depends(get_db),
+):
+    item_ids = [line.item_id for line in payload.items]
+    items = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(item_ids),
+                InventoryItem.active.is_(True),
+                InventoryItem.kind.in_(("PART", "PRODUCT")),
+            )
+        ).all()
+    }
+    if len(items) != len(item_ids):
+        raise HTTPException(404, "单据中有物料不存在或已停用")
+
+    outbound = payload.direction == "OUTBOUND"
+    changes: list[tuple[InventoryItem, float, float]] = []
+    price_snapshots: dict[int, tuple[float, float]] = {}
+    affected_products: set[int] = set()
+    for line in payload.items:
+        item = items[line.item_id]
+        quantity = float(line.quantity)
+        if item.kind == "PRODUCT" and not quantity.is_integer():
+            raise HTTPException(422, f"{item.name} 的产品数量必须为正整数")
+        if outbound and item.kind == "PRODUCT":
+            reserved = reserved_product_quantity(db, item.id)
+            free_stock = max(float(item.stock_qty) - reserved, 0)
+            if quantity > free_stock + 1e-9:
+                raise HTTPException(
+                    409,
+                    f"{item.name} 可用库存不足；当前有 {reserved:g} {item.unit} 已被客单预留",
+                )
+        signed_quantity = -quantity if outbound else quantity
+        unit_cost = item.cost_price if outbound else (line.unit_price or item.cost_price)
+        changes.append((item, signed_quantity, unit_cost))
+        price_snapshots[item.id] = (
+            float(line.unit_price),
+            round(float(line.unit_price) * quantity, 2),
+        )
+        if item.kind == "PRODUCT":
+            affected_products.add(item.id)
+
+    tx = create_transaction(
+        db,
+        "GENERAL_OUT" if outbound else "GENERAL_IN",
+        changes,
+        payload.notes,
+        occurred_at=datetime.combine(payload.occurred_date, time.min),
+        operator=payload.operator,
+        price_snapshots=price_snapshots,
+        counterparty_name=payload.counterparty_name,
+        counterparty_phone=payload.counterparty_phone,
+        counterparty_address=payload.counterparty_address,
+    )
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+    recalculate_production_plan(db)
+    db.commit()
+    tx = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == tx.id)
+        .options(
+            selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
+            selectinload(StockTransaction.related_order),
+        )
+    )
     return transaction_dict(tx)
 
 
@@ -334,26 +1670,86 @@ def orders(
         query = query.where(SalesOrder.order_date >= start_date)
     if end_date:
         query = query.where(SalesOrder.order_date <= end_date)
-    rows = db.scalars(query.order_by(SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
+    rows = db.scalars(query.order_by(SalesOrder.required_date.asc(), SalesOrder.order_date.desc(), SalesOrder.id.desc())).all()
     return [order_dict(order) for order in rows]
+
+
+@app.get("/api/orders/{order_id}")
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    return order_dict(load_order(db, order_id))
 
 
 @app.post("/api/orders", status_code=201)
 def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
     ids = [line.product_id for line in payload.items]
-    products = {item.id: item for item in db.scalars(select(InventoryItem).where(InventoryItem.id.in_(ids), InventoryItem.kind == "PRODUCT", InventoryItem.active.is_(True))).all()}
+    products = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem).where(
+                InventoryItem.id.in_(ids),
+                InventoryItem.kind == "PRODUCT",
+                InventoryItem.active.is_(True),
+            )
+        ).all()
+    }
     if len(products) != len(ids):
         raise HTTPException(400, "客单中包含无效产品")
     order = SalesOrder(
         order_no=serial("SO"), customer_name=payload.customer_name, customer_phone=payload.customer_phone,
-        customer_address=payload.customer_address, order_date=payload.order_date, notes=payload.notes, status="DRAFT"
+        customer_address=payload.customer_address, order_date=payload.order_date,
+        required_date=payload.required_date or payload.order_date, notes=payload.notes, status="DRAFT"
     )
     order.items = [
-        SalesOrderItem(product_id=line.product_id, quantity=line.quantity, unit_price=line.unit_price, line_total=round(line.quantity * line.unit_price, 2))
+        SalesOrderItem(
+            product_id=line.product_id,
+            quantity=line.quantity,
+            reference_price=products[line.product_id].sale_price,
+            unit_price=line.unit_price,
+            line_total=round(line.quantity * line.unit_price, 2),
+        )
         for line in payload.items
     ]
     order.total_amount = round(sum(line.line_total for line in order.items), 2)
     db.add(order)
+    db.commit()
+    return order_dict(load_order(db, order.id))
+
+
+@app.put("/api/orders/{order_id}")
+def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get_db)):
+    order = load_order(db, order_id)
+    if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
+        raise HTTPException(409, "订单已经发生出库，客户、产品、数量和价格已冻结")
+    if order.status != "DRAFT":
+        raise HTTPException(409, "只有草稿订单可以编辑")
+    product_ids = [line.product_id for line in payload.items]
+    products = {
+        item.id: item
+        for item in db.scalars(select(InventoryItem).where(
+            InventoryItem.id.in_(product_ids),
+            InventoryItem.kind == "PRODUCT",
+            InventoryItem.active.is_(True),
+        )).all()
+    }
+    if len(products) != len(product_ids):
+        raise HTTPException(400, "客单中包含无效产品")
+    order.customer_name = payload.customer_name
+    order.customer_phone = payload.customer_phone
+    order.customer_address = payload.customer_address
+    order.order_date = payload.order_date
+    order.required_date = payload.required_date or payload.order_date
+    order.notes = payload.notes
+    order.items = [
+        SalesOrderItem(
+            product_id=line.product_id,
+            quantity=line.quantity,
+            reference_price=products[line.product_id].sale_price,
+            unit_price=line.unit_price,
+            line_total=round(line.quantity * line.unit_price, 2),
+        )
+        for line in payload.items
+    ]
+    order.total_amount = round(sum(line.line_total for line in order.items), 2)
     db.commit()
     return order_dict(load_order(db, order.id))
 
@@ -364,27 +1760,273 @@ def confirm_order(order_id: int, db: Session = Depends(get_db)):
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿客单可以确认")
     order.status = "CONFIRMED"
+    db.flush()
+    rebalance_product_reservations(db, {line.product_id for line in order.items})
+    plan = recalculate_production_plan(db)
     db.commit()
-    return order_dict(order)
+    refreshed = load_order(db, order.id)
+    return {
+        "order": order_dict(refreshed),
+        "workflow": order_workflow_dict(db, refreshed),
+        "plan": plan,
+    }
 
 
-@app.post("/api/orders/{order_id}/fulfill")
-def fulfill_order(order_id: int, db: Session = Depends(get_db)):
+@app.get("/api/orders/{order_id}/availability")
+def order_availability(order_id: int, db: Session = Depends(get_db)):
+    return order_workflow_dict(db, load_order(db, order_id))
+
+
+def order_return_dict(row: OrderReturn) -> dict:
+    return {
+        "id": row.id,
+        "return_no": row.return_no,
+        "order_id": row.order_id,
+        "order_item_id": row.order_item_id,
+        "product_id": row.product_id,
+        "product_sku": row.product.sku,
+        "product_name": row.product.name,
+        "unit": row.product.unit,
+        "quantity": row.quantity,
+        "restocked": row.restocked,
+        "transaction_id": row.transaction_id,
+        "notes": row.notes,
+        "occurred_at": row.occurred_at.isoformat(),
+    }
+
+
+@app.get("/api/orders/{order_id}/returns")
+def order_returns(order_id: int, db: Session = Depends(get_db)):
+    if not db.get(SalesOrder, order_id):
+        raise HTTPException(404, "客单不存在")
+    rows = db.scalars(
+        select(OrderReturn)
+        .where(OrderReturn.order_id == order_id)
+        .options(selectinload(OrderReturn.product))
+        .order_by(OrderReturn.occurred_at.desc(), OrderReturn.id.desc())
+    ).all()
+    return [order_return_dict(row) for row in rows]
+
+
+@app.post("/api/orders/{order_id}/returns", status_code=201)
+def create_order_return(
+    order_id: int,
+    payload: OrderReturnPayload,
+    db: Session = Depends(get_db),
+):
     order = load_order(db, order_id)
-    if order.status not in {"DRAFT", "CONFIRMED"}:
-        raise HTTPException(409, "当前客单不能出库")
-    tx = create_transaction(db, "SALE_OUT", [(line.product, -line.quantity, line.product.cost_price) for line in order.items], f"客单 {order.order_no} 出库", order.id)
-    order.status = "FULFILLED"
+    line_by_id = {line.id: line for line in order.items}
+    if any(line.order_item_id not in line_by_id for line in payload.items):
+        raise HTTPException(400, "退货明细不属于该客单")
+    return_no = serial("RT")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    restock_changes = []
+    for requested in payload.items:
+        line = line_by_id[requested.order_item_id]
+        returnable = max(
+            int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
+            0,
+        )
+        if requested.quantity > returnable:
+            raise HTTPException(
+                409,
+                f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
+            )
+        if requested.restock:
+            restock_changes.append((line.product, requested.quantity, line.product.cost_price))
+    transaction = None
+    if restock_changes:
+        transaction = create_transaction(
+            db,
+            "SALE_RETURN_IN",
+            restock_changes,
+            payload.notes or f"客单 {order.order_no} 退货入库",
+            related_order_id=order.id,
+            occurred_at=occurred_at,
+        )
+    created = []
+    affected_products: set[int] = set()
+    for requested in payload.items:
+        line = line_by_id[requested.order_item_id]
+        line.returned_quantity = int(line.returned_quantity or 0) + requested.quantity
+        row = OrderReturn(
+            return_no=return_no,
+            order_id=order.id,
+            order_item_id=line.id,
+            product_id=line.product_id,
+            quantity=requested.quantity,
+            restocked=requested.restock,
+            transaction_id=transaction.id if requested.restock and transaction else None,
+            notes=payload.notes.strip(),
+            occurred_at=occurred_at,
+        )
+        db.add(row)
+        created.append(row)
+        if requested.restock:
+            affected_products.add(line.product_id)
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+        recalculate_production_plan(db)
     db.commit()
-    return {"order": order_dict(order), "transaction_id": tx.id}
+    for row in created:
+        row.product = line_by_id[row.order_item_id].product
+    return {
+        "return_no": return_no,
+        "transaction_id": transaction.id if transaction else None,
+        "items": [order_return_dict(row) for row in created],
+        "order": order_dict(load_order(db, order.id)),
+    }
+
+
+@app.post("/api/orders/{order_id}/prepare", deprecated=True)
+def prepare_order(order_id: int, db: Session = Depends(get_db)):
+    raise HTTPException(410, "订单级备货已停用；系统会自动聚合待购买和待生产需求")
+
+
+@app.post("/api/orders/{order_id}/receive-materials", deprecated=True)
+def receive_order_materials(
+    order_id: int,
+    payload: OrderStockPayload,
+    db: Session = Depends(get_db),
+):
+    raise HTTPException(410, "订单级补料已停用；请按待购买汇总在出入库页面办理采购入库")
+
+
+def _ship_order(
+    db: Session,
+    order_id: int,
+    requested: dict[int, int] | None,
+    notes: str = "",
+    price_overrides: dict[int, float] | None = None,
+    occurred_at: datetime | None = None,
+    operator: str | None = None,
+    counterparty_name: str | None = None,
+    counterparty_phone: str | None = None,
+    counterparty_address: str | None = None,
+) -> dict:
+    query = (
+        select(SalesOrder)
+        .where(SalesOrder.id == order_id)
+        .options(selectinload(SalesOrder.items).selectinload(SalesOrderItem.product))
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    order = db.scalar(query)
+    if not order:
+        raise HTTPException(404, "客单不存在")
+    if order.status not in {
+        "CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP", "PARTIALLY_SHIPPED",
+    }:
+        raise HTTPException(409, "该客单当前不能出库")
+    lines = sorted(order.items, key=lambda line: line.id)
+    line_by_id = {line.id: line for line in lines}
+    if requested is None:
+        requested = {
+            line.id: max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+            for line in lines
+        }
+    if not requested or any(line_id not in line_by_id for line_id in requested):
+        raise HTTPException(400, "出库明细不属于该客单")
+    reservations = {
+        row.order_item_id: row
+        for row in db.scalars(
+            select(StockReservation)
+            .where(StockReservation.order_item_id.in_(sorted(requested)))
+            .order_by(StockReservation.order_item_id)
+            .with_for_update()
+        ).all()
+    }
+    changes = []
+    price_snapshots: dict[int, tuple[float, float]] = {}
+    for line_id, quantity in requested.items():
+        line = line_by_id[line_id]
+        remaining = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        reserved = int(reservations.get(line_id).quantity if reservations.get(line_id) else 0)
+        if quantity <= 0:
+            raise HTTPException(422, "出库数量必须为正整数")
+        if quantity > remaining:
+            raise HTTPException(409, f"{line.product.name} 本次出库超过剩余数量 {remaining}")
+        if quantity > reserved:
+            raise HTTPException(409, f"{line.product.name} 当前仅为本单预留 {reserved} {line.product.unit}")
+        changes.append((line.product, -quantity, line.product.cost_price))
+        unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
+        price_snapshots[line.product_id] = (
+            unit_price,
+            round(unit_price * quantity, 2),
+        )
+    tx = create_transaction(
+        db,
+        "SALE_OUT",
+        changes,
+        notes or f"客单 {order.order_no} 出库",
+        related_order_id=order.id,
+        occurred_at=occurred_at,
+        operator=operator,
+        price_snapshots=price_snapshots,
+        counterparty_name=counterparty_name,
+        counterparty_phone=counterparty_phone,
+        counterparty_address=counterparty_address,
+    )
+    affected_products = set()
+    for line_id, quantity in requested.items():
+        line = line_by_id[line_id]
+        line.shipped_quantity = int(line.shipped_quantity or 0) + quantity
+        affected_products.add(line.product_id)
+    db.flush()
+    rebalance_product_reservations(db, affected_products)
+    recalculate_production_plan(db)
+    db.commit()
+    return {
+        "order": order_dict(load_order(db, order.id)),
+        "transaction_id": tx.id,
+        "transaction_no": tx.transaction_no,
+    }
+
+
+@app.post("/api/orders/{order_id}/ship", status_code=201)
+def ship_order_lines(
+    order_id: int,
+    payload: OrderShipmentPayload,
+    db: Session = Depends(get_db),
+):
+    return _ship_order(
+        db,
+        order_id,
+        {line.order_item_id: line.quantity for line in payload.items},
+        payload.notes,
+        {line.order_item_id: line.unit_price for line in payload.items if line.unit_price is not None},
+        datetime.combine(payload.occurred_date, time.min),
+        payload.operator,
+        payload.counterparty_name or None,
+        payload.counterparty_phone or None,
+        payload.counterparty_address or None,
+    )
+
+
+@app.post("/api/orders/{order_id}/ship-all", status_code=201)
+def ship_order_all(order_id: int, db: Session = Depends(get_db)):
+    return _ship_order(db, order_id, None)
+
+
+@app.post("/api/orders/{order_id}/fulfill", deprecated=True)
+def fulfill_order(order_id: int, db: Session = Depends(get_db)):
+    """旧客户端兼容别名；新前端使用 ship-all。"""
+    return _ship_order(db, order_id, None)
 
 
 @app.post("/api/orders/{order_id}/cancel")
 def cancel_order(order_id: int, db: Session = Depends(get_db)):
     order = load_order(db, order_id)
-    if order.status == "FULFILLED":
-        raise HTTPException(409, "已出库客单不能直接取消")
+    if order.status in {"FULFILLED", "CANCELLED"}:
+        raise HTTPException(409, "已完结客单不能取消")
+    if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
+        raise HTTPException(409, "订单已经发生出库，不能取消；请继续处理剩余数量")
+    product_ids = {line.product_id for line in order.items}
+    release_order_reservations(db, order)
     order.status = "CANCELLED"
+    db.flush()
+    rebalance_product_reservations(db, product_ids)
+    recalculate_production_plan(db)
     db.commit()
     return order_dict(order)
 

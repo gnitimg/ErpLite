@@ -56,11 +56,11 @@ function handleHistory() {
     <el-popover placement="bottom" :width="popoverWidth" trigger="click">
       <template #reference>
         <el-badge :value="badgeValue" :max="badgeMax" :hidden="badgeValue === 0">
-          <el-tooltip effect="dark" content="消息通知" placement="bottom">
+          <!-- <el-tooltip effect="dark" content="消息通知" placement="bottom">
             <el-icon :size="20">
               <Bell />
             </el-icon>
-          </el-tooltip>
+          </el-tooltip> -->
         </el-badge>
       </template>
       <template #default>

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -185,11 +186,15 @@ def find_mysql_binaries() -> tuple[str, str, str]:
     return mysqld, mysql, mysqladmin  # type: ignore[return-value]
 
 
-def start_mysql() -> None:
+def start_mysql() -> bool:
+    """启动本地 MySQL，并返回它是否由本次 run.py 启动。"""
     mysqld, mysql, _mysqladmin = find_mysql_binaries()
     if _mysql_running_pid():
         ok(f"本地 MySQL 已在运行 (127.0.0.1:{MYSQL_PORT})。")
-        return
+        return False
+    if _port_listening(MYSQL_HOST, MYSQL_PORT):
+        ok(f"端口 {MYSQL_PORT} 上已有 MySQL 服务，本次启动将复用它。")
+        return False
 
     MYSQL_DATA_DIR.mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
@@ -283,6 +288,7 @@ def start_mysql() -> None:
         MYSQL_INITIALIZED_FLAG.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
 
     ok(f"本地 MySQL 已就绪 (PID {proc.pid}, 127.0.0.1:{MYSQL_PORT})。")
+    return True
 
 
 def stop_mysql() -> None:
@@ -361,7 +367,11 @@ class ProcessGroup:
             return
         try:
             if os.name == "nt":
-                proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    capture_output=True,
+                    check=False,
+                )
             else:
                 proc.terminate()
         except Exception:
@@ -375,11 +385,18 @@ class ProcessGroup:
                 pass
 
 
-def _wait_http(url: str, timeout: float = 30.0, expect_lt_500: bool = True) -> None:
+def _wait_http(
+    url: str,
+    timeout: float = 30.0,
+    expect_lt_500: bool = True,
+    process: subprocess.Popen | None = None,
+) -> None:
     import urllib.error
     deadline = time.time() + timeout
     last_error: Exception | None = None
     while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(f"服务进程已退出（退出码 {process.returncode}）")
         try:
             with urllib.request.urlopen(url, timeout=2) as resp:
                 if not expect_lt_500 or resp.status < 500:
@@ -394,7 +411,7 @@ def _stream(prefix: str, stream) -> None:
     """将子进程输出带前缀转发到控制台。"""
     try:
         for line in stream:
-            text = line.decode(errors="replace").rstrip()
+            text = line.rstrip() if isinstance(line, str) else line.decode(errors="replace").rstrip()
             if text:
                 print(f"{prefix} {text}")
     except Exception:
@@ -418,12 +435,18 @@ def start_backend(dev: bool) -> ProcessGroup:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         creationflags=creationflags,
     )
     group = ProcessGroup()
     group.add(proc)
     threading.Thread(target=_stream, args=(_c("[api]  ", Color.HEADER), proc.stdout), daemon=True).start()
-    _wait_http(f"http://127.0.0.1:{BACKEND_PORT}/api/dashboard")
+    _wait_http(
+        f"http://127.0.0.1:{BACKEND_PORT}/api/health",
+        process=proc,
+    )
     ok("后端已就绪。")
     return group
 
@@ -444,25 +467,82 @@ def start_frontend_dev() -> ProcessGroup:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         creationflags=creationflags,
     )
     group.add(proc)
     threading.Thread(target=_stream, args=(_c("[web]  ", Color.HEADER), proc.stdout), daemon=True).start()
-    _wait_http(f"http://localhost:{FRONTEND_DEV_PORT}/", expect_lt_500=False)
+    _wait_http(
+        f"http://localhost:{FRONTEND_DEV_PORT}/",
+        expect_lt_500=False,
+        process=proc,
+    )
     ok("前端开发服务器已就绪。")
     return group
 
 
 # ───────────────────────── 主流程 ─────────────────────────
 
+def _running_erp_health() -> dict | None:
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{BACKEND_PORT}/api/health",
+            timeout=2,
+        ) as response:
+            payload = json.load(response)
+        return payload if payload.get("service") == "lite-erp" else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _preflight_ports(dev: bool) -> bool:
+    """检查端口；返回 True 表示同一 ERP 已经运行，无需重复启动。"""
+    if _port_listening("127.0.0.1", BACKEND_PORT):
+        health = _running_erp_health()
+        if health and not dev:
+            if health.get("database") != "ready" or not _port_listening(MYSQL_HOST, MYSQL_PORT):
+                raise RuntimeError(
+                    "ERP 后端已在运行，但数据库不可用。请先运行 .\\service.ps1 stop，"
+                    "再执行 python run.py。"
+                )
+            ok(f"ERP 已在运行，无需重复启动：访问 http://localhost:{BACKEND_PORT}")
+            return True
+        if health:
+            raise RuntimeError(
+                f"ERP 后端已占用 {BACKEND_PORT} 端口。请先运行 .\\service.ps1 stop，"
+                "再启动开发模式。"
+            )
+        raise RuntimeError(
+            f"端口 {BACKEND_PORT} 已被其他程序占用，请先关闭占用进程或修改 BACKEND_PORT。"
+        )
+    if dev and _port_listening("127.0.0.1", FRONTEND_DEV_PORT):
+        raise RuntimeError(f"前端开发端口 {FRONTEND_DEV_PORT} 已被占用。")
+    return False
+
+
 def cmd_start(args: argparse.Namespace) -> int:
+    if _preflight_ports(args.dev):
+        return 0
+
     if not args.dev:
         if not ensure_frontend_dist():
             warn("前端 dist 构建失败，将仅以 API 模式启动后端。")
 
-    start_mysql()
-    backend_group = start_backend(args.dev)
-    frontend_group = start_frontend_dev() if args.dev else ProcessGroup()
+    mysql_started = start_mysql()
+    backend_group = ProcessGroup()
+    frontend_group = ProcessGroup()
+    try:
+        backend_group = start_backend(args.dev)
+        frontend_group = start_frontend_dev() if args.dev else ProcessGroup()
+    except Exception:
+        frontend_group.stop_all()
+        backend_group.stop_all()
+        if mysql_started:
+            warn("启动未完成，正在停止本次启动的本地 MySQL ...")
+            stop_mysql()
+        raise
 
     if args.dev:
         ok(f"开发模式已启动：前端 http://localhost:{FRONTEND_DEV_PORT}  |  后端 http://localhost:{BACKEND_PORT}")
@@ -492,8 +572,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     finally:
         frontend_group.stop_all()
         backend_group.stop_all()
-        warn("正在停止本地 MySQL ...")
-        stop_mysql()
+        if mysql_started:
+            warn("正在停止本次启动的本地 MySQL ...")
+            stop_mysql()
+        else:
+            ok("MySQL 由其他进程管理，保持运行。")
         ok("全部服务已停止。")
     return 0
 
@@ -543,5 +626,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

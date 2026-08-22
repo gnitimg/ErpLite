@@ -6,7 +6,6 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DataDir = Join-Path $ProjectDir ".mysql-data"
-$UndoDir = Join-Path $ProjectDir ".mysql-undo"
 $InitializedFile = Join-Path $ProjectDir ".mysql-initialized"
 $LogDir = Join-Path $ProjectDir "logs"
 $ErrorLog = Join-Path $LogDir "mysql.err.log"
@@ -33,20 +32,42 @@ function Wait-ForMySql {
   throw "Local MySQL did not start. Check $ErrorLog"
 }
 
+function Wait-ForMySqlStop {
+  for ($attempt = 0; $attempt -lt 80; $attempt++) {
+    $process = Get-LocalMySqlProcess
+    $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if (-not $process -and -not $connection) { return }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "Local MySQL did not stop completely. Check $ErrorLog"
+}
+
+function Repair-UndoFiles {
+  Get-ChildItem -LiteralPath $DataDir -Filter "undo_*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 switch ($Action) {
   "start" {
     $running = Get-LocalMySqlProcess
-    if ($running) { Write-Host "Local MySQL is already running (PID $($running.Id), port $Port)."; break }
+    if ($running) {
+      $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+      if ($connection) {
+        Write-Host "Local MySQL is already running (PID $($running.Id), port $Port)."
+        break
+      }
+      Wait-ForMySqlStop
+    }
 
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
     @(
       "[mysqld]",
       "basedir=$($BaseDir.Replace('\', '/'))",
       "datadir=$($DataDir.Replace('\', '/'))",
-      "innodb-undo-directory=$($UndoDir.Replace('\', '/'))",
       "port=$Port",
       "bind-address=127.0.0.1",
       "mysqlx=0",
+      "innodb_undo_log_truncate=OFF",
       "character-set-server=utf8mb4",
       "collation-server=utf8mb4_0900_ai_ci",
       "pid-file=$($PidFile.Replace('\', '/'))",
@@ -56,16 +77,16 @@ switch ($Action) {
       "[mysqld]",
       "basedir=$($BaseDir.Replace('\', '/'))",
       "datadir=$($DataDir.Replace('\', '/'))",
-      "innodb-undo-directory=$($UndoDir.Replace('\', '/'))"
+      "innodb_undo_log_truncate=OFF"
     ) | Set-Content -LiteralPath $InitConfigFile -Encoding Ascii
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "mysql"))) {
       New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
-      New-Item -ItemType Directory -Path $UndoDir -Force | Out-Null
       & $MysqldExe "--defaults-file=$InitConfigFile" --initialize-insecure
       if ($LASTEXITCODE -ne 0) { throw "MySQL data directory initialization failed." }
     }
 
     $arguments = @("--defaults-file=$ConfigFile")
+    Repair-UndoFiles
     Start-Process -FilePath $MysqldExe -ArgumentList $arguments -WorkingDirectory $ProjectDir -WindowStyle Hidden | Out-Null
     Wait-ForMySql
 
@@ -85,6 +106,7 @@ switch ($Action) {
       $env:MYSQL_PWD = "LocalRoot@2026!"
       try { & (Join-Path (Split-Path -Parent $MysqlExe) "mysqladmin.exe") --protocol=TCP --host=127.0.0.1 --port=$Port --user=root shutdown }
       finally { $env:MYSQL_PWD = $oldPassword }
+      Wait-ForMySqlStop
       Write-Host "Local MySQL stopped." -ForegroundColor Yellow
     }
     else { Write-Host "Local MySQL is not running." }

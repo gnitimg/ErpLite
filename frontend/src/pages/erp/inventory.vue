@@ -1,60 +1,292 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { api, money, qty } from './api'
-import ListToolbar from './components/ListToolbar.vue'
+import { ElMessage } from "element-plus"
+import { computed, onMounted, reactive, ref, watch } from "vue"
+import { useRoute } from "vue-router"
+import { api, money, productQty, stockQty, useLiveRefresh } from "./api"
+import ListToolbar from "./components/ListToolbar.vue"
 
 const loading = ref(false)
+const route = useRoute()
 const rows = ref<any[]>([])
 const filterDrawer = ref(false)
-const keyword = ref('')
-const filters = reactive({ kind: '', stockStatus: '' })
-const totalValue = computed(() => rows.value.reduce((sum, row) => sum + row.stock_qty * row.cost_price, 0))
-const lowCount = computed(() => rows.value.filter(row => row.low_stock).length)
-const activeFilterCount = computed(() => Number(Boolean(filters.kind)) + Number(Boolean(filters.stockStatus)))
-
-async function load() {
-  loading.value = true
-  const params = new URLSearchParams()
-  if (filters.kind) params.set('kind', filters.kind)
-  if (filters.stockStatus) params.set('stock_status', filters.stockStatus)
-  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
-  try { rows.value = await api(`/api/inventory?${params}`) }
-  catch (error: any) { ElMessage.error(error.message) }
-  finally { loading.value = false }
+const inboundDrawer = ref(false)
+const saving = ref(false)
+const activePart = ref<any>(null)
+const keyword = ref("")
+const filters = reactive({ stockStatus: "" })
+const inboundForm = reactive({ quantity: 1, unit_cost: 0, notes: "" })
+const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" : "PART")
+const pageTitle = computed(() => kind.value === "PRODUCT" ? "产品库存" : "零件库存")
+const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
+const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
+const shortageValue = (row: any) => Math.max(Number(row.shortage_qty || 0), 0)
+const gapValue = (row: any) => shortageValue(row) > 0 ? -shortageValue(row) : 0
+function stockLevelPercent(row: any) {
+  const stock = Math.max(Number(row.stock_qty || 0), 0)
+  const safety = Math.max(Number(row.min_stock || 0), 0)
+  if (safety <= 0) return stock > 0 ? 100 : 0
+  return Math.round(Math.min(100, stock / safety * 100))
 }
-function applyFilters() { filterDrawer.value = false; load() }
-function resetFilters() { filters.kind = ''; filters.stockStatus = ''; applyFilters() }
+function stockLevelLabel(row: any) {
+  if (row.low_stock) return "低于安全线"
+  if (Number(row.stock_qty) === Number(row.min_stock)) return "达安全线"
+  return "充足"
+}
+
+async function load(silent = false) {
+  if (!silent) loading.value = true
+  const params = new URLSearchParams()
+  params.set("kind", kind.value)
+  if (filters.stockStatus) params.set("stock_status", filters.stockStatus)
+  if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
+  try {
+    rows.value = await api(`/api/inventory?${params}`)
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    if (!silent) loading.value = false
+  }
+}
+function applyFilters() {
+  filterDrawer.value = false
+  load()
+}
+function resetFilters() {
+  filters.stockStatus = ""
+  applyFilters()
+}
+function openInbound(row: any) {
+  activePart.value = row
+  inboundForm.quantity = Number(row.shortage_qty) > 0
+    ? Number(row.shortage_qty)
+    : 1
+  inboundForm.unit_cost = Number(row.cost_price || 0)
+  inboundForm.notes = Number(row.shortage_qty) > 0
+    ? `补足当前订单生产缺口 ${displayQty(row.shortage_qty)} ${row.unit}`
+    : "零件快捷入库"
+  inboundDrawer.value = true
+}
+async function submitInbound() {
+  if (Number(inboundForm.quantity) <= 0) {
+    return ElMessage.warning("入库数量必须大于 0")
+  }
+  saving.value = true
+  try {
+    await api("/api/stock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        item_id: activePart.value.id,
+        quantity: Number(inboundForm.quantity),
+        unit_cost: Number(inboundForm.unit_cost),
+        notes: inboundForm.notes,
+        consume_bom: false
+      })
+    })
+    ElMessage.success("零件已入库，入库单和缺口数量已自动更新")
+    inboundDrawer.value = false
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    saving.value = false
+  }
+}
 onMounted(load)
+watch(() => route.name, () => load())
+useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page">
-    <div class="metric-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-      <div class="metric-card"><div><div class="metric-label">当前物料</div><div class="metric-value">{{ rows.length }}</div><div class="metric-note">筛选范围内的物料</div></div><div class="metric-icon"><el-icon><Files /></el-icon></div></div>
-      <div class="metric-card"><div><div class="metric-label">库存预警</div><div class="metric-value">{{ lowCount }}</div><div class="metric-note">结存小于或等于安全线</div></div><div class="metric-icon"><el-icon><Warning /></el-icon></div></div>
-      <div class="metric-card"><div><div class="metric-label">库存成本</div><div class="metric-value">{{ money(totalValue) }}</div><div class="metric-note">按最新参考成本计算</div></div><div class="metric-icon"><el-icon><Wallet /></el-icon></div></div>
-    </div>
-    <ListToolbar v-model="keyword" placeholder="搜索物料编码、名称或规格" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load" />
+    <ListToolbar
+      v-model="keyword"
+      placeholder="搜索物料编码、名称或规格"
+      :filter-count="activeFilterCount"
+      :loading="loading"
+      @search="load"
+      @filter="filterDrawer = true"
+      @refresh="load"
+    />
     <div class="content-card">
-      <div class="card-head"><h3>库存台账</h3><span>实时结存来自库存流水</span></div>
+      <div class="card-head">
+        <h3>{{ pageTitle }}</h3>
+      </div>
       <el-table v-loading="loading" :data="rows">
-        <el-table-column label="物料" min-width="210"><template #default="{ row }"><div class="sku-cell"><strong>{{ row.name }}</strong><span class="mono">{{ row.sku }} · {{ row.spec || '无规格' }}</span></div></template></el-table-column>
-        <el-table-column label="类型" width="85"><template #default="{ row }"><el-tag :type="row.kind === 'PRODUCT' ? 'primary' : 'info'" effect="plain" size="small">{{ row.kind === 'PRODUCT' ? '产品' : '零件' }}</el-tag></template></el-table-column>
-        <el-table-column label="实时结存" width="125" align="right"><template #default="{ row }"><b :class="row.low_stock ? 'number-negative' : 'number-positive'">{{ qty(row.stock_qty) }}</b> {{ row.unit }}</template></el-table-column>
-        <el-table-column label="安全库存" width="100" align="right"><template #default="{ row }">{{ qty(row.min_stock) }}</template></el-table-column>
-        <el-table-column label="库存水位" min-width="180"><template #default="{ row }"><div class="stock-meter"><div class="stock-meter-label"><span>{{ row.low_stock ? '低库存' : '充足' }}</span><span>{{ Math.round(Math.min(100, row.stock_qty / Math.max(row.min_stock * 2, 1) * 100)) }}%</span></div><el-progress :percentage="Math.round(Math.min(100, row.stock_qty / Math.max(row.min_stock * 2, 1) * 100))" :show-text="false" :stroke-width="6" :color="row.low_stock ? '#e05757' : '#39aa7b'" /></div></template></el-table-column>
-        <el-table-column label="参考成本" width="110" align="right"><template #default="{ row }">{{ money(row.cost_price) }}</template></el-table-column>
-        <el-table-column label="库存金额" width="125" align="right"><template #default="{ row }"><strong>{{ money(row.stock_qty * row.cost_price) }}</strong></template></el-table-column>
+        <el-table-column label="物料" min-width="210">
+          <template #default="{ row }">
+            <div class="sku-cell">
+              <strong>{{ row.name }}</strong><span class="mono">{{ row.sku }} · {{ row.spec || '无规格' }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="实时结存" width="125" align="right">
+          <template #default="{ row }">
+            <b :class="row.low_stock ? 'number-negative' : 'number-positive'">
+              {{ displayQty(row.stock_qty) }}
+            </b>
+            {{ row.unit }}
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="半成品" width="105" align="right">
+          <template #default="{ row }">
+            <b :class="row.semi_finished_qty ? 'number-positive' : ''">
+              {{ productQty(row.semi_finished_qty) }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="外协在途" width="105" align="right">
+          <template #default="{ row }">
+            <b :class="row.processing_qty ? 'number-positive' : ''">
+              {{ productQty(row.processing_qty) }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="客单预留" width="105" align="right">
+          <template #default="{ row }">
+            {{ productQty(row.reserved_qty) }}
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="可用库存" width="105" align="right">
+          <template #default="{ row }">
+            <b :class="row.available_qty > 0 ? 'number-positive' : ''">
+              {{ productQty(Math.max(row.available_qty, 0)) }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column width="125" align="right">
+          <template #header>
+            <span>订单缺口</span>
+            <el-tooltip
+              content="按全部未完成客单汇总；0 表示订单已被库存或在途覆盖，负数表示仍需采购或生产。"
+              placement="top"
+            >
+              <el-icon class="column-help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <b :class="shortageValue(row) > 0 ? 'number-negative' : ''">
+              {{ displayQty(gapValue(row)) }}
+            </b>
+            {{ row.unit }}
+          </template>
+        </el-table-column>
+        <el-table-column label="安全库存" width="100" align="right">
+          <template #default="{ row }">
+            {{ displayQty(row.min_stock) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="库存水位" min-width="180">
+          <template #default="{ row }">
+            <div class="stock-meter">
+              <div class="stock-meter-label">
+                <span>{{ stockLevelLabel(row) }}</span>
+                <span>{{ stockLevelPercent(row) }}%</span>
+              </div>
+              <el-progress
+                :percentage="stockLevelPercent(row)"
+                :show-text="false"
+                :stroke-width="6"
+                :color="row.low_stock ? '#e05757' : '#39aa7b'"
+              />
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="参考成本" width="110" align="right">
+          <template #default="{ row }">
+            {{ money(row.cost_price) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="库存金额" width="125" align="right">
+          <template #default="{ row }">
+            <strong>{{ money(row.stock_qty * row.cost_price) }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PART'" label="操作" width="90" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openInbound(row)">
+              入库
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
     <el-drawer v-model="filterDrawer" title="筛选库存" size="min(420px, 92vw)">
       <el-form label-position="top">
-        <el-form-item label="物料类型"><el-select v-model="filters.kind" clearable placeholder="全部类型" style="width:100%"><el-option label="零件" value="PART" /><el-option label="产品" value="PRODUCT" /></el-select></el-form-item>
-        <el-form-item label="库存状态"><el-select v-model="filters.stockStatus" clearable placeholder="全部状态" style="width:100%"><el-option label="库存预警" value="LOW" /><el-option label="库存正常" value="NORMAL" /></el-select></el-form-item>
-        <div class="filter-drawer-footer"><el-button @click="resetFilters">重置</el-button><el-button type="primary" @click="applyFilters">应用筛选</el-button></div>
+        <el-form-item label="库存状态">
+          <el-select v-model="filters.stockStatus" clearable placeholder="全部状态" style="width:100%">
+            <el-option label="库存预警" value="LOW" /><el-option label="库存正常" value="NORMAL" />
+          </el-select>
+        </el-form-item>
+        <div class="filter-drawer-footer">
+          <el-button @click="resetFilters">
+            重置
+          </el-button><el-button type="primary" @click="applyFilters">
+            应用筛选
+          </el-button>
+        </div>
       </el-form>
+    </el-drawer>
+
+    <el-drawer
+      v-model="inboundDrawer"
+      title="零件快捷入库"
+      size="min(520px, 96vw)"
+    >
+      <el-descriptions v-if="activePart" :column="1" border>
+        <el-descriptions-item label="零件">
+          {{ activePart.sku }} · {{ activePart.name }}
+        </el-descriptions-item>
+        <el-descriptions-item label="当前库存">
+          {{ displayQty(activePart.stock_qty) }} {{ activePart.unit }}
+        </el-descriptions-item>
+        <el-descriptions-item label="生产总需求">
+          {{ displayQty(activePart.order_required_qty) }} {{ activePart.unit }}
+        </el-descriptions-item>
+        <el-descriptions-item label="当前缺口">
+          <b :class="shortageValue(activePart) > 0 ? 'number-negative' : ''">
+            {{ displayQty(gapValue(activePart)) }} {{ activePart.unit }}
+          </b>
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-form label-position="top" style="margin-top: 20px">
+        <el-form-item label="本次入库数量" required>
+          <el-input-number
+            v-model="inboundForm.quantity"
+            :min="0.001"
+            :precision="3"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="入库单位成本">
+          <el-input-number
+            v-model="inboundForm.unit_cost"
+            :min="0"
+            :precision="2"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="inboundForm.notes" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <div class="drawer-footer">
+        <el-button @click="inboundDrawer = false">
+          取消
+        </el-button>
+        <el-button type="primary" :loading="saving" @click="submitInbound">
+          确认入库并生成入库单
+        </el-button>
+      </div>
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.column-help {
+  margin-left: 5px;
+  color: var(--el-text-color-secondary);
+  vertical-align: -2px;
+  cursor: help;
+}
+</style>

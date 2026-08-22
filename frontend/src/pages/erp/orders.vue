@@ -1,111 +1,899 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, money, qty, statusMap } from './api'
-import ListToolbar from './components/ListToolbar.vue'
+import { ElMessage, ElMessageBox } from "element-plus"
+import { computed, onMounted, reactive, ref } from "vue"
+import { useRouter } from "vue-router"
+import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
+import ListToolbar from "./components/ListToolbar.vue"
+import QuantityInput from "./components/QuantityInput.vue"
+
+const router = useRouter()
 
 const loading = ref(false)
 const saving = ref(false)
 const drawer = ref(false)
 const filterDrawer = ref(false)
+const workflowDrawer = ref(false)
+const workflowLoading = ref(false)
+const workflow = ref<any>(null)
+const returnHistory = ref<any[]>([])
+const returnSaving = ref(false)
+const shipmentDrawer = ref(false)
+const shipmentForm = reactive({ items: [] as any[], notes: "" })
+const activeOrder = ref<any>(null)
+const activeDetailTab = ref("overview")
 const rows = ref<any[]>([])
 const products = ref<any[]>([])
-const keyword = ref('')
-const filters = reactive({ status: '', dateRange: [] as string[] })
-const form = reactive({ customer_name: '', customer_phone: '', customer_address: '', order_date: new Date().toISOString().slice(0, 10), notes: '', items: [] as any[] })
+const keyword = ref("")
+const filters = reactive({ status: "", dateRange: [] as string[] })
+const today = () => new Date().toISOString().slice(0, 10)
+const returnForm = reactive({ occurred_date: today(), notes: "", items: [] as any[] })
+function emptyOrderForm() {
+  return {
+    customer_name: "",
+    customer_phone: "",
+    customer_address: "",
+    order_date: today(),
+    required_date: today(),
+    notes: "",
+    items: [] as any[]
+  }
+}
+const form = reactive(emptyOrderForm())
 const total = computed(() => form.items.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_price || 0), 0))
 const activeFilterCount = computed(() => Number(Boolean(filters.status)) + Number(filters.dateRange.length === 2))
-
-async function load() {
-  loading.value = true
-  const params = new URLSearchParams()
-  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
-  if (filters.status) params.set('status', filters.status)
-  if (filters.dateRange.length === 2) {
-    params.set('start_date', filters.dateRange[0])
-    params.set('end_date', filters.dateRange[1])
+const workflowNextAction = computed(() => {
+  const labels: Record<string, string> = {
+    CONFIRM: "确认客单后检查产品库存",
+    PURCHASE: "采购缺口零件并办理入库",
+    PRODUCE: "零件齐套后完成生产入库",
+    SHIP: "可按整单、单产品或部分数量出库",
+    CONFIGURE_BOM: "补充缺货产品的 BOM 配置"
   }
-  try { [rows.value, products.value] = await Promise.all([api(`/api/orders?${params}`), api('/api/products')]) }
-  catch (error: any) { ElMessage.error(error.message) }
-  finally { loading.value = false }
+  if (workflow.value?.status === "FULFILLED") return "订单已全部出库"
+  return labels[workflow.value?.next_action] || "系统正在自动计算剩余需求"
+})
+const orderedQuantity = computed(() => activeOrder.value?.items?.reduce((sum: number, line: any) => sum + Number(line.quantity || 0), 0) || 0)
+const activeStatusMeta = computed(() => {
+  const nextAction = workflow.value?.next_action
+  if (activeOrder.value?.status === "WAITING_MATERIALS") {
+    if (nextAction === "PURCHASE") return { label: "零件待购买", type: "warning" }
+    if (nextAction === "CONFIGURE_BOM") return { label: "待配置 BOM", type: "danger" }
+    if (nextAction === "PRODUCE") return { label: "产品待生产", type: "primary" }
+  }
+  return statusMap[activeOrder.value?.status] || { label: activeOrder.value?.status || "-", type: "info" }
+})
+
+async function load(silent = false) {
+  if (!silent) loading.value = true
+  const params = new URLSearchParams()
+  if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
+  if (filters.status) params.set("status", filters.status)
+  if (filters.dateRange.length === 2) {
+    params.set("start_date", filters.dateRange[0])
+    params.set("end_date", filters.dateRange[1])
+  }
+  try {
+    [rows.value, products.value] = await Promise.all([api(`/api/orders?${params}`), api("/api/products")])
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    if (!silent) loading.value = false
+  }
 }
-function applyFilters() { filterDrawer.value = false; load() }
-function resetFilters() { filters.status = ''; filters.dateRange = []; applyFilters() }
+function applyFilters() {
+  filterDrawer.value = false
+  load()
+}
+function resetFilters() {
+  filters.status = ""
+  filters.dateRange = []
+  applyFilters()
+}
 function openCreate() {
-  Object.assign(form, { customer_name: '', customer_phone: '', customer_address: '', order_date: new Date().toISOString().slice(0, 10), notes: '', items: [] })
-  form.items.push({ product_id: undefined, quantity: 1, unit_price: 0 })
+  Object.assign(form, emptyOrderForm())
+  form.items.push({ product_id: undefined, quantity: 1, reference_price: 0, unit_price: 0 })
   drawer.value = true
 }
-function addLine() { form.items.push({ product_id: undefined, quantity: 1, unit_price: 0 }) }
-function productChanged(line: any) { const product = products.value.find(x => x.id === line.product_id); line.unit_price = product?.sale_price || 0 }
+function addLine() {
+  form.items.push({ product_id: undefined, quantity: 1, reference_price: 0, unit_price: 0 })
+}
+function productChanged(line: any) {
+  const product = products.value.find(x => x.id === line.product_id)
+  line.reference_price = product?.sale_price || 0
+  line.unit_price = product?.sale_price || 0
+}
+function disableRequiredDate(value: Date) {
+  return value < new Date(`${form.order_date}T00:00:00`)
+}
 async function save() {
-  if (!form.customer_name.trim()) return ElMessage.warning('请输入客户名称')
-  if (!form.items.length || form.items.some(line => !line.product_id || line.quantity <= 0)) return ElMessage.warning('请完整填写产品明细')
+  if (!form.customer_name.trim()) return ElMessage.warning("请输入客户名称")
+  if (!form.required_date || form.required_date < form.order_date) return ElMessage.warning("请选择不早于订单日期的要求交期")
+  if (!form.items.length || form.items.some(line => !line.product_id || line.quantity <= 0)) return ElMessage.warning("请完整填写产品明细")
   saving.value = true
   try {
-    await api('/api/orders', { method: 'POST', body: JSON.stringify(form) })
-    ElMessage.success('客单已创建'); drawer.value = false; await load()
-  } catch (error: any) { ElMessage.error(error.message) }
-  finally { saving.value = false }
+    await api("/api/orders", { method: "POST", body: JSON.stringify(form) })
+    ElMessage.success("客单已创建")
+    drawer.value = false
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    saving.value = false
+  }
 }
-async function action(row: any, type: 'confirm' | 'fulfill' | 'cancel') {
-  const labels = { confirm: '确认客单', fulfill: '确认出库并扣减成品库存', cancel: '取消客单' }
+async function openWorkflow(row: any) {
+  activeOrder.value = row
+  activeDetailTab.value = "overview"
+  workflowDrawer.value = true
+  workflowLoading.value = true
   try {
-    await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, '客单操作', { type: type === 'cancel' ? 'warning' : 'info' })
-    await api(`/api/orders/${row.id}/${type}`, { method: 'POST' })
-    ElMessage.success(labels[type] + '成功'); await load()
-  } catch (error: any) { if (error !== 'cancel') ElMessage.error(error.message) }
+    const [availability, history] = await Promise.all([
+      api(`/api/orders/${row.id}/availability`),
+      api(`/api/orders/${row.id}/returns`)
+    ])
+    workflow.value = availability
+    returnHistory.value = history
+    returnForm.occurred_date = today()
+    returnForm.notes = ""
+    returnForm.items = row.items.map((line: any) => ({
+      order_item_id: line.id,
+      product_name: line.product_name,
+      product_sku: line.product_sku,
+      unit: products.value.find(product => product.id === line.product_id)?.unit || "件",
+      shipped_quantity: Number(line.shipped_quantity || 0),
+      returned_quantity: Number(line.returned_quantity || 0),
+      returnable_quantity: Number(line.returnable_quantity || 0),
+      quantity: 0,
+      restock: true
+    }))
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    workflowLoading.value = false
+  }
+}
+async function submitReturn() {
+  const items = returnForm.items
+    .filter(line => Number(line.quantity) > 0)
+    .map(line => ({
+      order_item_id: line.order_item_id,
+      quantity: Number(line.quantity),
+      restock: Boolean(line.restock)
+    }))
+  if (!items.length) return ElMessage.warning("请填写至少一项退货数量")
+  returnSaving.value = true
+  try {
+    await api(`/api/orders/${activeOrder.value.id}/returns`, {
+      method: "POST",
+      body: JSON.stringify({ items, occurred_date: returnForm.occurred_date, notes: returnForm.notes })
+    })
+    ElMessage.success("退货已登记；勾选入库的产品已生成退货入库单")
+    await load(true)
+    const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
+    if (refreshed) await openWorkflow(refreshed)
+    activeDetailTab.value = "returns"
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    returnSaving.value = false
+  }
+}
+async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
+  const labels = {
+    confirm: "确认客单、预留库存并计算 ETA",
+    "ship-all": "将全部剩余产品出库",
+    cancel: "取消客单"
+  }
+  try {
+    await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, "客单操作", {
+      type: type === "cancel" ? "warning" : "info"
+    })
+    await api(`/api/orders/${row.id}/${type}`, { method: "POST" })
+    ElMessage.success(`${labels[type]}成功`)
+    await load()
+    if (workflowDrawer.value && activeOrder.value?.id === row.id) {
+      await openWorkflow(rows.value.find(x => x.id === row.id) || row)
+    }
+  } catch (error: any) {
+    if (error !== "cancel") ElMessage.error(error.message)
+  }
+}
+function openShipment(row: any) {
+  activeOrder.value = row
+  shipmentForm.items = row.items
+    .filter((line: any) => Number(line.remaining_quantity) > 0)
+    .map((line: any) => ({
+      order_item_id: line.id,
+      product_name: line.product_name,
+      remaining_quantity: Number(line.remaining_quantity),
+      reserved_quantity: Number(line.reserved_quantity),
+      quantity: Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
+    }))
+  shipmentForm.notes = ""
+  shipmentDrawer.value = true
+}
+function openStockDocument(row: any) {
+  workflowDrawer.value = false
+  router.push({ path: "/operations/stock-operations", query: { order_id: row.id } })
+}
+function viewOutboundDocuments(row: any) {
+  workflowDrawer.value = false
+  router.push({
+    path: "/logs/outbound-documents",
+    query: { keyword: row.order_no, scope: "PRODUCT" }
+  })
+}
+function fillShipmentLine(line: any) {
+  line.quantity = Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
+}
+async function submitShipment() {
+  const items = shipmentForm.items
+    .filter(line => Number(line.quantity) > 0)
+    .map(line => ({ order_item_id: line.order_item_id, quantity: Number(line.quantity) }))
+  if (!items.length) return ElMessage.warning("请填写至少一项出库数量")
+  try {
+    await api(`/api/orders/${activeOrder.value.id}/ship`, {
+      method: "POST",
+      body: JSON.stringify({ items, notes: shipmentForm.notes })
+    })
+    ElMessage.success("出库成功，销售出库单已自动生成")
+    shipmentDrawer.value = false
+    await load()
+    const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
+    if (refreshed && workflowDrawer.value) await openWorkflow(refreshed)
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  }
 }
 onMounted(load)
+useLiveRefresh(async () => {
+  await load(true)
+  if (workflowDrawer.value && activeOrder.value) await openWorkflow(activeOrder.value)
+})
 </script>
 
 <template>
   <div class="erp-page orders-page">
-    <ListToolbar v-model="keyword" placeholder="搜索客单号、客户名称或电话" :filter-count="activeFilterCount" :loading="loading" @search="load" @filter="filterDrawer=true" @refresh="load">
-      <el-button type="primary" @click="openCreate"><el-icon><Plus /></el-icon>新建客单</el-button>
+    <ListToolbar
+      v-model="keyword"
+      placeholder="搜索客单号、客户名称或电话"
+      :filter-count="activeFilterCount"
+      :loading="loading"
+      @search="load"
+      @filter="filterDrawer = true"
+      @refresh="load"
+    >
+      <el-button type="primary" @click="openCreate">
+        <el-icon><Plus /></el-icon>新建客单
+      </el-button>
     </ListToolbar>
     <div class="content-card">
-      <div class="card-head"><h3>客户订单</h3><span>出库后自动写入库存流水</span></div>
+      <div class="card-head">
+        <h3>客户订单</h3>
+      </div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无符合条件的客户订单">
-        <el-table-column type="expand"><template #default="{ row }"><div style="padding:8px 45px 18px"><el-descriptions :column="3" size="small" border><el-descriptions-item label="联系电话">{{ row.customer_phone || '-' }}</el-descriptions-item><el-descriptions-item label="送货地址" :span="2">{{ row.customer_address || '-' }}</el-descriptions-item><el-descriptions-item label="备注" :span="3">{{ row.notes || '-' }}</el-descriptions-item></el-descriptions><el-table :data="row.items" size="small" border style="margin-top:12px"><el-table-column prop="product_sku" label="产品编码" /><el-table-column prop="product_name" label="产品名称" /><el-table-column label="数量" align="right"><template #default="{ row: line }">{{ qty(line.quantity) }}</template></el-table-column><el-table-column label="单价" align="right"><template #default="{ row: line }">{{ money(line.unit_price) }}</template></el-table-column><el-table-column label="小计" align="right"><template #default="{ row: line }">{{ money(line.line_total) }}</template></el-table-column></el-table></div></template></el-table-column>
-        <el-table-column label="客单号" min-width="185"><template #default="{ row }"><span class="mono">{{ row.order_no }}</span></template></el-table-column>
-        <el-table-column label="客户" min-width="170"><template #default="{ row }"><div class="sku-cell"><strong>{{ row.customer_name }}</strong><span>{{ row.customer_phone || '未留电话' }}</span></div></template></el-table-column>
+        <el-table-column label="客单号" min-width="185">
+          <template #default="{ row }">
+            <span class="mono">{{ row.order_no }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="客户" min-width="170">
+          <template #default="{ row }">
+            <div class="sku-cell">
+              <strong>{{ row.customer_name }}</strong><span>{{ row.customer_phone || '未留电话' }}</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="order_date" label="订单日期" width="115" />
-        <el-table-column label="产品数" width="90" align="right"><template #default="{ row }">{{ row.items.length }} 项</template></el-table-column>
-        <el-table-column label="订单金额" width="125" align="right"><template #default="{ row }"><strong>{{ money(row.total_amount) }}</strong></template></el-table-column>
-        <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="statusMap[row.status]?.type as any" size="small">{{ statusMap[row.status]?.label || row.status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" min-width="205" fixed="right"><template #default="{ row }"><el-button v-if="row.status === 'DRAFT'" link type="primary" @click="action(row,'confirm')">确认</el-button><el-button v-if="['DRAFT','CONFIRMED'].includes(row.status)" link type="success" @click="action(row,'fulfill')">出库</el-button><el-button v-if="['DRAFT','CONFIRMED'].includes(row.status)" link type="danger" @click="action(row,'cancel')">取消</el-button><span v-if="['FULFILLED','CANCELLED'].includes(row.status)" class="muted">已完结</span></template></el-table-column>
+        <el-table-column prop="required_date" label="要求交期" width="115" />
+        <el-table-column label="预计完成" width="125">
+          <template #default="{ row }">
+            <div v-if="row.estimated_completion_at" class="sku-cell">
+              <strong :class="row.eta_reliable ? '' : 'number-negative'">{{ formatDate(row.estimated_completion_at) }}</strong>
+              <span>{{ row.eta_reliable ? '当前可承诺' : '仅机器排程参考' }}</span>
+            </div><span v-else class="muted">待计算 / 待配置产能</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="产品数" width="90" align="right">
+          <template #default="{ row }">
+            {{ row.items.length }} 项
+          </template>
+        </el-table-column>
+        <el-table-column label="订单金额" width="125" align="right">
+          <template #default="{ row }">
+            <strong>{{ money(row.total_amount) }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag :type="statusMap[row.status]?.type as any" size="small">
+              {{ statusMap[row.status]?.label || row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" min-width="160" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openWorkflow(row)">
+              详情
+            </el-button>
+            <el-button v-if="row.status === 'DRAFT'" link @click="action(row, 'confirm')">
+              确认
+            </el-button>
+            <el-button
+              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(row.status)"
+              link
+              type="success"
+              @click="openStockDocument(row)"
+            >
+              {{ row.status === 'PARTIALLY_SHIPPED' ? '继续开出库单' : '开出库单' }}
+            </el-button>
+            <el-button
+              v-if="row.status === 'FULFILLED'"
+              link
+              type="primary"
+              @click="viewOutboundDocuments(row)"
+            >
+              查看出库单
+            </el-button>
+            <span v-if="row.status === 'CANCELLED'" class="muted">已取消</span>
+            <el-button
+              v-if="!['DRAFT', 'READY_TO_SHIP', 'PARTIALLY_SHIPPED', 'FULFILLED', 'CANCELLED'].includes(row.status)"
+              link
+              type="danger"
+              @click="action(row, 'cancel')"
+            >
+              取消
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
     <el-drawer v-model="filterDrawer" title="筛选客户订单" size="min(420px, 92vw)">
       <el-form label-position="top">
-        <el-form-item label="订单状态"><el-select v-model="filters.status" clearable placeholder="全部状态" style="width:100%"><el-option v-for="(meta, key) in statusMap" :key="key" :label="meta.label" :value="key" /></el-select></el-form-item>
-        <el-form-item label="订单日期"><el-date-picker v-model="filters.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" range-separator="至" style="width:100%" /></el-form-item>
-        <div class="filter-drawer-footer"><el-button @click="resetFilters">重置</el-button><el-button type="primary" @click="applyFilters">应用筛选</el-button></div>
+        <el-form-item label="订单状态">
+          <el-select v-model="filters.status" clearable placeholder="全部状态" style="width:100%">
+            <el-option v-for="(meta, key) in statusMap" :key="key" :label="meta.label" :value="key" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="订单日期">
+          <el-date-picker
+            v-model="filters.dateRange"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            range-separator="至"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <div class="filter-drawer-footer">
+          <el-button @click="resetFilters">
+            重置
+          </el-button><el-button type="primary" @click="applyFilters">
+            应用筛选
+          </el-button>
+        </div>
       </el-form>
+    </el-drawer>
+
+    <el-drawer v-model="workflowDrawer" class="order-workspace-drawer" size="min(1040px, 98vw)">
+      <template #header>
+        <div class="order-workspace-header">
+          <div class="order-workspace-title">
+            <strong>客单工作区</strong>
+            <span class="mono">{{ activeOrder?.order_no || '' }}</span>
+            <el-tag
+              v-if="activeOrder"
+              :type="activeStatusMeta.type as any"
+              size="small"
+            >
+              {{ activeStatusMeta.label }}
+            </el-tag>
+          </div>
+          <div v-if="activeOrder" class="order-workspace-actions">
+            <el-button
+              v-if="activeOrder.status === 'DRAFT'"
+              type="primary"
+              @click="action(activeOrder, 'confirm')"
+            >
+              确认并计算 ETA
+            </el-button>
+            <el-button
+              v-if="['READY_TO_SHIP', 'PARTIALLY_SHIPPED'].includes(activeOrder.status)"
+              type="success"
+              @click="openStockDocument(activeOrder)"
+            >
+              {{ activeOrder.status === 'PARTIALLY_SHIPPED' ? '继续开出库单' : '开出库单' }}
+            </el-button>
+            <el-button
+              v-if="activeOrder.status === 'FULFILLED'"
+              type="primary"
+              @click="viewOutboundDocuments(activeOrder)"
+            >
+              查看出库单
+            </el-button>
+            <el-button
+              v-if="!['FULFILLED', 'CANCELLED'].includes(activeOrder.status)"
+              plain
+              type="danger"
+              @click="action(activeOrder, 'cancel')"
+            >
+              取消客单
+            </el-button>
+          </div>
+        </div>
+      </template>
+      <div v-loading="workflowLoading" class="order-workspace-body">
+        <el-tabs v-model="activeDetailTab" class="order-detail-tabs">
+          <el-tab-pane name="overview">
+            <template #label>
+              <span class="detail-tab-label">订单概况</span>
+            </template>
+            <div v-if="activeOrder" class="detail-page">
+              <div class="order-overview-strip">
+                <div>
+                  <span>当前状态</span>
+                  <strong>{{ activeStatusMeta.label }}</strong>
+                </div>
+                <div><span>要求交期</span><strong>{{ activeOrder.required_date }}</strong></div>
+                <div>
+                  <span>预计完成</span>
+                  <strong :class="workflow?.eta_reliable ? '' : 'number-negative'">{{ formatDate(workflow?.estimated_completion_at) }}</strong>
+                </div>
+                <div><span>产品数量</span><strong>{{ productQty(orderedQuantity) }}</strong></div>
+                <div><span>订单金额</span><strong>{{ money(activeOrder.total_amount) }}</strong></div>
+              </div>
+              <div class="detail-section-head">
+                <strong>客户与交付信息</strong>
+              </div>
+              <el-descriptions :column="2" border>
+                <el-descriptions-item label="客户">
+                  {{ activeOrder.customer_name }}
+                </el-descriptions-item><el-descriptions-item label="联系电话">
+                  {{ activeOrder.customer_phone || '-' }}
+                </el-descriptions-item><el-descriptions-item label="订单日期">
+                  {{ activeOrder.order_date }}
+                </el-descriptions-item><el-descriptions-item label="要求交期">
+                  <b>{{ activeOrder.required_date }}</b>
+                </el-descriptions-item><el-descriptions-item label="送货地址" :span="2">
+                  {{ activeOrder.customer_address || '-' }}
+                </el-descriptions-item><el-descriptions-item label="备注" :span="2">
+                  {{ activeOrder.notes || '-' }}
+                </el-descriptions-item>
+              </el-descriptions>
+              <div v-if="workflow" class="detail-section-head">
+                <strong>当前处理建议</strong>
+              </div>
+              <el-alert
+                v-if="workflow && !workflow.eta_reliable"
+                :title="workflow.eta_note || '当前预计完成时间缺少可靠生产条件，仅供内部参考。'"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
+              <div v-if="workflow" class="next-action-card">
+                <div class="next-action-icon">
+                  <el-icon><Guide /></el-icon>
+                </div>
+                <div><span>下一步</span><strong>{{ workflowNextAction }}</strong></div>
+                <el-button
+                  text
+                  type="primary"
+                  @click="activeDetailTab = ['PURCHASE', 'CONFIGURE_BOM'].includes(workflow.next_action)
+                    ? 'materials'
+                    : 'inventory'"
+                >
+                  查看相关信息
+                </el-button>
+              </div>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="pricing">
+            <template #label>
+              <span class="detail-tab-label">产品与价格 <el-badge :value="activeOrder?.items?.length || 0" /></span>
+            </template>
+            <div v-if="activeOrder" class="detail-page">
+              <div class="detail-section-head detail-section-head-first">
+                <strong>成交明细</strong>
+              </div>
+              <el-table :data="activeOrder.items" border>
+                <el-table-column label="产品" min-width="210">
+                  <template #default="{ row }">
+                    <div class="sku-cell">
+                      <strong>{{ row.product_name }}</strong><span>{{ row.product_sku }}</span>
+                    </div>
+                  </template>
+                </el-table-column><el-table-column label="数量" width="90" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="参考价" width="120" align="right">
+                  <template #default="{ row }">
+                    {{ money(row.reference_price) }}
+                  </template>
+                </el-table-column><el-table-column label="本单价格" width="125" align="right">
+                  <template #default="{ row }">
+                    <b>{{ money(row.unit_price) }}</b>
+                  </template>
+                </el-table-column><el-table-column label="折扣" width="90" align="right">
+                  <template #default="{ row }">
+                    <el-tag :type="row.discount_rate < 100 ? 'warning' : 'info'" size="small" effect="plain">
+                      {{ row.discount_rate }}%
+                    </el-tag>
+                  </template>
+                </el-table-column><el-table-column label="优惠" width="120" align="right">
+                  <template #default="{ row }">
+                    {{ money(row.discount_amount) }}
+                  </template>
+                </el-table-column><el-table-column label="小计" width="125" align="right">
+                  <template #default="{ row }">
+                    <b>{{ money(row.line_total) }}</b>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div class="order-price-total">
+                <span>客单成交总额</span><strong>{{ money(activeOrder.total_amount) }}</strong>
+              </div>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="inventory">
+            <template #label>
+              <span class="detail-tab-label">库存与交付</span>
+            </template>
+            <div v-if="workflow" class="detail-page">
+              <div class="detail-section-head detail-section-head-first">
+                <strong>履约进度</strong>
+              </div>
+              <div class="workflow-panel">
+                <div class="workflow-steps">
+                  <div class="workflow-step active">
+                    1 接单
+                  </div><div class="workflow-step" :class="{ active: workflow.status !== 'DRAFT' }">
+                    2 检查产品库存
+                  </div><div
+                    class="workflow-step"
+                    :class="{
+                      active: [
+                        'WAITING_MATERIALS',
+                        'READY_TO_SHIP',
+                        'PARTIALLY_SHIPPED',
+                        'FULFILLED'
+                      ].includes(workflow.status)
+                    }"
+                  >
+                    3 零件采购/备料
+                  </div><div class="workflow-step" :class="{ active: ['READY_TO_SHIP', 'PARTIALLY_SHIPPED', 'FULFILLED'].includes(workflow.status) }">
+                    4 生产并预留
+                  </div><div class="workflow-step" :class="{ active: workflow.status === 'FULFILLED' }">
+                    5 产品出库
+                  </div>
+                </div><div class="workflow-summary">
+                  <el-tag :type="activeStatusMeta.type as any">
+                    {{ activeStatusMeta.label }}
+                  </el-tag><span>{{ workflowNextAction }}</span>
+                </div>
+              </div>
+              <el-alert
+                v-if="workflow.missing_bom.length"
+                :title="`有 ${workflow.missing_bom.length} 个缺货产品未配置 BOM，暂不能自动生产。`"
+                type="error"
+                :closable="false"
+                show-icon
+              />
+              <div class="detail-section-head">
+                <strong>产品库存与预留</strong>
+              </div>
+              <el-table :data="workflow.product_lines" border empty-text="暂无产品库存信息">
+                <el-table-column label="产品" min-width="220">
+                  <template #default="{ row }">
+                    <div class="sku-cell">
+                      <strong>{{ row.name }}</strong><span>{{ row.sku }}</span>
+                    </div>
+                  </template>
+                </el-table-column><el-table-column label="交期优先级" width="140" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="row.waiting_for_earlier_orders ? 'warning' : 'success'" size="small">
+                      第 {{ row.priority_rank }} / {{ row.priority_total }} 位
+                    </el-tag>
+                  </template>
+                </el-table-column><el-table-column label="订单数量" width="120" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.ordered_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="已出库" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.shipped_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="剩余" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.remaining_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="当前成品" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.current_stock) }}
+                  </template>
+                </el-table-column><el-table-column label="其他客单占用" width="120" align="right">
+                  <template #default="{ row }">
+                    <b :class="row.reserved_by_other_orders ? 'number-negative' : ''">
+                      {{ productQty(row.reserved_by_other_orders) }}
+                    </b>
+                  </template>
+                </el-table-column><el-table-column label="已预留" width="105" align="right">
+                  <template #default="{ row }">
+                    <b class="number-positive">{{ productQty(row.reserved_quantity) }}</b>
+                  </template>
+                </el-table-column><el-table-column label="半成品/在途" width="125" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.pipeline_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="需生产" width="120" align="right">
+                  <template #default="{ row }">
+                    <b :class="row.production_required ? 'number-negative' : ''">{{ productQty(row.production_required) }}</b>
+                  </template>
+                </el-table-column><el-table-column label="预计满足" width="170">
+                  <template #default="{ row }">
+                    <div class="sku-cell">
+                      <strong :class="row.eta_reliable ? '' : 'number-negative'">
+                        {{ formatDate(row.estimated_completion_at) }}
+                      </strong>
+                      <span>
+                        {{ row.eta_note || (row.eta_reliable ? '可承诺' : '暂不可承诺') }}
+                      </span>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="materials">
+            <template #label>
+              <span class="detail-tab-label">零件与备料 <el-badge v-if="workflow?.material_lines?.length" :value="workflow.material_lines.length" /></span>
+            </template>
+            <div v-if="workflow" class="detail-page">
+              <div class="detail-section-head detail-section-head-first">
+                <strong>零件需求与采购</strong>
+              </div>
+              <el-alert v-if="workflow.next_action === 'PURCHASE'" title="存在零件缺口：按单采购零件应优先采购，其余零件办理常规入库后可重新检查。" type="warning" :closable="false" show-icon />
+              <el-alert
+                v-else-if="workflow.next_action === 'CONFIGURE_BOM'"
+                title="缺货产品尚未配置 BOM，请先前往产品目录页面补充零件组成。"
+                type="error"
+                :closable="false"
+                show-icon
+              />
+              <el-table :data="workflow.material_lines" border empty-text="当前无需额外生产，或暂无 BOM 零件需求">
+                <el-table-column label="零件" min-width="230">
+                  <template #default="{ row }">
+                    <div class="sku-cell">
+                      <strong>{{ row.name }}</strong><span>{{ row.sku }}</span>
+                    </div>
+                  </template>
+                </el-table-column><el-table-column label="备料方式" width="140">
+                  <template #default="{ row }">
+                    <el-tag :type="row.supply_mode === 'BUY_TO_ORDER' ? 'warning' : 'info'" size="small" effect="plain">
+                      {{ row.supply_mode === 'BUY_TO_ORDER' ? '按单采购' : '库存备料' }}
+                    </el-tag>
+                  </template>
+                </el-table-column><el-table-column label="需要" width="120" align="right">
+                  <template #default="{ row }">
+                    {{ qty(row.required_quantity) }}
+                  </template>
+                </el-table-column><el-table-column label="现有" width="120" align="right">
+                  <template #default="{ row }">
+                    {{ qty(row.available_stock) }}
+                  </template>
+                </el-table-column><el-table-column label="缺口" width="120" align="right">
+                  <template #default="{ row }">
+                    <b :class="row.shortage_quantity ? 'number-negative' : 'number-positive'">{{ qty(row.shortage_quantity) }}</b>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="returns">
+            <template #label>
+              <span class="detail-tab-label">退货 <el-badge v-if="returnHistory.length" :value="returnHistory.length" /></span>
+            </template>
+            <div class="detail-page">
+              <div class="detail-section-head detail-section-head-first">
+                <strong>登记客户退货</strong>
+              </div>
+              <el-alert
+                title="退货数量不能超过该产品累计已出库且尚未退回的数量；只有勾选“退回成品库存”才会增加库存并生成退货入库单。"
+                type="info"
+                :closable="false"
+                show-icon
+              />
+              <el-table :data="returnForm.items" border style="margin-top: 16px" empty-text="该订单没有可登记的产品">
+                <el-table-column label="产品" min-width="220">
+                  <template #default="{ row }">
+                    <div class="sku-cell"><strong>{{ row.product_name }}</strong><span>{{ row.product_sku }}</span></div>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="shipped_quantity" label="累计出库" width="105" align="right" />
+                <el-table-column prop="returned_quantity" label="已退" width="90" align="right" />
+                <el-table-column prop="returnable_quantity" label="可退" width="90" align="right" />
+                <el-table-column label="本次退货" width="145">
+                  <template #default="{ row }">
+                    <QuantityInput v-model="row.quantity" integer :min="0" :max="row.returnable_quantity" :disabled="!row.returnable_quantity" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="库存处理" width="145">
+                  <template #default="{ row }">
+                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">退回成品库存</el-checkbox>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div class="return-form-footer">
+                <el-date-picker v-model="returnForm.occurred_date" type="date" value-format="YYYY-MM-DD" placeholder="退货日期" />
+                <el-input v-model="returnForm.notes" placeholder="退货原因或备注" clearable />
+                <el-button type="primary" :loading="returnSaving" @click="submitReturn">登记退货</el-button>
+              </div>
+              <div class="detail-section-head">
+                <strong>退货记录</strong>
+              </div>
+              <el-table :data="returnHistory" border empty-text="暂无退货记录">
+                <el-table-column prop="return_no" label="退货单号" min-width="185" />
+                <el-table-column label="产品" min-width="190">
+                  <template #default="{ row }">{{ row.product_name }} · {{ row.product_sku }}</template>
+                </el-table-column>
+                <el-table-column label="数量" width="110" align="right">
+                  <template #default="{ row }">{{ productQty(row.quantity) }} {{ row.unit }}</template>
+                </el-table-column>
+                <el-table-column label="库存处理" width="120">
+                  <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>
+                </el-table-column>
+                <el-table-column label="日期" width="120">
+                  <template #default="{ row }">{{ formatDate(row.occurred_at) }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+    </el-drawer>
+
+    <el-drawer v-model="shipmentDrawer" title="订单出库" size="min(620px, 96vw)">
+      <el-alert title="只能使用当前为本订单预留的库存；每次提交都会生成一张独立销售出库单。" type="info" :closable="false" show-icon />
+      <el-table :data="shipmentForm.items" border style="margin-top: 18px">
+        <el-table-column prop="product_name" label="产品" min-width="180" />
+        <el-table-column prop="remaining_quantity" label="剩余" width="90" align="right" />
+        <el-table-column prop="reserved_quantity" label="可出" width="90" align="right" />
+        <el-table-column label="本次出库" width="150">
+          <template #default="{ row }">
+            <QuantityInput
+              v-model="row.quantity"
+              integer
+              :min="0"
+              :max="Math.min(row.remaining_quantity, row.reserved_quantity)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="快捷" width="100">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="fillShipmentLine(row)">
+              本产品全部
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-form label-position="top" style="margin-top: 18px">
+        <el-form-item label="备注">
+          <el-input v-model="shipmentForm.notes" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <div class="drawer-footer">
+        <el-button @click="shipmentDrawer = false">
+          取消
+        </el-button>
+        <el-button type="primary" @click="submitShipment">
+          确认出库并生成出库单
+        </el-button>
+      </div>
     </el-drawer>
 
     <el-drawer v-model="drawer" title="新建客户订单" size="min(760px, 96vw)">
       <el-form label-position="top">
         <div class="form-grid">
-          <el-form-item label="客户名称" required><el-input v-model="form.customer_name" placeholder="公司或联系人名称" /></el-form-item>
-          <el-form-item label="联系电话"><el-input v-model="form.customer_phone" placeholder="手机或座机" /></el-form-item>
-          <el-form-item label="订单日期"><el-date-picker v-model="form.order_date" type="date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
-          <el-form-item label="送货地址"><el-input v-model="form.customer_address" /></el-form-item>
-          <el-form-item class="span-2" label="备注"><el-input v-model="form.notes" type="textarea" :rows="2" /></el-form-item>
+          <el-form-item label="客户名称" required>
+            <el-input v-model="form.customer_name" placeholder="公司或联系人名称" />
+          </el-form-item>
+          <el-form-item label="联系电话">
+            <el-input v-model="form.customer_phone" placeholder="手机或座机" />
+          </el-form-item>
+          <el-form-item label="订单日期">
+            <el-date-picker v-model="form.order_date" type="date" value-format="YYYY-MM-DD" style="width:100%" />
+          </el-form-item>
+          <el-form-item label="要求交期" required>
+            <el-date-picker v-model="form.required_date" type="date" value-format="YYYY-MM-DD" :disabled-date="disableRequiredDate" style="width:100%" />
+          </el-form-item>
+          <el-form-item label="送货地址">
+            <el-input v-model="form.customer_address" />
+          </el-form-item>
+          <el-form-item class="span-2" label="备注">
+            <el-input v-model="form.notes" type="textarea" :rows="2" />
+          </el-form-item>
         </div>
-        <div class="section-label"><span>产品明细</span><el-button size="small" plain @click="addLine"><el-icon><Plus /></el-icon>添加产品</el-button></div>
+        <div class="section-label">
+          <span>产品明细</span><el-button size="small" plain @click="addLine">
+            <el-icon><Plus /></el-icon>添加产品
+          </el-button>
+        </div>
         <el-table :data="form.items" border>
-          <el-table-column label="产品" min-width="260"><template #default="{ row: line }"><el-select v-model="line.product_id" filterable placeholder="选择产品" style="width:100%" @change="productChanged(line)"><el-option v-for="product in products" :key="product.id" :label="`${product.sku} · ${product.name}（库存 ${qty(product.stock_qty)}）`" :value="product.id" :disabled="form.items.some(x => x !== line && x.product_id === product.id)" /></el-select></template></el-table-column>
-          <el-table-column label="数量" width="125"><template #default="{ row: line }"><el-input-number v-model="line.quantity" :min="0.001" :precision="3" :controls="false" style="width:100%" /></template></el-table-column>
-          <el-table-column label="单价" width="135"><template #default="{ row: line }"><el-input-number v-model="line.unit_price" :min="0" :precision="2" :controls="false" style="width:100%" /></template></el-table-column>
-          <el-table-column label="小计" width="105" align="right"><template #default="{ row: line }">{{ money(line.quantity * line.unit_price) }}</template></el-table-column>
-          <el-table-column width="58"><template #default="{ $index }"><el-button link type="danger" @click="form.items.splice($index,1)"><el-icon><Delete /></el-icon></el-button></template></el-table-column>
+          <el-table-column label="产品" min-width="260">
+            <template #default="{ row: line }">
+              <el-select v-model="line.product_id" filterable placeholder="选择产品" style="width:100%" @change="productChanged(line)">
+                <el-option
+                  v-for="product in products"
+                  :key="product.id"
+                  :label="`${product.sku} · ${product.name}（库存 ${productQty(product.stock_qty)}）`"
+                  :value="product.id"
+                  :disabled="form.items.some(x => x !== line && x.product_id === product.id)"
+                />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="数量" width="125">
+            <template #default="{ row: line }">
+              <QuantityInput v-model="line.quantity" integer :min="1" />
+            </template>
+          </el-table-column>
+          <el-table-column label="参考价" width="105" align="right">
+            <template #default="{ row: line }">
+              {{ money(line.reference_price || 0) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="本单价格" width="135">
+            <template #default="{ row: line }">
+              <el-input-number v-model="line.unit_price" :min="0" :precision="2" :controls="false" style="width:100%" />
+            </template>
+          </el-table-column>
+          <el-table-column label="折扣" width="80" align="right">
+            <template #default="{ row: line }">
+              {{ line.reference_price ? Math.round(line.unit_price / line.reference_price * 100) : 100 }}%
+            </template>
+          </el-table-column>
+          <el-table-column label="小计" width="105" align="right">
+            <template #default="{ row: line }">
+              {{ money(line.quantity * line.unit_price) }}
+            </template>
+          </el-table-column>
+          <el-table-column width="58">
+            <template #default="{ $index }">
+              <el-button link type="danger" @click="form.items.splice($index, 1)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
-        <div class="line-total">订单合计 <strong>{{ money(total) }}</strong></div>
-        <div class="drawer-footer"><el-button @click="drawer=false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存为草稿</el-button></div>
+        <div class="line-total">
+          订单合计 <strong>{{ money(total) }}</strong>
+        </div>
+        <div class="drawer-footer">
+          <el-button @click="drawer = false">
+            取消
+          </el-button><el-button type="primary" :loading="saving" @click="save">
+            保存为草稿
+          </el-button>
+        </div>
       </el-form>
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.return-form-footer {
+  display: grid;
+  grid-template-columns: 160px minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+@media (max-width: 760px) {
+  .return-form-footer {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

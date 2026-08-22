@@ -5,11 +5,15 @@ frontend/node_modules/
 frontend/dist/
 .env
 logs/
+/.run.*.log
 backups/
 .erp.pid
 .mysql-data/
 .mysql-undo/
+.mysql-undo-recovery-*/
 .mysql-initialized
 .mysql-local.ini
 .mysql-init.ini
 .DS_Store
+.codeartsdoer/
+.pytest_cache/
