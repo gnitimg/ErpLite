@@ -32,6 +32,36 @@ function openCompletion(row: any) {
   form.notes = ""
   completionDrawer.value = true
 }
+function materialShortageText(row: any) {
+  return (row.material_shortages || [])
+    .map((item: any) => `${item.name}缺 ${productQty(item.shortage_quantity)} ${item.unit}`)
+    .join("；")
+}
+async function startRun(row: any) {
+  if (!row.materials_ready) {
+    void ElMessageBox.alert(
+      `当前不能开工：${materialShortageText(row)}。请先办理零件入库。`,
+      "生产缺料",
+      { type: "warning" }
+    )
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认开始生产“${row.product_name}” ${productQty(row.planned_quantity)} ${row.unit}？确认后将按 BOM 自动办理零件出库。`,
+      "开始生产",
+      { type: "warning" }
+    )
+    await api(`/api/production/runs/${row.id}/status`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "RUNNING" })
+    })
+    ElMessage.success("生产已开始，BOM 零件已自动出库；完工后请审核实际合格数量")
+    await load(true)
+  } catch (error: any) {
+    if (error !== "cancel") ElMessage.error(error.message)
+  }
+}
 async function completeRun() {
   if (!Number.isInteger(Number(form.actual_quantity)) || Number(form.actual_quantity) <= 0) return ElMessage.warning("实际完成数量必须是正整数")
   if (Number(form.actual_quantity) > Number(activeRun.value.planned_quantity)) {
@@ -46,8 +76,8 @@ async function completeRun() {
   try {
     await api(`/api/production/runs/${activeRun.value.id}/complete`, { method: "POST", body: JSON.stringify(form) })
     ElMessage.success(activeRun.value.requires_external_processing
-      ? `审核通过，零件已自动出库，合格品已进入半成品库存，等待${activeRun.value.external_process_name}`
-      : "审核通过，零件已自动出库，合格品已进入成品库存")
+      ? `审核通过，合格品已进入半成品库存，等待${activeRun.value.external_process_name}`
+      : "审核通过，合格品已进入成品库存")
     completionDrawer.value = false
     await load()
   } catch (error: any) {
@@ -112,13 +142,17 @@ useLiveRefresh(() => load(true))
         <el-table-column label="排期来源" width="100">
           <template #default="{ row }">
             <el-tag size="small" :type="row.schedule_locked ? 'warning' : 'info'">
-              {{ row.schedule_locked ? '人工调整' : '系统建议' }}
+              {{ row.source_type === 'REPLENISHMENT'
+                ? '自主补库存'
+                : row.schedule_locked ? '人工排定' : '系统建议' }}
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="['PLANNED', 'RUNNING'].includes(row.status)" link type="primary" @click="openCompletion(row)">
+            <el-button v-if="row.status === 'PLANNED'" link type="primary" @click="startRun(row)">
+              开始生产
+            </el-button><el-button v-else-if="row.status === 'RUNNING'" link type="primary" @click="openCompletion(row)">
               审核入库
             </el-button><span v-else class="muted">{{ row.status === 'COMPLETED' ? '已入库' : '已取消' }}</span>
           </template>

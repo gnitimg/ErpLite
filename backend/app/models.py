@@ -253,6 +253,10 @@ class ProductionRun(Base):
     actual_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     effective_daily_capacity: Mapped[float] = mapped_column(Float)
     schedule_locked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source_type: Mapped[str] = mapped_column(
+        String(20), default="ORDER", server_default="ORDER", index=True
+    )
+    notes: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

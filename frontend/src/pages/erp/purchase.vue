@@ -34,7 +34,7 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>待购买零件</h3><span>按全部未完成生产需求全局汇总，不按订单重复占用库存</span>
+        <h3>待购买零件</h3>
       </div>
       <el-table v-loading="loading" :data="rows" empty-text="当前没有零件采购缺口">
         <el-table-column label="零件" min-width="220">

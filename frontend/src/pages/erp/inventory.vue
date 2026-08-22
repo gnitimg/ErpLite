@@ -19,6 +19,19 @@ const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" :
 const pageTitle = computed(() => kind.value === "PRODUCT" ? "产品库存" : "零件库存")
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
+const shortageValue = (row: any) => Math.max(Number(row.shortage_qty || 0), 0)
+const gapValue = (row: any) => shortageValue(row) > 0 ? -shortageValue(row) : 0
+function stockLevelPercent(row: any) {
+  const stock = Math.max(Number(row.stock_qty || 0), 0)
+  const safety = Math.max(Number(row.min_stock || 0), 0)
+  if (safety <= 0) return stock > 0 ? 100 : 0
+  return Math.round(Math.min(100, stock / safety * 100))
+}
+function stockLevelLabel(row: any) {
+  if (row.low_stock) return "低于安全线"
+  if (Number(row.stock_qty) === Number(row.min_stock)) return "达安全线"
+  return "充足"
+}
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -135,15 +148,24 @@ useLiveRefresh(() => load(true))
         </el-table-column>
         <el-table-column v-if="kind === 'PRODUCT'" label="可用库存" width="105" align="right">
           <template #default="{ row }">
-            <b :class="row.available_qty <= 0 ? 'number-negative' : 'number-positive'">
+            <b :class="row.available_qty > 0 ? 'number-positive' : ''">
               {{ productQty(Math.max(row.available_qty, 0)) }}
             </b>
           </template>
         </el-table-column>
-        <el-table-column label="订单缺口" width="125" align="right">
+        <el-table-column width="125" align="right">
+          <template #header>
+            <span>订单缺口</span>
+            <el-tooltip
+              content="按全部未完成客单汇总；0 表示订单已被库存或在途覆盖，负数表示仍需采购或生产。"
+              placement="top"
+            >
+              <el-icon class="column-help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
-            <b :class="row.gap_qty < 0 ? 'number-negative' : ''">
-              {{ displayQty(row.gap_qty) }}
+            <b :class="shortageValue(row) > 0 ? 'number-negative' : ''">
+              {{ displayQty(gapValue(row)) }}
             </b>
             {{ row.unit }}
           </template>
@@ -157,13 +179,11 @@ useLiveRefresh(() => load(true))
           <template #default="{ row }">
             <div class="stock-meter">
               <div class="stock-meter-label">
-                <span>{{ row.low_stock ? '低库存' : '充足' }}</span>
-                <span>
-                  {{ Math.round(Math.min(100, row.stock_qty / Math.max(row.min_stock * 2, 1) * 100)) }}%
-                </span>
+                <span>{{ stockLevelLabel(row) }}</span>
+                <span>{{ stockLevelPercent(row) }}%</span>
               </div>
               <el-progress
-                :percentage="Math.round(Math.min(100, row.stock_qty / Math.max(row.min_stock * 2, 1) * 100))"
+                :percentage="stockLevelPercent(row)"
                 :show-text="false"
                 :stroke-width="6"
                 :color="row.low_stock ? '#e05757' : '#39aa7b'"
@@ -224,8 +244,8 @@ useLiveRefresh(() => load(true))
           {{ displayQty(activePart.order_required_qty) }} {{ activePart.unit }}
         </el-descriptions-item>
         <el-descriptions-item label="当前缺口">
-          <b :class="activePart.gap_qty < 0 ? 'number-negative' : ''">
-            {{ displayQty(activePart.gap_qty) }} {{ activePart.unit }}
+          <b :class="shortageValue(activePart) > 0 ? 'number-negative' : ''">
+            {{ displayQty(gapValue(activePart)) }} {{ activePart.unit }}
           </b>
         </el-descriptions-item>
       </el-descriptions>
@@ -261,3 +281,12 @@ useLiveRefresh(() => load(true))
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.column-help {
+  margin-left: 5px;
+  color: var(--el-text-color-secondary);
+  vertical-align: -2px;
+  cursor: help;
+}
+</style>

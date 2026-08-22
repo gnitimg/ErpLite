@@ -111,7 +111,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
         "active": item.active,
-        "low_stock": item.stock_qty <= item.min_stock,
+        "low_stock": item.stock_qty < item.min_stock,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
     }

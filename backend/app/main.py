@@ -28,6 +28,7 @@ from .models import (
     OperationLog,
     OrderReturn,
     ProductBomItem,
+    ProductionAllocation,
     ProductionRun,
     ProductionSetting,
     SalesOrder,
@@ -41,6 +42,7 @@ from .schemas import (
     ExternalProcessingReturnPayload,
     ExternalProcessingSendPayload,
     LoginPayload,
+    ManualProductionRunPayload,
     OrderPayload,
     OrderReturnPayload,
     OrderShipmentPayload,
@@ -63,6 +65,7 @@ from .planning import (
     recalculate_production_plan,
 )
 from .services import (
+    RESERVATION_STATUSES,
     create_transaction,
     client_ip,
     ensure_sku_available,
@@ -315,9 +318,9 @@ def list_items(
             or_(InventoryItem.sku.ilike(token), InventoryItem.name.ilike(token), InventoryItem.spec.ilike(token))
         )
     if stock_status == "LOW":
-        query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty < InventoryItem.min_stock)
     elif stock_status == "NORMAL":
-        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty >= InventoryItem.min_stock)
     if bom_status == "CONFIGURED":
         query = query.where(InventoryItem.bom_components.any())
     elif bom_status == "EMPTY":
@@ -390,7 +393,7 @@ def dashboard(db: Session = Depends(get_db)):
     low_stock = db.scalar(
         select(func.count())
         .select_from(InventoryItem)
-        .where(active, regular_inventory, InventoryItem.stock_qty <= InventoryItem.min_stock)
+        .where(active, regular_inventory, InventoryItem.stock_qty < InventoryItem.min_stock)
     ) or 0
     pending_orders = db.scalar(
         select(func.count())
@@ -414,7 +417,7 @@ def dashboard(db: Session = Depends(get_db)):
     ).all()
     low_items = db.scalars(
         select(InventoryItem)
-        .where(active, regular_inventory, InventoryItem.stock_qty <= InventoryItem.min_stock)
+        .where(active, regular_inventory, InventoryItem.stock_qty < InventoryItem.min_stock)
         .order_by(InventoryItem.stock_qty)
     ).all()
     pending_order_rows = db.scalars(
@@ -730,21 +733,181 @@ def recalculate_plan(db: Session = Depends(get_db)):
     return result
 
 
+@app.post("/api/production/runs/manual", status_code=201)
+def create_manual_production_run(
+    payload: ManualProductionRunPayload,
+    db: Session = Depends(get_db),
+):
+    """创建独立于客单缺口的补库存生产计划。"""
+    product = db.get(InventoryItem, payload.product_id)
+    if not product or product.kind != "PRODUCT" or not product.active:
+        raise HTTPException(404, "产品不存在")
+    daily_capacity = int(product.daily_capacity or 0)
+    if daily_capacity <= 0:
+        raise HTTPException(409, "该产品未配置单机日产能，请先在产品目录中设置")
+    if not product.bom_components:
+        raise HTTPException(409, "该产品未配置 BOM，不能创建生产计划")
+
+    settings = db.get(ProductionSetting, 1)
+    line_count = max(int(settings.line_count if settings else 1), 1)
+    if payload.line_slot > line_count:
+        raise HTTPException(400, "生产位超出系统设置的可用范围")
+
+    today = date.today()
+    planned_start = datetime.combine(payload.planned_start_date, time.min)
+    if payload.planned_start_date == today:
+        planned_start = datetime.now().replace(second=0, microsecond=0)
+    elif payload.planned_start_date < today:
+        raise HTTPException(400, "计划开始日期不能早于今天")
+    duration_seconds = max(
+        float(payload.planned_quantity) / daily_capacity * 86400,
+        60,
+    )
+    planned_end = planned_start + timedelta(seconds=duration_seconds)
+
+    line_conflict = db.scalar(
+        select(ProductionRun.id).where(
+            _active_schedule_condition(),
+            ProductionRun.line_slot == payload.line_slot,
+            ProductionRun.planned_start_at < planned_end,
+            ProductionRun.planned_end_at > planned_start,
+        ).limit(1)
+    )
+    if line_conflict:
+        raise HTTPException(409, "该生产位在所选日期已有确认排期")
+
+    mold_slot = None
+    for slot in range(1, max(int(product.mold_count or 1), 1) + 1):
+        conflict = db.scalar(
+            select(ProductionRun.id).where(
+                _active_schedule_condition(),
+                ProductionRun.product_id == product.id,
+                ProductionRun.mold_slot == slot,
+                ProductionRun.planned_start_at < planned_end,
+                ProductionRun.planned_end_at > planned_start,
+            ).limit(1)
+        )
+        if not conflict:
+            mold_slot = slot
+            break
+    if mold_slot is None:
+        raise HTTPException(409, "该产品在所选日期没有可用模具")
+
+    # 先刷新订单缺口，再把自主计划优先覆盖交期最近的缺口；
+    # 超出订单需求的产量在完工后自然进入自由库存。
+    recalculate_production_plan(db)
+    run = ProductionRun(
+        run_no=serial("PR"),
+        product_id=product.id,
+        line_slot=payload.line_slot,
+        mold_slot=mold_slot,
+        planned_quantity=payload.planned_quantity,
+        produced_quantity=0,
+        planned_start_at=planned_start,
+        planned_end_at=planned_end,
+        effective_daily_capacity=daily_capacity,
+        schedule_locked=True,
+        source_type="REPLENISHMENT",
+        notes=payload.notes.strip(),
+        status="PLANNED",
+    )
+    db.add(run)
+    db.flush()
+
+    remaining = payload.planned_quantity
+    sequence = 1
+    order_lines = db.scalars(
+        select(SalesOrderItem)
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .where(
+            SalesOrder.status.in_(RESERVATION_STATUSES),
+            SalesOrderItem.product_id == product.id,
+            SalesOrderItem.production_required_quantity > 0,
+        )
+        .order_by(
+            SalesOrder.required_date,
+            SalesOrder.order_date,
+            SalesOrder.id,
+            SalesOrderItem.id,
+        )
+    ).all()
+    for line in order_lines:
+        quantity = min(int(line.production_required_quantity or 0), remaining)
+        if quantity <= 0:
+            continue
+        db.add(ProductionAllocation(
+            production_run_id=run.id,
+            order_item_id=line.id,
+            quantity=quantity,
+            sequence=sequence,
+            estimated_completion_at=planned_end,
+        ))
+        remaining -= quantity
+        sequence += 1
+        if remaining <= 0:
+            break
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return next(row for row in list_production_runs(db) if row["id"] == run.id)
+
+
 @app.put("/api/production/runs/{run_id}/status")
 def update_production_run_status(
     run_id: int,
     payload: ProductionRunStatusPayload,
     db: Session = Depends(get_db),
 ):
-    run = db.get(ProductionRun, run_id)
+    run = db.scalar(
+        select(ProductionRun)
+        .where(ProductionRun.id == run_id)
+        .options(
+            selectinload(ProductionRun.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+        .with_for_update()
+    )
     if not run:
         raise HTTPException(404, "生产批次不存在")
-    if run.status not in {"PLANNED", "RUNNING"}:
-        raise HTTPException(409, "该生产批次已结束，不能修改状态")
-    run.status = payload.status
+    if payload.status == "RUNNING":
+        if run.status != "PLANNED":
+            raise HTTPException(409, "只有待生产批次可以开始生产")
+        if not run.product.bom_components:
+            raise HTTPException(409, "产品未配置 BOM，不能开始生产")
+        component_changes = [
+            (
+                component.part,
+                -float(component.quantity) * int(run.planned_quantity),
+                component.part.cost_price,
+            )
+            for component in run.product.bom_components
+        ]
+        consumption_tx = create_transaction(
+            db,
+            "PRODUCTION_OUT",
+            component_changes,
+            f"生产批次 {run.run_no} 开工领料，BOM 自动出库",
+            related_production_run_id=run.id,
+            occurred_at=datetime.now(),
+        )
+        run.status = "RUNNING"
+        run.schedule_locked = True
+        run.actual_start_at = datetime.now()
+    else:
+        if run.status not in {"PLANNED", "RUNNING"}:
+            raise HTTPException(409, "该生产批次已结束，不能取消")
+        run.status = "CANCELLED"
     recalculate_production_plan(db)
     db.commit()
-    return {"ok": True, "run_id": run_id, "status": run.status}
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "status": run.status,
+        "consumption_transaction_id": (
+            consumption_tx.id if payload.status == "RUNNING" else None
+        ),
+    }
 
 
 @app.get("/api/production/demands")
@@ -783,23 +946,56 @@ def complete_production_run(
     if not run.product.bom_components:
         raise HTTPException(409, "产品未配置 BOM，不能办理生产入库")
     actual = int(payload.actual_quantity)
-    component_changes = [
-        (
-            component.part,
-            -float(component.quantity) * actual,
-            component.part.cost_price,
-        )
-        for component in run.product.bom_components
-    ]
     occurred_at = datetime.combine(payload.completion_date, time.min)
-    consumption_tx = create_transaction(
-        db,
-        "PRODUCTION_OUT",
-        component_changes,
-        payload.notes or f"生产批次 {run.run_no} BOM 自动耗用",
-        related_production_run_id=run.id,
-        occurred_at=occurred_at,
+    consumption_tx = db.scalar(
+        select(StockTransaction)
+        .where(
+            StockTransaction.related_production_run_id == run.id,
+            StockTransaction.transaction_type == "PRODUCTION_OUT",
+        )
+        .order_by(StockTransaction.id.desc())
     )
+    if consumption_tx is None:
+        # 兼容升级前已经开工的历史批次；新版批次均在“开始生产”时完成领料。
+        component_changes = [
+            (
+                component.part,
+                -float(component.quantity) * actual,
+                component.part.cost_price,
+            )
+            for component in run.product.bom_components
+        ]
+        consumption_tx = create_transaction(
+            db,
+            "PRODUCTION_OUT",
+            component_changes,
+            payload.notes or f"生产批次 {run.run_no} 历史开工领料补记",
+            related_production_run_id=run.id,
+            occurred_at=run.actual_start_at or occurred_at,
+        )
+    elif actual != int(run.planned_quantity):
+        # 开工按计划数领料；完工数量有差异时只补记差额，保证 BOM 耗用仍与
+        # 实际合格数量一致。少产退料为正数，超产补领为负数。
+        variance = actual - int(run.planned_quantity)
+        create_transaction(
+            db,
+            "PRODUCTION_OUT" if variance > 0 else "PRODUCTION_RETURN",
+            [
+                (
+                    component.part,
+                    -float(component.quantity) * variance,
+                    component.part.cost_price,
+                )
+                for component in run.product.bom_components
+            ],
+            payload.notes or (
+                f"生产批次 {run.run_no} 超产补领"
+                if variance > 0
+                else f"生产批次 {run.run_no} 少产退料"
+            ),
+            related_production_run_id=run.id,
+            occurred_at=occurred_at,
+        )
     external_required = bool(run.product.requires_external_processing)
     inbound_tx = create_transaction(
         db,
@@ -1101,9 +1297,9 @@ def inventory(
     if kind in {"PART", "PRODUCT"}:
         query = query.where(InventoryItem.kind == kind)
     if stock_status == "LOW" or (stock_status is None and low_stock):
-        query = query.where(InventoryItem.stock_qty <= InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty < InventoryItem.min_stock)
     elif stock_status == "NORMAL":
-        query = query.where(InventoryItem.stock_qty > InventoryItem.min_stock)
+        query = query.where(InventoryItem.stock_qty >= InventoryItem.min_stock)
     if keyword.strip():
         token = f"%{keyword.strip()}%"
         query = query.where(

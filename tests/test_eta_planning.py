@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
-from app.main import save_product, update_production_run_schedule
+from app.main import (
+    create_manual_production_run,
+    save_product,
+    update_production_run_schedule,
+)
 from app.models import (
     InventoryItem,
     ProductBomItem,
@@ -20,7 +24,12 @@ from app.models import (
     SalesOrderItem,
 )
 from app.planning import recalculate_production_plan
-from app.schemas import ProductPayload, ProductionRunSchedulePayload
+from app.schemas import (
+    ManualProductionRunPayload,
+    ProductPayload,
+    ProductionRunSchedulePayload,
+)
+from app.services import item_dict
 
 
 NOW = datetime(2026, 8, 20, 8, 0, 0)
@@ -308,3 +317,76 @@ def test_schedule_api_locks_run_and_keeps_single_machine_duration():
         assert result["planned_end_at"] == (
             requested_start + timedelta(days=0.5)
         ).isoformat()
+
+
+def test_stock_equal_to_safety_line_is_not_low_stock():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        item = InventoryItem(
+            sku="SAFE",
+            name="SAFE",
+            kind="PART",
+            stock_qty=40,
+            min_stock=40,
+        )
+        db.add(item)
+        db.flush()
+
+        assert item_dict(item)["low_stock"] is False
+
+
+def test_manual_replenishment_plan_survives_recalculation():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        part = InventoryItem(
+            sku="PART-M",
+            name="PART-M",
+            kind="PART",
+            stock_qty=1000,
+        )
+        product = make_product(db, "PRODUCT-M")
+        db.add(part)
+        db.flush()
+        db.add(ProductBomItem(
+            product_id=product.id,
+            part_id=part.id,
+            quantity=1,
+        ))
+        set_line_count(db, 2)
+        add_capability(db, product, 100)
+
+        result = create_manual_production_run(
+            ManualProductionRunPayload(
+                product_id=product.id,
+                planned_quantity=80,
+                line_slot=2,
+                planned_start_date=date.today() + timedelta(days=1),
+                notes="主动补充库存",
+            ),
+            db,
+        )
+
+        assert result["source_type"] == "REPLENISHMENT"
+        assert result["line_slot"] == 2
+        assert result["planned_quantity"] == 80
+        assert result["notes"] == "主动补充库存"
+        run_id = result["id"]
+
+        recalculate_production_plan(db, NOW)
+
+        kept = db.get(ProductionRun, run_id)
+        assert kept is not None
+        assert kept.source_type == "REPLENISHMENT"
+
+        order = add_order(db, "SO-AFTER-MANUAL", [(product, 50)])
+        result = recalculate_production_plan(db, NOW)
+
+        allocation = db.query(ProductionAllocation).filter_by(
+            production_run_id=run_id,
+            order_item_id=order.items[0].id,
+        ).one()
+        assert allocation.quantity == 50
+        assert result["created_run_count"] == 0
+        assert db.query(ProductionRun).count() == 1

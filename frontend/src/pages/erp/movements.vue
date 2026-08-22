@@ -164,7 +164,7 @@ watch(() => route.name, () => load())
           <span class="stock-operation-icon"><el-icon><BottomLeft /></el-icon></span>
           <span>
             <strong>办理物料入库</strong>
-            <small>零件采购到货、成品盘盈或其他普通入库</small>
+            <!-- <small>零件采购到货、成品盘盈或其他普通入库</small> -->
           </span>
           <el-icon class="stock-operation-arrow">
             <ArrowRight />
@@ -178,7 +178,7 @@ watch(() => route.name, () => load())
           <span class="stock-operation-icon"><el-icon><TopRight /></el-icon></span>
           <span>
             <strong>办理物料出库</strong>
-            <small>零件领用、产品非订单出库或库存调整；订单出库请在客户订单中办理</small>
+            <!-- <small>零件领用、产品非订单出库或库存调整；订单出库请在客户订单中办理</small> -->
           </span>
           <el-icon class="stock-operation-arrow">
             <ArrowRight />
@@ -474,7 +474,6 @@ watch(() => route.name, () => load())
         </el-descriptions>
         <div class="detail-section-head">
           <strong>物料流水</strong>
-          <span>使用出库/入库方向显示，不使用负数</span>
         </div>
         <el-table :data="activeTransaction.lines" border>
           <el-table-column label="物料" min-width="200">

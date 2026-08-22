@@ -38,6 +38,21 @@ def _integer_shares(total: int, weights: list[float]) -> list[int]:
 
 
 def _run_dict(run: ProductionRun) -> dict:
+    material_shortages = []
+    if run.status == "PLANNED":
+        for component in run.product.bom_components:
+            required = float(component.quantity) * int(run.planned_quantity)
+            available = float(component.part.stock_qty)
+            if available + 1e-9 < required:
+                material_shortages.append({
+                    "part_id": component.part_id,
+                    "sku": component.part.sku,
+                    "name": component.part.name,
+                    "unit": component.part.unit,
+                    "required_quantity": required,
+                    "available_quantity": available,
+                    "shortage_quantity": required - available,
+                })
     return {
         "id": run.id,
         "run_no": run.run_no,
@@ -58,7 +73,11 @@ def _run_dict(run: ProductionRun) -> dict:
         "actual_end_at": run.actual_end_at.isoformat() if run.actual_end_at else None,
         "effective_daily_capacity": run.effective_daily_capacity,
         "schedule_locked": run.schedule_locked,
+        "source_type": run.source_type or "ORDER",
+        "notes": run.notes or "",
         "status": run.status,
+        "materials_ready": not material_shortages,
+        "material_shortages": material_shortages,
         "allocations": [
             {
                 "id": allocation.id,
@@ -80,7 +99,9 @@ def _run_dict(run: ProductionRun) -> dict:
 
 def list_production_runs(db: Session, status: str | None = None) -> list[dict]:
     query = select(ProductionRun).options(
-        selectinload(ProductionRun.product),
+        selectinload(ProductionRun.product)
+        .selectinload(InventoryItem.bom_components)
+        .selectinload(ProductBomItem.part),
         selectinload(ProductionRun.allocations)
         .selectinload(ProductionAllocation.order_item)
         .selectinload(SalesOrderItem.order),
@@ -263,6 +284,7 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         select(ProductionRun.id).where(
             ProductionRun.status == "PLANNED",
             ProductionRun.schedule_locked.is_(False),
+            ProductionRun.source_type == "ORDER",
         )
     ).all()
     if planned_ids:
@@ -322,6 +344,54 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         )
         .options(selectinload(ProductionRun.allocations))
     ).all()
+    # 自主补库存计划同样是未来供给。新客单在计划创建后进入时，
+    # 将尚未分配的计划产量按交期补给订单，避免系统重复生成同产品批次。
+    allocated_by_line: dict[int, float] = defaultdict(float)
+    for run in fixed_runs:
+        for allocation in run.allocations:
+            allocated_by_line[allocation.order_item_id] += float(allocation.quantity)
+    prioritized_lines = [
+        line
+        for order in active_orders
+        for line in order.items
+        if float(line.production_required_quantity or 0) > 1e-9
+    ]
+    for run in sorted(fixed_runs, key=lambda row: (row.planned_end_at, row.id)):
+        if run.source_type != "REPLENISHMENT" or run.status != "PLANNED":
+            continue
+        remaining_supply = max(
+            int(run.planned_quantity)
+            - sum(int(allocation.quantity) for allocation in run.allocations),
+            0,
+        )
+        sequence = max(
+            (allocation.sequence for allocation in run.allocations),
+            default=0,
+        ) + 1
+        for line in prioritized_lines:
+            if line.product_id != run.product_id or remaining_supply <= 0:
+                continue
+            needed = max(
+                int(line.production_required_quantity or 0)
+                - int(allocated_by_line.get(line.id, 0)),
+                0,
+            )
+            quantity = min(needed, remaining_supply)
+            if quantity <= 0:
+                continue
+            allocation = ProductionAllocation(
+                production_run=run,
+                order_item_id=line.id,
+                quantity=quantity,
+                sequence=sequence,
+                estimated_completion_at=run.planned_end_at,
+            )
+            db.add(allocation)
+            allocated_by_line[line.id] += quantity
+            remaining_supply -= quantity
+            sequence += 1
+    db.flush()
+
     running_allocated: dict[int, float] = defaultdict(float)
     running_eta: dict[int, datetime] = {}
     for run in fixed_runs:

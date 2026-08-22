@@ -177,7 +177,15 @@ class PrintSettingsPayload(BaseModel):
 
 
 class ProductionRunStatusPayload(BaseModel):
-    status: Literal["CANCELLED"]
+    status: Literal["RUNNING", "CANCELLED"]
+
+
+class ManualProductionRunPayload(BaseModel):
+    product_id: int
+    planned_quantity: int = Field(gt=0)
+    line_slot: int = Field(default=1, ge=1, le=100)
+    planned_start_date: date = Field(default_factory=date.today)
+    notes: str = Field(default="", max_length=500)
 
 
 class ProductionCompletionPayload(BaseModel):

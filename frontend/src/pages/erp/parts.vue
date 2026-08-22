@@ -216,7 +216,6 @@ useLiveRefresh(() => load(true))
                 按单即买
               </el-radio-button>
             </el-radio-group><div class="form-help">
-              库存备料用于常备零件；按单即买会在客单缺料清单中明确提示按订单采购。
             </div>
           </el-form-item>
         </div>
