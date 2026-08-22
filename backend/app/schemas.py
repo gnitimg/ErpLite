@@ -51,6 +51,8 @@ class ProductPayload(BaseModel):
     min_stock: int = Field(default=0, ge=0)
     mold_count: int = Field(default=1, ge=1)
     daily_capacity: int = Field(default=0, ge=0)
+    requires_external_processing: bool = False
+    external_process_name: str = Field(default="", max_length=120)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -67,6 +69,14 @@ class ProductPayload(BaseModel):
         ids = [line.part_id for line in value]
         if len(ids) != len(set(ids)):
             raise ValueError("同一个零件不能重复添加")
+        return value
+
+    @field_validator("external_process_name")
+    @classmethod
+    def external_process_required(cls, value: str, info):
+        value = value.strip()
+        if info.data.get("requires_external_processing") and not value:
+            raise ValueError("启用外协加工时必须填写工序名称")
         return value
 
 
@@ -102,7 +112,6 @@ class StockDocumentPayload(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("同一张单据不能重复添加相同物料")
         return value
-
 
 class OrderStockPayload(BaseModel):
     notes: str = Field(default="", max_length=500)
@@ -199,6 +208,40 @@ class OrderShipmentPayload(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("同一订单产品不能重复出库")
         return value
+
+
+class OrderReturnLinePayload(BaseModel):
+    order_item_id: int
+    quantity: int = Field(gt=0)
+    restock: bool = True
+
+
+class OrderReturnPayload(BaseModel):
+    items: list[OrderReturnLinePayload] = Field(min_length=1)
+    occurred_date: date = Field(default_factory=date.today)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("items")
+    @classmethod
+    def unique_return_items(cls, value: list[OrderReturnLinePayload]):
+        ids = [line.order_item_id for line in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一次退货不能重复选择同一订单产品")
+        return value
+
+
+class ExternalProcessingSendPayload(BaseModel):
+    product_id: int
+    quantity: int = Field(gt=0)
+    supplier: str = Field(default="", max_length=120)
+    occurred_date: date = Field(default_factory=date.today)
+    notes: str = Field(default="", max_length=500)
+
+
+class ExternalProcessingReturnPayload(BaseModel):
+    quantity: int = Field(gt=0)
+    occurred_date: date = Field(default_factory=date.today)
+    notes: str = Field(default="", max_length=500)
 
 
 class ProductionRunSchedulePayload(BaseModel):

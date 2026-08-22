@@ -45,6 +45,8 @@ def _run_dict(run: ProductionRun) -> dict:
         "product_sku": run.product.sku,
         "product_name": run.product.name,
         "unit": run.product.unit,
+        "requires_external_processing": bool(run.product.requires_external_processing),
+        "external_process_name": run.product.external_process_name or "",
         "line_slot": run.line_slot,
         "mold_slot": run.mold_slot,
         "mold_count": max(int(run.product.mold_count or 1), 1),
@@ -276,6 +278,7 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         order.eta_reliable = False
         order.eta_note = ""
         for line in order.items:
+            line.pipeline_quantity = 0
             line.production_required_quantity = max(
                 int(line.quantity)
                 - int(line.shipped_quantity or 0)
@@ -285,6 +288,26 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
             line.estimated_completion_at = now if line.production_required_quantity <= 1e-9 else None
             line.eta_reliable = line.production_required_quantity <= 1e-9
             line.eta_note = "成品库存已预留" if line.eta_reliable else ""
+
+    # 已完工但仍在厂内半成品区或外协单位的数量也是在途供给，不能重复排产。
+    # 按与成品预留相同的交期顺序，把在途供给分配给订单行。
+    pipeline_available = {
+        product_id: int((db.get(InventoryItem, product_id).semi_finished_qty or 0)
+                        + (db.get(InventoryItem, product_id).processing_qty or 0))
+        for product_id in product_ids
+    }
+    for order in active_orders:
+        for line in order.items:
+            available = max(pipeline_available.get(line.product_id, 0), 0)
+            raw_required = int(line.production_required_quantity or 0)
+            allocated = min(raw_required, available)
+            line.pipeline_quantity = allocated
+            line.production_required_quantity = raw_required - allocated
+            pipeline_available[line.product_id] = available - allocated
+            if allocated and line.production_required_quantity <= 0:
+                line.eta_note = "已有半成品或外协在途，待加工回厂"
+                line.eta_reliable = False
+                line.estimated_completion_at = None
 
     fixed_runs = db.scalars(
         select(ProductionRun)

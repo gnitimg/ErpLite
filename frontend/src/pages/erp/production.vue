@@ -45,7 +45,9 @@ async function completeRun() {
   saving.value = true
   try {
     await api(`/api/production/runs/${activeRun.value.id}/complete`, { method: "POST", body: JSON.stringify(form) })
-    ElMessage.success("审核通过，零件已自动出库，合格品已入库并生成两张单据")
+    ElMessage.success(activeRun.value.requires_external_processing
+      ? `审核通过，零件已自动出库，合格品已进入半成品库存，等待${activeRun.value.external_process_name}`
+      : "审核通过，零件已自动出库，合格品已进入成品库存")
     completionDrawer.value = false
     await load()
   } catch (error: any) {
@@ -72,7 +74,7 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>生产入库审核</h3><span>审核合格数量后，零件自动出库、产品自动入库</span>
+        <h3>生产入库审核</h3>
       </div>
       <el-table v-loading="loading" :data="visibleRows" empty-text="当前没有待完工生产批次">
         <el-table-column prop="run_no" label="批次号" min-width="180">
@@ -133,6 +135,14 @@ useLiveRefresh(() => load(true))
           {{ productQty(activeRun.planned_quantity) }}
         </el-descriptions-item>
       </el-descriptions>
+      <el-alert
+        v-if="activeRun?.requires_external_processing"
+        :title="`该产品需${activeRun.external_process_name}：审核后进入半成品库存，不会立即占用成品库存。`"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-top: 16px"
+      />
       <el-form label-position="top" style="margin-top: 20px">
         <el-form-item label="实际合格入库数量" required>
           <el-input-number v-model="form.actual_quantity" :min="1" :precision="0" style="width:100%" />
@@ -146,7 +156,7 @@ useLiveRefresh(() => load(true))
         <el-button @click="completionDrawer = false">
           取消
         </el-button><el-button type="primary" :loading="saving" @click="completeRun">
-          审核通过并入库
+          {{ activeRun?.requires_external_processing ? '审核并入半成品库' : '审核通过并入库' }}
         </el-button>
       </div>
     </el-drawer>

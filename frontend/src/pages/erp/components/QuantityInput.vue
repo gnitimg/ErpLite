@@ -6,6 +6,7 @@ const props = withDefaults(defineProps<{
   modelValue: number
   integer?: boolean
   min?: number
+  max?: number
   unit?: string
   disabled?: boolean
 }>(), {
@@ -32,7 +33,7 @@ function parse(value: string) {
   const number = Number(text.replace(/万$/, '')) * multiplier
   if (!Number.isFinite(number)) return props.modelValue
   const normalized = props.integer ? Math.round(number) : Math.round(number * 1000) / 1000
-  return Math.max(normalized, props.min)
+  return Math.min(Math.max(normalized, props.min), props.max ?? Number.POSITIVE_INFINITY)
 }
 
 function syncDisplay() {

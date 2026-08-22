@@ -21,6 +21,10 @@ class InventoryItem(Base):
     daily_capacity: Mapped[int] = mapped_column(Integer, default=0)
     mold_count: Mapped[int] = mapped_column(Integer, default=0)
     stock_qty: Mapped[float] = mapped_column(Float, default=0)
+    semi_finished_qty: Mapped[int] = mapped_column(Integer, default=0)
+    processing_qty: Mapped[int] = mapped_column(Integer, default=0)
+    requires_external_processing: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    external_process_name: Mapped[str] = mapped_column(String(120), default="")
     sample_stock_qty: Mapped[int] = mapped_column(Integer, default=300)
     supply_mode: Mapped[str] = mapped_column(String(20), default="STOCK")  # STOCK / BUY_TO_ORDER（仅零件）
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -81,7 +85,9 @@ class SalesOrderItem(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
     quantity: Mapped[int] = mapped_column(Integer)
     shipped_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    returned_quantity: Mapped[int] = mapped_column(Integer, default=0)
     reserved_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    pipeline_quantity: Mapped[int] = mapped_column(Integer, default=0)
     reference_price: Mapped[float] = mapped_column(Float, default=0)
     unit_price: Mapped[float] = mapped_column(Float)
     line_total: Mapped[float] = mapped_column(Float)
@@ -113,6 +119,34 @@ class StockReservation(Base):
     product: Mapped[InventoryItem] = relationship()
 
     __table_args__ = (Index("ix_reservations_product_status", "product_id", "status"),)
+
+
+class OrderReturn(Base):
+    __tablename__ = "order_returns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    return_no: Mapped[str] = mapped_column(String(50), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("sales_orders.id", ondelete="CASCADE"), index=True)
+    order_item_id: Mapped[int] = mapped_column(
+        ForeignKey("sales_order_items.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    restocked: Mapped[bool] = mapped_column(Boolean, default=True)
+    transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    notes: Mapped[str] = mapped_column(Text, default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    order: Mapped[SalesOrder] = relationship()
+    order_item: Mapped[SalesOrderItem] = relationship()
+    product: Mapped[InventoryItem] = relationship()
+    transaction: Mapped["StockTransaction | None"] = relationship()
+
+    __table_args__ = (Index("ix_order_returns_order_time", "order_id", "occurred_at"),)
 
 
 class ProductionLine(Base):
@@ -308,6 +342,31 @@ class StockTransactionItem(Base):
 
     transaction: Mapped[StockTransaction] = relationship(back_populates="lines")
     item: Mapped[InventoryItem] = relationship()
+
+
+class ExternalProcessingBatch(Base):
+    __tablename__ = "external_processing_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
+    process_name_snapshot: Mapped[str] = mapped_column(String(120))
+    supplier: Mapped[str] = mapped_column(String(120), default="")
+    quantity: Mapped[int] = mapped_column(Integer)
+    returned_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="SENT", index=True)
+    outbound_transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="RESTRICT"), index=True
+    )
+    notes: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    returned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    product: Mapped[InventoryItem] = relationship()
+    outbound_transaction: Mapped[StockTransaction] = relationship(foreign_keys=[outbound_transaction_id])
+
+    __table_args__ = (Index("ix_external_batches_status_sent", "status", "sent_at"),)
 
 
 class OperationLog(Base):

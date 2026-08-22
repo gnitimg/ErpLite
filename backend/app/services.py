@@ -104,6 +104,10 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "daily_capacity": item.daily_capacity,
         "mold_count": max(int(item.mold_count or 0), 1) if item.kind == "PRODUCT" else 0,
         "stock_qty": item.stock_qty,
+        "semi_finished_qty": int(item.semi_finished_qty or 0),
+        "processing_qty": int(item.processing_qty or 0),
+        "requires_external_processing": bool(item.requires_external_processing),
+        "external_process_name": item.external_process_name or "",
         "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
         "active": item.active,
@@ -154,11 +158,17 @@ def order_dict(order: SalesOrder) -> dict:
                 "product_name": line.product.name,
                 "quantity": line.quantity,
                 "shipped_quantity": int(line.shipped_quantity or 0),
+                "returned_quantity": int(line.returned_quantity or 0),
+                "returnable_quantity": max(
+                    int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
+                    0,
+                ),
                 "remaining_quantity": max(
                     int(line.quantity) - int(line.shipped_quantity or 0),
                     0,
                 ),
                 "reserved_quantity": line.reserved_quantity or 0,
+                "pipeline_quantity": int(line.pipeline_quantity or 0),
                 "reference_price": line.reference_price,
                 "unit_price": line.unit_price,
                 "line_total": line.line_total,
@@ -234,6 +244,7 @@ def create_transaction(
     counterparty_name: str | None = None,
     counterparty_phone: str | None = None,
     counterparty_address: str | None = None,
+    apply_inventory: bool = True,
 ) -> StockTransaction:
     if not changes:
         raise HTTPException(400, "库存流水至少需要一项物料变化")
@@ -276,7 +287,7 @@ def create_transaction(
         for item_id, entry in sorted(change_map.items())
     ]
     for item, delta, _unit_cost in normalized_changes:
-        if item.stock_qty + delta < -1e-9:
+        if apply_inventory and item.stock_qty + delta < -1e-9:
             raise HTTPException(409, f"{item.name} 库存不足，当前 {item.stock_qty:g} {item.unit}")
 
     related_order = db.get(SalesOrder, related_order_id) if related_order_id else None
@@ -308,8 +319,9 @@ def create_transaction(
     db.add(tx)
     db.flush()
     for item, delta, unit_cost in normalized_changes:
-        item.stock_qty = round(item.stock_qty + delta, 6)
-        if delta > 0 and unit_cost > 0:
+        if apply_inventory:
+            item.stock_qty = round(item.stock_qty + delta, 6)
+        if apply_inventory and delta > 0 and unit_cost > 0:
             item.cost_price = unit_cost
         price, line_total = (price_snapshots or {}).get(item.id, (None, None))
         db.add(StockTransactionItem(
@@ -458,7 +470,8 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
         reserved = min(int(line.reserved_quantity or 0), remaining_quantity)
         other_reserved = reserved_product_quantity(db, line.product_id, order.id)
         free_stock = max(float(line.product.stock_qty) - other_reserved - reserved, 0)
-        production_required = max(remaining_quantity - reserved, 0)
+        pipeline_quantity = min(int(line.pipeline_quantity or 0), max(remaining_quantity - reserved, 0))
+        production_required = max(remaining_quantity - reserved - pipeline_quantity, 0)
         priority_rows = db.execute(
             select(SalesOrder.id, SalesOrder.order_no, SalesOrder.required_date)
             .join(SalesOrderItem, SalesOrderItem.order_id == SalesOrder.id)
@@ -476,11 +489,19 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
             "shipped_quantity": int(line.shipped_quantity or 0),
             "remaining_quantity": remaining_quantity,
             "reserved_quantity": reserved,
+            "current_stock": int(line.product.stock_qty or 0),
+            "reserved_by_other_orders": int(other_reserved),
+            "pipeline_quantity": pipeline_quantity,
             "free_stock": round(free_stock, 6),
             "production_required": round(production_required, 6),
             "bom_configured": bool(line.product.bom_components),
             "priority_rank": priority_rank,
             "priority_total": len(priority_rows),
+            "waiting_for_earlier_orders": (
+                priority_rank > 1
+                and other_reserved > 0
+                and reserved < remaining_quantity
+            ),
             "estimated_completion_at": (
                 line.estimated_completion_at.isoformat() if line.estimated_completion_at else None
             ),

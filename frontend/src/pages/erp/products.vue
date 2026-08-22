@@ -27,6 +27,8 @@ const emptyForm = () => ({
   min_stock: 0,
   mold_count: 1,
   daily_capacity: 0,
+  requires_external_processing: false,
+  external_process_name: "",
   components: [] as any[]
 })
 const form = reactive(emptyForm())
@@ -76,6 +78,8 @@ function openEdit(row: any) {
     min_stock: row.min_stock,
     mold_count: row.mold_count || 1,
     daily_capacity: row.daily_capacity || 0,
+    requires_external_processing: Boolean(row.requires_external_processing),
+    external_process_name: row.external_process_name || "",
     components: row.components.map((line: any) => ({
       part_id: line.part_id,
       quantity: line.quantity
@@ -92,6 +96,7 @@ function removeComponent(index: number) {
 async function save() {
   if (!await formRef.value?.validate().catch(() => false)) return
   if (form.components.some(line => !line.part_id || Number(line.quantity) <= 0)) return ElMessage.warning("请完整填写 BOM 零件和用量")
+  if (form.requires_external_processing && !form.external_process_name.trim()) return ElMessage.warning("请填写外协工序名称")
   saving.value = true
   try {
     await api(editingId.value ? `/api/products/${editingId.value}` : "/api/products", { method: editingId.value ? "PUT" : "POST", body: JSON.stringify(form) })
@@ -135,7 +140,7 @@ useLiveRefresh(() => load(true))
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>产品目录</h3><span>产品由零件清单定义组成</span>
+        <h3>产品目录</h3>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="产品" min-width="190">
@@ -174,6 +179,13 @@ useLiveRefresh(() => load(true))
         <el-table-column label="单机日产量" width="125" align="right">
           <template #default="{ row }">
             {{ productQty(row.daily_capacity) }} {{ row.unit }}/日
+          </template>
+        </el-table-column>
+        <el-table-column label="完工后续" width="135">
+          <template #default="{ row }">
+            <el-tag v-if="row.requires_external_processing" type="warning" size="small" effect="plain">
+              {{ row.external_process_name }}
+            </el-tag><span v-else class="muted">直接成品入库</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="85">
@@ -250,7 +262,6 @@ useLiveRefresh(() => load(true))
           </el-form-item>
           <el-form-item label="模具数量">
             <QuantityInput v-model="form.mold_count" integer :min="1" unit="套" />
-            <div class="form-help">决定该产品最多可同时占用多少个生产位。</div>
           </el-form-item>
           <el-form-item label="单机日产量">
             <QuantityInput
@@ -259,9 +270,22 @@ useLiveRefresh(() => load(true))
               :min="0"
               :unit="`${form.unit}/日`"
             />
-            <div class="form-help">用于计算排产时长；填 0 表示暂不参与自动排产。</div>
           </el-form-item>
         </div>
+        <div class="external-process-setting">
+          <div>
+            <strong>生产后需要外协加工</strong>
+            <span>启用后，生产完工先进入半成品库存，外协回厂后才进入成品库存。</span>
+          </div>
+          <el-switch v-model="form.requires_external_processing" />
+        </div>
+        <el-form-item v-if="form.requires_external_processing" label="外协工序名称" required>
+          <el-input
+            v-model="form.external_process_name"
+            maxlength="120"
+            placeholder="例如：喷漆、打铁件"
+          />
+        </el-form-item>
         <div class="section-label">
           <span>BOM 零件清单</span><el-button size="small" plain @click="addComponent">
             <el-icon><Plus /></el-icon>添加一行
@@ -308,3 +332,26 @@ useLiveRefresh(() => load(true))
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.external-process-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+}
+
+.external-process-setting div {
+  display: grid;
+  gap: 4px;
+}
+
+.external-process-setting span {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+</style>

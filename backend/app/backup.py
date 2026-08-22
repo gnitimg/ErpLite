@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from .database import PROJECT_ROOT
 from .models import (
+    ExternalProcessingBatch,
     InventoryItem,
     Mold,
     OperationLog,
+    OrderReturn,
     ProductBomItem,
     ProductMold,
     ProductionAllocation,
@@ -30,7 +32,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 11
+BACKUP_SCHEMA_VERSION = 12
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -46,9 +48,13 @@ BACKUP_TABLES = (
     ProductionAllocation.__table__,
     StockTransaction.__table__,
     StockTransactionItem.__table__,
+    OrderReturn.__table__,
+    ExternalProcessingBatch.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    ExternalProcessingBatch.__table__,
+    OrderReturn.__table__,
     ProductionAllocation.__table__,
     StockTransactionItem.__table__,
     OperationLog.__table__,
@@ -233,6 +239,18 @@ def _load_archive(path: Path) -> dict[str, Any]:
             row.setdefault("unit_snapshot", None)
             row.setdefault("unit_price_snapshot", None)
             row.setdefault("line_total_snapshot", None)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 11:
+        for row in tables.get("inventory_items", []):
+            row.setdefault("semi_finished_qty", 0)
+            row.setdefault("processing_qty", 0)
+            row.setdefault("requires_external_processing", False)
+            row.setdefault("external_process_name", "")
+        for row in tables.get("sales_order_items", []):
+            row.setdefault("returned_quantity", 0)
+            row.setdefault("pipeline_quantity", 0)
+        tables.setdefault("order_returns", [])
+        tables.setdefault("external_processing_batches", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

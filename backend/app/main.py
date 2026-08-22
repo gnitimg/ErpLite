@@ -23,8 +23,10 @@ from sqlalchemy.orm import Session, selectinload
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
+    ExternalProcessingBatch,
     InventoryItem,
     OperationLog,
+    OrderReturn,
     ProductBomItem,
     ProductionRun,
     ProductionSetting,
@@ -36,8 +38,11 @@ from .models import (
 )
 from .schemas import (
     BackupRestorePayload,
+    ExternalProcessingReturnPayload,
+    ExternalProcessingSendPayload,
     LoginPayload,
     OrderPayload,
+    OrderReturnPayload,
     OrderShipmentPayload,
     OrderStockPayload,
     PartPayload,
@@ -203,9 +208,13 @@ def operation_action(path: str, method: str) -> str:
             return "客单补料"
         if path.endswith(("/ship", "/ship-all", "/fulfill")):
             return "客单出库"
+        if path.endswith("/returns"):
+            return "客单退货"
         if path.endswith("/cancel"):
             return "取消客单"
         return "新建客单"
+    if path.startswith("/api/external-processing"):
+        return "外协回厂" if path.endswith("/return") else "外协送出"
     if path.startswith("/api/parts"):
         return {"POST": "新建零件", "PUT": "编辑零件", "DELETE": "停用零件"}.get(
             method, "零件目录"
@@ -557,6 +566,13 @@ def products(
 
 def save_product(db: Session, payload: ProductPayload, product: InventoryItem | None = None) -> InventoryItem:
     ensure_sku_available(db, payload.sku, product.id if product else None)
+    if (
+        product
+        and product.requires_external_processing
+        and not payload.requires_external_processing
+        and (int(product.semi_finished_qty or 0) + int(product.processing_qty or 0) > 0)
+    ):
+        raise HTTPException(409, "该产品仍有半成品或外协在途，不能关闭外协工序")
     part_ids = [line.part_id for line in payload.components]
     parts = {
         part.id: part
@@ -571,6 +587,8 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
     if len(parts) != len(part_ids):
         raise HTTPException(400, "BOM 中包含无效零件")
     values = payload.model_dump(exclude={"components"})
+    if not payload.requires_external_processing:
+        values["external_process_name"] = ""
     if product is None:
         product = InventoryItem(kind="PRODUCT", stock_qty=0, **values)
         db.add(product)
@@ -782,14 +800,22 @@ def complete_production_run(
         related_production_run_id=run.id,
         occurred_at=occurred_at,
     )
+    external_required = bool(run.product.requires_external_processing)
     inbound_tx = create_transaction(
         db,
-        "ASSEMBLY_IN",
+        "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
         [(run.product, actual, run.product.cost_price)],
-        payload.notes or f"生产批次 {run.run_no} 完工入库",
+        payload.notes or (
+            f"生产批次 {run.run_no} 半成品入库，待{run.product.external_process_name}"
+            if external_required
+            else f"生产批次 {run.run_no} 完工入库"
+        ),
         related_production_run_id=run.id,
         occurred_at=occurred_at,
+        apply_inventory=not external_required,
     )
+    if external_required:
+        run.product.semi_finished_qty = int(run.product.semi_finished_qty or 0) + actual
     run.produced_quantity = actual
     run.status = "COMPLETED"
     run.actual_end_at = datetime.combine(payload.completion_date, time.min)
@@ -803,7 +829,8 @@ def complete_production_run(
         allocation.quantity = fulfilled
         allocation.estimated_completion_at = run.actual_end_at
         allocatable -= fulfilled
-    rebalance_product_reservations(db, {run.product_id})
+    if not external_required:
+        rebalance_product_reservations(db, {run.product_id})
     plan = recalculate_production_plan(db)
     db.commit()
     return {
@@ -813,6 +840,137 @@ def complete_production_run(
         "planned_quantity": run.planned_quantity,
         "actual_quantity": actual,
         "excess_quantity": max(actual - int(run.planned_quantity), 0),
+        "inventory_bucket": "SEMI_FINISHED" if external_required else "FINISHED",
+        "plan": plan,
+    }
+
+
+def external_batch_dict(batch: ExternalProcessingBatch) -> dict:
+    return {
+        "id": batch.id,
+        "batch_no": batch.batch_no,
+        "product_id": batch.product_id,
+        "product_sku": batch.product.sku,
+        "product_name": batch.product.name,
+        "unit": batch.product.unit,
+        "process_name": batch.process_name_snapshot,
+        "supplier": batch.supplier,
+        "quantity": batch.quantity,
+        "returned_quantity": batch.returned_quantity,
+        "remaining_quantity": max(batch.quantity - batch.returned_quantity, 0),
+        "status": batch.status,
+        "notes": batch.notes,
+        "sent_at": batch.sent_at.isoformat(),
+        "returned_at": batch.returned_at.isoformat() if batch.returned_at else None,
+    }
+
+
+@app.get("/api/external-processing")
+def external_processing(db: Session = Depends(get_db)):
+    products = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.kind == "PRODUCT",
+            InventoryItem.active.is_(True),
+            InventoryItem.requires_external_processing.is_(True),
+        )
+        .order_by(InventoryItem.sku)
+    ).all()
+    batches = db.scalars(
+        select(ExternalProcessingBatch)
+        .options(selectinload(ExternalProcessingBatch.product))
+        .order_by(ExternalProcessingBatch.sent_at.desc(), ExternalProcessingBatch.id.desc())
+    ).all()
+    return {
+        "products": [item_dict(product) for product in products],
+        "batches": [external_batch_dict(batch) for batch in batches],
+    }
+
+
+@app.post("/api/external-processing/send", status_code=201)
+def send_external_processing(
+    payload: ExternalProcessingSendPayload,
+    db: Session = Depends(get_db),
+):
+    product = db.get(InventoryItem, payload.product_id)
+    if not product or product.kind != "PRODUCT" or not product.active:
+        raise HTTPException(404, "产品不存在")
+    if not product.requires_external_processing or not product.external_process_name:
+        raise HTTPException(409, "该产品未配置外协工序")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    outbound_tx = create_transaction(
+        db,
+        "PROCESS_OUT",
+        [(product, -payload.quantity, product.cost_price)],
+        payload.notes or f"{product.external_process_name}外协送出",
+        occurred_at=occurred_at,
+        counterparty_name=payload.supplier,
+        apply_inventory=False,
+    )
+    if int(product.semi_finished_qty or 0) < payload.quantity:
+        raise HTTPException(
+            409,
+            f"{product.name} 半成品不足，当前 {int(product.semi_finished_qty or 0)} {product.unit}",
+        )
+    product.semi_finished_qty = int(product.semi_finished_qty or 0) - payload.quantity
+    product.processing_qty = int(product.processing_qty or 0) + payload.quantity
+    batch = ExternalProcessingBatch(
+        batch_no=serial("EP"),
+        product_id=product.id,
+        process_name_snapshot=product.external_process_name,
+        supplier=payload.supplier.strip(),
+        quantity=payload.quantity,
+        outbound_transaction_id=outbound_tx.id,
+        notes=payload.notes.strip(),
+        sent_at=occurred_at,
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    batch.product = product
+    return external_batch_dict(batch)
+
+
+@app.post("/api/external-processing/{batch_id}/return", status_code=201)
+def return_external_processing(
+    batch_id: int,
+    payload: ExternalProcessingReturnPayload,
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(ExternalProcessingBatch)
+        .where(ExternalProcessingBatch.id == batch_id)
+        .options(selectinload(ExternalProcessingBatch.product))
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    batch = db.scalar(query)
+    if not batch:
+        raise HTTPException(404, "外协批次不存在")
+    remaining = max(batch.quantity - batch.returned_quantity, 0)
+    if payload.quantity > remaining:
+        raise HTTPException(409, f"本批次最多还能回厂 {remaining} {batch.product.unit}")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    inbound_tx = create_transaction(
+        db,
+        "PROCESS_RETURN_IN",
+        [(batch.product, payload.quantity, batch.product.cost_price)],
+        payload.notes or f"{batch.process_name_snapshot}外协回厂",
+        occurred_at=occurred_at,
+        counterparty_name=batch.supplier,
+    )
+    if int(batch.product.processing_qty or 0) < payload.quantity:
+        raise HTTPException(409, "产品外协在途数量异常，请刷新后重试")
+    batch.product.processing_qty = int(batch.product.processing_qty or 0) - payload.quantity
+    batch.returned_quantity += payload.quantity
+    batch.status = "RETURNED" if batch.returned_quantity >= batch.quantity else "PARTIALLY_RETURNED"
+    batch.returned_at = occurred_at
+    rebalance_product_reservations(db, {batch.product_id})
+    plan = recalculate_production_plan(db)
+    db.commit()
+    return {
+        "batch": external_batch_dict(batch),
+        "transaction_id": inbound_tx.id,
         "plan": plan,
     }
 
@@ -1032,9 +1190,16 @@ def _document_rows(
     end_date: date | None = None,
 ):
     types = (
-        ("PURCHASE_IN", "ASSEMBLY_IN", "MANUAL_IN", "GENERAL_IN", "OPENING")
+        (
+            "PURCHASE_IN", "ASSEMBLY_IN", "SEMI_FINISHED_IN",
+            "PROCESS_RETURN_IN", "SALE_RETURN_IN", "MANUAL_IN",
+            "GENERAL_IN", "OPENING",
+        )
         if direction == "INBOUND"
-        else ("SALE_OUT", "MANUAL_OUT", "GENERAL_OUT", "PRODUCTION_OUT", "ASSEMBLY_IN")
+        else (
+            "SALE_OUT", "PROCESS_OUT", "MANUAL_OUT", "GENERAL_OUT",
+            "PRODUCTION_OUT", "ASSEMBLY_IN",
+        )
     )
     direction_filter = (
         StockTransactionItem.quantity_change > 0
@@ -1414,6 +1579,107 @@ def confirm_order(order_id: int, db: Session = Depends(get_db)):
 @app.get("/api/orders/{order_id}/availability")
 def order_availability(order_id: int, db: Session = Depends(get_db)):
     return order_workflow_dict(db, load_order(db, order_id))
+
+
+def order_return_dict(row: OrderReturn) -> dict:
+    return {
+        "id": row.id,
+        "return_no": row.return_no,
+        "order_id": row.order_id,
+        "order_item_id": row.order_item_id,
+        "product_id": row.product_id,
+        "product_sku": row.product.sku,
+        "product_name": row.product.name,
+        "unit": row.product.unit,
+        "quantity": row.quantity,
+        "restocked": row.restocked,
+        "transaction_id": row.transaction_id,
+        "notes": row.notes,
+        "occurred_at": row.occurred_at.isoformat(),
+    }
+
+
+@app.get("/api/orders/{order_id}/returns")
+def order_returns(order_id: int, db: Session = Depends(get_db)):
+    if not db.get(SalesOrder, order_id):
+        raise HTTPException(404, "客单不存在")
+    rows = db.scalars(
+        select(OrderReturn)
+        .where(OrderReturn.order_id == order_id)
+        .options(selectinload(OrderReturn.product))
+        .order_by(OrderReturn.occurred_at.desc(), OrderReturn.id.desc())
+    ).all()
+    return [order_return_dict(row) for row in rows]
+
+
+@app.post("/api/orders/{order_id}/returns", status_code=201)
+def create_order_return(
+    order_id: int,
+    payload: OrderReturnPayload,
+    db: Session = Depends(get_db),
+):
+    order = load_order(db, order_id)
+    line_by_id = {line.id: line for line in order.items}
+    if any(line.order_item_id not in line_by_id for line in payload.items):
+        raise HTTPException(400, "退货明细不属于该客单")
+    return_no = serial("RT")
+    occurred_at = datetime.combine(payload.occurred_date, time.min)
+    restock_changes = []
+    for requested in payload.items:
+        line = line_by_id[requested.order_item_id]
+        returnable = max(
+            int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
+            0,
+        )
+        if requested.quantity > returnable:
+            raise HTTPException(
+                409,
+                f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
+            )
+        if requested.restock:
+            restock_changes.append((line.product, requested.quantity, line.product.cost_price))
+    transaction = None
+    if restock_changes:
+        transaction = create_transaction(
+            db,
+            "SALE_RETURN_IN",
+            restock_changes,
+            payload.notes or f"客单 {order.order_no} 退货入库",
+            related_order_id=order.id,
+            occurred_at=occurred_at,
+        )
+    created = []
+    affected_products: set[int] = set()
+    for requested in payload.items:
+        line = line_by_id[requested.order_item_id]
+        line.returned_quantity = int(line.returned_quantity or 0) + requested.quantity
+        row = OrderReturn(
+            return_no=return_no,
+            order_id=order.id,
+            order_item_id=line.id,
+            product_id=line.product_id,
+            quantity=requested.quantity,
+            restocked=requested.restock,
+            transaction_id=transaction.id if requested.restock and transaction else None,
+            notes=payload.notes.strip(),
+            occurred_at=occurred_at,
+        )
+        db.add(row)
+        created.append(row)
+        if requested.restock:
+            affected_products.add(line.product_id)
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+        recalculate_production_plan(db)
+    db.commit()
+    for row in created:
+        row.product = line_by_id[row.order_item_id].product
+    return {
+        "return_no": return_no,
+        "transaction_id": transaction.id if transaction else None,
+        "items": [order_return_dict(row) for row in created],
+        "order": order_dict(load_order(db, order.id)),
+    }
 
 
 @app.post("/api/orders/{order_id}/prepare", deprecated=True)

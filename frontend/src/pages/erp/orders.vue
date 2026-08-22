@@ -15,6 +15,8 @@ const filterDrawer = ref(false)
 const workflowDrawer = ref(false)
 const workflowLoading = ref(false)
 const workflow = ref<any>(null)
+const returnHistory = ref<any[]>([])
+const returnSaving = ref(false)
 const shipmentDrawer = ref(false)
 const shipmentForm = reactive({ items: [] as any[], notes: "" })
 const activeOrder = ref<any>(null)
@@ -24,6 +26,7 @@ const products = ref<any[]>([])
 const keyword = ref("")
 const filters = reactive({ status: "", dateRange: [] as string[] })
 const today = () => new Date().toISOString().slice(0, 10)
+const returnForm = reactive({ occurred_date: today(), notes: "", items: [] as any[] })
 function emptyOrderForm() {
   return {
     customer_name: "",
@@ -50,6 +53,15 @@ const workflowNextAction = computed(() => {
   return labels[workflow.value?.next_action] || "系统正在自动计算剩余需求"
 })
 const orderedQuantity = computed(() => activeOrder.value?.items?.reduce((sum: number, line: any) => sum + Number(line.quantity || 0), 0) || 0)
+const activeStatusMeta = computed(() => {
+  const nextAction = workflow.value?.next_action
+  if (activeOrder.value?.status === "WAITING_MATERIALS") {
+    if (nextAction === "PURCHASE") return { label: "零件待购买", type: "warning" }
+    if (nextAction === "CONFIGURE_BOM") return { label: "待配置 BOM", type: "danger" }
+    if (nextAction === "PRODUCE") return { label: "产品待生产", type: "primary" }
+  }
+  return statusMap[activeOrder.value?.status] || { label: activeOrder.value?.status || "-", type: "info" }
+})
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -115,11 +127,55 @@ async function openWorkflow(row: any) {
   workflowDrawer.value = true
   workflowLoading.value = true
   try {
-    workflow.value = await api(`/api/orders/${row.id}/availability`)
+    const [availability, history] = await Promise.all([
+      api(`/api/orders/${row.id}/availability`),
+      api(`/api/orders/${row.id}/returns`)
+    ])
+    workflow.value = availability
+    returnHistory.value = history
+    returnForm.occurred_date = today()
+    returnForm.notes = ""
+    returnForm.items = row.items.map((line: any) => ({
+      order_item_id: line.id,
+      product_name: line.product_name,
+      product_sku: line.product_sku,
+      unit: products.value.find(product => product.id === line.product_id)?.unit || "件",
+      shipped_quantity: Number(line.shipped_quantity || 0),
+      returned_quantity: Number(line.returned_quantity || 0),
+      returnable_quantity: Number(line.returnable_quantity || 0),
+      quantity: 0,
+      restock: true
+    }))
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
     workflowLoading.value = false
+  }
+}
+async function submitReturn() {
+  const items = returnForm.items
+    .filter(line => Number(line.quantity) > 0)
+    .map(line => ({
+      order_item_id: line.order_item_id,
+      quantity: Number(line.quantity),
+      restock: Boolean(line.restock)
+    }))
+  if (!items.length) return ElMessage.warning("请填写至少一项退货数量")
+  returnSaving.value = true
+  try {
+    await api(`/api/orders/${activeOrder.value.id}/returns`, {
+      method: "POST",
+      body: JSON.stringify({ items, occurred_date: returnForm.occurred_date, notes: returnForm.notes })
+    })
+    ElMessage.success("退货已登记；勾选入库的产品已生成退货入库单")
+    await load(true)
+    const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
+    if (refreshed) await openWorkflow(refreshed)
+    activeDetailTab.value = "returns"
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    returnSaving.value = false
   }
 }
 async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
@@ -329,10 +385,10 @@ useLiveRefresh(async () => {
             <span class="mono">{{ activeOrder?.order_no || '' }}</span>
             <el-tag
               v-if="activeOrder"
-              :type="statusMap[activeOrder.status]?.type as any"
+              :type="activeStatusMeta.type as any"
               size="small"
             >
-              {{ statusMap[activeOrder.status]?.label || activeOrder.status }}
+              {{ activeStatusMeta.label }}
             </el-tag>
           </div>
           <div v-if="activeOrder" class="order-workspace-actions">
@@ -378,7 +434,7 @@ useLiveRefresh(async () => {
               <div class="order-overview-strip">
                 <div>
                   <span>当前状态</span>
-                  <strong>{{ statusMap[activeOrder.status]?.label || activeOrder.status }}</strong>
+                  <strong>{{ activeStatusMeta.label }}</strong>
                 </div>
                 <div><span>要求交期</span><strong>{{ activeOrder.required_date }}</strong></div>
                 <div>
@@ -513,8 +569,8 @@ useLiveRefresh(async () => {
                     5 产品出库
                   </div>
                 </div><div class="workflow-summary">
-                  <el-tag :type="statusMap[workflow.status]?.type as any">
-                    {{ statusMap[workflow.status]?.label || workflow.status }}
+                  <el-tag :type="activeStatusMeta.type as any">
+                    {{ activeStatusMeta.label }}
                   </el-tag><span>{{ workflowNextAction }}</span>
                 </div>
               </div>
@@ -553,9 +609,23 @@ useLiveRefresh(async () => {
                   <template #default="{ row }">
                     {{ productQty(row.remaining_quantity) }}
                   </template>
+                </el-table-column><el-table-column label="当前成品" width="105" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.current_stock) }}
+                  </template>
+                </el-table-column><el-table-column label="其他客单占用" width="120" align="right">
+                  <template #default="{ row }">
+                    <b :class="row.reserved_by_other_orders ? 'number-negative' : ''">
+                      {{ productQty(row.reserved_by_other_orders) }}
+                    </b>
+                  </template>
                 </el-table-column><el-table-column label="已预留" width="105" align="right">
                   <template #default="{ row }">
                     <b class="number-positive">{{ productQty(row.reserved_quantity) }}</b>
+                  </template>
+                </el-table-column><el-table-column label="半成品/在途" width="125" align="right">
+                  <template #default="{ row }">
+                    {{ productQty(row.pipeline_quantity) }}
                   </template>
                 </el-table-column><el-table-column label="需生产" width="120" align="right">
                   <template #default="{ row }">
@@ -617,6 +687,65 @@ useLiveRefresh(async () => {
                   <template #default="{ row }">
                     <b :class="row.shortage_quantity ? 'number-negative' : 'number-positive'">{{ qty(row.shortage_quantity) }}</b>
                   </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="returns">
+            <template #label>
+              <span class="detail-tab-label">退货 <el-badge v-if="returnHistory.length" :value="returnHistory.length" /></span>
+            </template>
+            <div class="detail-page">
+              <div class="detail-section-head detail-section-head-first">
+                <strong>登记客户退货</strong>
+              </div>
+              <el-alert
+                title="退货数量不能超过该产品累计已出库且尚未退回的数量；只有勾选“退回成品库存”才会增加库存并生成退货入库单。"
+                type="info"
+                :closable="false"
+                show-icon
+              />
+              <el-table :data="returnForm.items" border style="margin-top: 16px" empty-text="该订单没有可登记的产品">
+                <el-table-column label="产品" min-width="220">
+                  <template #default="{ row }">
+                    <div class="sku-cell"><strong>{{ row.product_name }}</strong><span>{{ row.product_sku }}</span></div>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="shipped_quantity" label="累计出库" width="105" align="right" />
+                <el-table-column prop="returned_quantity" label="已退" width="90" align="right" />
+                <el-table-column prop="returnable_quantity" label="可退" width="90" align="right" />
+                <el-table-column label="本次退货" width="145">
+                  <template #default="{ row }">
+                    <QuantityInput v-model="row.quantity" integer :min="0" :max="row.returnable_quantity" :disabled="!row.returnable_quantity" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="库存处理" width="145">
+                  <template #default="{ row }">
+                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">退回成品库存</el-checkbox>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div class="return-form-footer">
+                <el-date-picker v-model="returnForm.occurred_date" type="date" value-format="YYYY-MM-DD" placeholder="退货日期" />
+                <el-input v-model="returnForm.notes" placeholder="退货原因或备注" clearable />
+                <el-button type="primary" :loading="returnSaving" @click="submitReturn">登记退货</el-button>
+              </div>
+              <div class="detail-section-head">
+                <strong>退货记录</strong>
+              </div>
+              <el-table :data="returnHistory" border empty-text="暂无退货记录">
+                <el-table-column prop="return_no" label="退货单号" min-width="185" />
+                <el-table-column label="产品" min-width="190">
+                  <template #default="{ row }">{{ row.product_name }} · {{ row.product_sku }}</template>
+                </el-table-column>
+                <el-table-column label="数量" width="110" align="right">
+                  <template #default="{ row }">{{ productQty(row.quantity) }} {{ row.unit }}</template>
+                </el-table-column>
+                <el-table-column label="库存处理" width="120">
+                  <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>
+                </el-table-column>
+                <el-table-column label="日期" width="120">
+                  <template #default="{ row }">{{ formatDate(row.occurred_at) }}</template>
                 </el-table-column>
               </el-table>
             </div>
@@ -752,3 +881,19 @@ useLiveRefresh(async () => {
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.return-form-footer {
+  display: grid;
+  grid-template-columns: 160px minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 16px;
+}
+
+@media (max-width: 760px) {
+  .return-form-footer {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

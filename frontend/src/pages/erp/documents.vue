@@ -44,12 +44,15 @@ const transactionOptions = computed(() => {
     return ["PURCHASE_IN", "GENERAL_IN", "OPENING"]
   }
   if (direction.value === "inbound") {
-    return ["ASSEMBLY_IN", "MANUAL_IN", "GENERAL_IN", "OPENING"]
+    return [
+      "ASSEMBLY_IN", "SEMI_FINISHED_IN", "PROCESS_RETURN_IN",
+      "SALE_RETURN_IN", "MANUAL_IN", "GENERAL_IN", "OPENING"
+    ]
   }
   if (scope.value === "PART") {
     return ["PRODUCTION_OUT", "MANUAL_OUT", "GENERAL_OUT"]
   }
-  return ["SALE_OUT", "MANUAL_OUT", "GENERAL_OUT"]
+  return ["SALE_OUT", "PROCESS_OUT", "MANUAL_OUT", "GENERAL_OUT"]
 })
 
 async function load(silent = false) {

@@ -114,6 +114,20 @@ useLiveRefresh(() => load(true))
             {{ row.unit }}
           </template>
         </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="半成品" width="105" align="right">
+          <template #default="{ row }">
+            <b :class="row.semi_finished_qty ? 'number-positive' : ''">
+              {{ productQty(row.semi_finished_qty) }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="kind === 'PRODUCT'" label="外协在途" width="105" align="right">
+          <template #default="{ row }">
+            <b :class="row.processing_qty ? 'number-positive' : ''">
+              {{ productQty(row.processing_qty) }}
+            </b>
+          </template>
+        </el-table-column>
         <el-table-column v-if="kind === 'PRODUCT'" label="客单预留" width="105" align="right">
           <template #default="{ row }">
             {{ productQty(row.reserved_qty) }}
