@@ -209,6 +209,9 @@ def transaction_dict(tx: StockTransaction) -> dict:
         ),
         "operator": tx.operator_snapshot,
         "notes": tx.notes,
+        "status": tx.status or "POSTED",
+        "reversal_of_transaction_id": tx.reversal_of_transaction_id,
+        "reversed_by_transaction_id": tx.reversed_by_transaction_id,
         "lines": [
             {
                 "id": line.id,
@@ -225,6 +228,8 @@ def transaction_dict(tx: StockTransaction) -> dict:
                 "unit_cost": line.unit_cost,
                 "unit_price": line.unit_price_snapshot,
                 "line_total": line.line_total_snapshot,
+                "inventory_bucket": line.inventory_bucket or "FINISHED",
+                "affects_primary_stock": bool(line.affects_primary_stock),
             }
             for line in tx.lines
         ],
@@ -324,6 +329,7 @@ def create_transaction(
         if apply_inventory and delta > 0 and unit_cost > 0:
             item.cost_price = unit_cost
         price, line_total = (price_snapshots or {}).get(item.id, (None, None))
+        bucket = _infer_inventory_bucket(tx_type, item.kind)
         db.add(StockTransactionItem(
             transaction_id=tx.id,
             item_id=item.id,
@@ -335,6 +341,8 @@ def create_transaction(
             unit_snapshot=item.unit,
             unit_price_snapshot=price,
             line_total_snapshot=line_total,
+            inventory_bucket=bucket,
+            affects_primary_stock=apply_inventory,
         ))
     db.flush()
     return tx
@@ -362,6 +370,20 @@ RESERVATION_STATUSES = (
     "READY_TO_SHIP",
     "PARTIALLY_SHIPPED",
 )
+
+
+def _infer_inventory_bucket(tx_type: str, item_kind: str) -> str:
+    if tx_type == "SAMPLE_ADJUST":
+        return "SAMPLE"
+    if tx_type in ("SEMI_FINISHED_IN",):
+        return "SEMI_FINISHED"
+    if tx_type in ("PROCESS_OUT",):
+        return "PROCESSING"
+    if tx_type in ("PRODUCTION_OUT", "PRODUCTION_RETURN", "PURCHASE_IN"):
+        return "RAW"
+    if tx_type in ("ASSEMBLY_IN", "SALE_OUT", "SALE_RETURN_IN", "PROCESS_RETURN_IN"):
+        return "FINISHED"
+    return "FINISHED" if item_kind == "PRODUCT" else "RAW"
 
 
 def rebalance_product_reservations(db: Session, product_ids: set[int] | None = None) -> None:

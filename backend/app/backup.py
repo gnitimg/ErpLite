@@ -33,7 +33,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 13
+BACKUP_SCHEMA_VERSION = 14
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -262,6 +262,15 @@ def _load_archive(path: Path) -> dict[str, Any]:
             row.setdefault("terminated_at", None)
             row.setdefault("workflow_version", 1)
         tables.setdefault("production_material_reservations", [])
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 13:
+        for row in tables.get("stock_transactions", []):
+            row.setdefault("status", "POSTED")
+            row.setdefault("reversal_of_transaction_id", None)
+            row.setdefault("reversed_by_transaction_id", None)
+        for row in tables.get("stock_transaction_items", []):
+            row.setdefault("inventory_bucket", "FINISHED")
+            row.setdefault("affects_primary_stock", True)
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

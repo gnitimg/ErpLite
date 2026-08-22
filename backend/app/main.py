@@ -2175,6 +2175,58 @@ def cancel_order(
     return order_dict(order)
 
 
+@app.post("/api/stock/transactions/{transaction_id}/reverse", status_code=201)
+def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)):
+    original = db.scalar(
+        select(StockTransaction)
+        .where(StockTransaction.id == transaction_id)
+        .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item))
+    )
+    if not original:
+        raise HTTPException(404, "库存流水不存在")
+    if original.status == "REVERSED":
+        raise HTTPException(409, "该流水已被冲销，不能再次冲销")
+    if original.transaction_type == "REVERSAL":
+        raise HTTPException(409, "冲销单不能再次冲销")
+    changes = []
+    for line in original.lines:
+        changes.append((line.item, -line.quantity_change, line.unit_cost))
+    reversal_tx = create_transaction(
+        db,
+        "REVERSAL",
+        changes,
+        f"冲销 {original.transaction_no}",
+        related_order_id=original.related_order_id,
+        related_production_run_id=original.related_production_run_id,
+        occurred_at=datetime.now(),
+    )
+    reversal_tx.reversal_of_transaction_id = original.id
+    original.reversed_by_transaction_id = reversal_tx.id
+    original.status = "REVERSED"
+    if original.transaction_type == "SALE_OUT" and original.related_order_id:
+        order = db.get(SalesOrder, original.related_order_id)
+        if order:
+            for line in original.lines:
+                if line.quantity_change < 0:
+                    order_item = db.scalar(
+                        select(SalesOrderItem)
+                        .where(
+                            SalesOrderItem.product_id == line.item_id,
+                            SalesOrderItem.order_id == order.id,
+                        )
+                    )
+                    if order_item:
+                        order_item.shipped_quantity = max(
+                            int(order_item.shipped_quantity or 0) + int(line.quantity_change), 0
+                        )
+    affected_products = {line.item_id for line in original.lines if line.item.kind == "PRODUCT"}
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+    recalculate_production_plan(db)
+    db.commit()
+    return transaction_dict(reversal_tx)
+
+
 @app.get("/api/backups")
 def backups():
     return list_backup_archives()

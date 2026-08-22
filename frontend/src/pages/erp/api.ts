@@ -153,7 +153,8 @@ export const txLabels: Record<string, string> = {
   MANUAL_OUT: "手工出库",
   GENERAL_OUT: "普通出库",
   SALE_OUT: "客单出库",
-  SAMPLE_ADJUST: "样品调整"
+  SAMPLE_ADJUST: "样品调整",
+  REVERSAL: "冲销"
 }
 
 export const statusMap: Record<string, { label: string, type: string }> = {

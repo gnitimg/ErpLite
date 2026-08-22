@@ -329,6 +329,13 @@ class StockTransaction(Base):
     counterparty_address_snapshot: Mapped[str | None] = mapped_column(String(255), nullable=True)
     operator_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="POSTED", server_default="POSTED", index=True)
+    reversal_of_transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reversed_by_transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     lines: Mapped[list["StockTransactionItem"]] = relationship(cascade="all, delete-orphan", back_populates="transaction")
@@ -350,6 +357,8 @@ class StockTransactionItem(Base):
     unit_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     unit_price_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
     line_total_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    inventory_bucket: Mapped[str] = mapped_column(String(20), default="FINISHED", server_default="FINISHED")
+    affects_primary_stock: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
     transaction: Mapped[StockTransaction] = relationship(back_populates="lines")
     item: Mapped[InventoryItem] = relationship()
