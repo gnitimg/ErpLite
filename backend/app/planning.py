@@ -81,6 +81,14 @@ class WorkingCalendar:
             current = datetime.combine(current.date() + timedelta(days=1), start_at.time())
         return current
 
+    def snap_to_working(self, start: datetime) -> datetime:
+        """把起点吸附到最近的工作日同一时刻：批次不得显示休息日开工。"""
+        for _ in range(MAX_CALENDAR_LOOKAHEAD_DAYS):
+            if self.is_working_day(start.date()):
+                return start
+            start = datetime.combine(start.date() + timedelta(days=1), start.time())
+        return start
+
     def working_span(self, start: datetime, end: datetime) -> float:
         """[start, end] 之间的生产日数（份额权重用，天粒度近似）。"""
         if end <= start:
@@ -393,6 +401,7 @@ def _choose_resources(
     mold_available: dict[tuple[int, int], datetime],
     mold_count: int,
     line_count: int,
+    earliest_start: datetime | None = None,
 ) -> tuple[list[dict], datetime] | None:
     effective_capacity = float(daily_capacity)
     if effective_capacity <= 0:
@@ -401,11 +410,12 @@ def _choose_resources(
     rate = effective_capacity  # 以“件/生产日”为速率单位
     for line_slot in range(1, max(int(line_count), 1) + 1):
         for mold_slot in range(1, max(int(mold_count), 1) + 1):
-            start = max(
+            start = calendar.snap_to_working(max(
                 now,
+                earliest_start or now,
                 line_available.get(line_slot, now),
                 mold_available.get((product_id, mold_slot), now),
-            )
+            ))
             candidates.append({
                 "line_slot": line_slot,
                 "mold_slot": mold_slot,
@@ -748,6 +758,9 @@ def _recalculate_plan_impl(
             mold_available,
             max(int(product.mold_count or 1), 1),
             line_count,
+            # 材料可满足时间真正进入资源选择：原料 8/30 到，批次不得显示 8/25 开工。
+            # 材料时间未知（None）时给机台临时排期，但 ETA 不可靠。
+            earliest_start=material_available,
         )
         if choice is None:
             unavailable_products.append(product_id)
@@ -795,7 +808,7 @@ def _recalculate_plan_impl(
         if product_id in missing_bom_products:
             note = "产品未配置 BOM；机器排程 ETA 仅供参考，暂不可承诺"
         elif product_id in shortage_products:
-            note = "原材料不足：现有库存加预计到货仍无法覆盖需求，ETA 仅供参考"
+            note = "理论机台排期：原材料不足（现有库存加预计到货仍无法覆盖），暂不可承诺"
         elif material_available is not None and material_available > now:
             note = f"原材料在途，预计 {material_available:%m-%d} 到货后可排产"
             for demand in demands:

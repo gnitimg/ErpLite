@@ -383,3 +383,42 @@ def test_arrived_and_cancelled_commitments_do_not_count():
         result = recalculate_production_plan(db, NOW)
         # 只有 8/28 的 30 件有效：40 的需求仍缺 10 → shortage
         assert result["material_shortage_product_ids"] == [p01.id]
+
+
+# ───────────────── 4E：采购预计真正推迟 Run 起点 ─────────────────
+
+def test_material_arrival_pushes_run_start():
+    """材料 8/30 到货：批次起点必须是 8/30，不再是“先排 8/25 再 patch ETA”。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=0)
+        p01 = make_product(db, "P01", daily_capacity=80)
+        add_bom(db, p01, part, 1)
+        add_commitment(db, part, 80, datetime(2026, 8, 30, 8, 0))
+        order = add_order(db, "SO-A", [(p01, 80)], days_until_due=2)
+        recalculate_production_plan(db, NOW)
+        run = all_runs(db)[0]
+        # 8/30 是周日：起点吸附到周一 8/31，1 个生产日落到周二 08:00；
+        # 甘特图与订单 ETA 来自同一时间事实
+        assert run.planned_start_at == datetime(2026, 8, 31, 8, 0)
+        assert run.planned_end_at == datetime(2026, 9, 1, 8, 0)
+        assert order.items[0].estimated_completion_at == datetime(2026, 9, 1, 8, 0)
+        assert order.items[0].eta_reliable
+
+
+def test_unknown_material_gives_provisional_schedule_with_note():
+    """材料时间未知：仍给出机台临时排期，但 ETA 不可靠且说明原因。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=0)
+        p01 = make_product(db, "P01", daily_capacity=80)
+        add_bom(db, p01, part, 1)
+        order = add_order(db, "SO-A", [(p01, 80)])
+        result = recalculate_production_plan(db, NOW)
+        assert result["material_shortage_product_ids"] == [p01.id]
+        run = all_runs(db)[0]
+        # 机台临时排期仍从现在起（周四+1 生产日=周五），但不可承诺
+        assert run.planned_start_at == NOW
+        assert run.planned_end_at == NOW + timedelta(days=1)
+        assert order.items[0].eta_reliable is False
+        assert "理论机台排期" in (order.items[0].eta_note or "")
