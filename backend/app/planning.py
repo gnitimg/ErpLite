@@ -97,6 +97,77 @@ class WorkingCalendar:
         return total
 
 
+class MaterialTimeline:
+    """零件供给时间轴（计划预测用）：可用库存 + PLANNED 采购承诺按到货顺序被依次消耗。
+
+    planner 按生产优先顺序对每个待排产品消耗 BOM 需求，得到该批生产
+    "全部材料可满足"的最早时间——run 级结果，而不是一个零件一个全局日期。
+    与 ProductionMaterialReservation（当前实际库存的开工占用）是两个并存的
+    概念：这里是预测，那里是占用。
+    """
+
+    def __init__(self, db: Session, now: datetime):
+        self._now = now
+        self._shortage: dict[int, float] = defaultdict(float)
+        reserved_by_part: dict[int, float] = defaultdict(float)
+        for part_id, quantity in db.execute(
+            select(
+                ProductionMaterialReservation.part_id,
+                func.coalesce(func.sum(ProductionMaterialReservation.quantity), 0),
+            )
+            .where(ProductionMaterialReservation.status == "ACTIVE")
+            .group_by(ProductionMaterialReservation.part_id)
+        ).all():
+            reserved_by_part[part_id] = float(quantity)
+        # 固定批次的材料已从现有库存预留，不能重复许诺给新计划。
+        self._stock: dict[int, float] = {}
+        for part_id, stock_qty in db.execute(
+            select(InventoryItem.id, InventoryItem.stock_qty)
+            .where(InventoryItem.kind == "PART")
+        ).all():
+            self._stock[part_id] = max(
+                float(stock_qty or 0) - reserved_by_part.get(part_id, 0.0), 0.0
+            )
+        self._commitments: dict[int, list[tuple[datetime, float]]] = defaultdict(list)
+        for commitment in db.scalars(
+            select(PurchaseCommitment).where(PurchaseCommitment.status == "PLANNED")
+        ).all():
+            arrival = commitment.expected_arrival_at or now
+            self._commitments[commitment.part_id].append(
+                (max(arrival, now), float(commitment.quantity))
+            )
+        for lots in self._commitments.values():
+            lots.sort()
+
+    def consume(self, part_id: int, quantity: float) -> datetime | None:
+        """按时间轴消耗 quantity 件；返回满足时刻，供给不足时返回 None。"""
+        remaining = float(quantity)
+        if remaining <= 1e-9:
+            return self._now
+        available_at = self._now
+        stock = self._stock.get(part_id, 0.0)
+        if stock > 1e-9:
+            taken = min(stock, remaining)
+            self._stock[part_id] = stock - taken
+            remaining -= taken
+        lots = self._commitments.get(part_id)
+        while remaining > 1e-9 and lots:
+            arrival, lot_quantity = lots[0]
+            taken = min(lot_quantity, remaining)
+            lots[0] = (arrival, lot_quantity - taken)
+            remaining -= taken
+            available_at = max(available_at, arrival)
+            if lot_quantity - taken <= 1e-9:
+                lots.pop(0)
+        if remaining > 1e-9:
+            self._shortage[part_id] += remaining
+            return None
+        return available_at
+
+    def shortage_parts(self) -> dict[int, float]:
+        return dict(self._shortage)
+
+
 def is_working_day(db: Session, check_date: date) -> bool:
     """检查给定日期是否为工作日。优先查日历例外，再查默认工作日设置。"""
     return WorkingCalendar(db).is_working_day(check_date)
@@ -630,49 +701,15 @@ def _recalculate_plan_impl(
         mold_key = (run.product_id, max(int(run.mold_slot or 1), 1))
         mold_available[mold_key] = max(mold_available[mold_key], run.planned_end_at)
 
-    material_required: dict[int, float] = defaultdict(float)
-    products_with_part: dict[int, set[int]] = defaultdict(set)
+    # 物料时间轴：run 级预测。现有库存先被最靠前的需求用掉，
+    # 后续需求只能等更晚的到货——不再是"一个零件一个全局 ETA"。
+    timeline = MaterialTimeline(db, now)
+    shortage_products: set[int] = set()
     missing_bom_products: set[int] = set()
     for product_id, demands in demands_by_product.items():
-        total = sum(row["quantity"] for row in demands)
         product = demands[0]["line"].product
         if not product.bom_components:
             missing_bom_products.add(product_id)
-        for component in product.bom_components:
-            material_required[component.part_id] += float(component.quantity) * total
-            products_with_part[component.part_id].add(product_id)
-    shortage_products: set[int] = set()
-    part_eta_map: dict[int, datetime] = {}
-    for part_id, required in material_required.items():
-        part = db.get(InventoryItem, part_id)
-        if not part:
-            shortage_products.update(products_with_part[part_id])
-            continue
-        available = float(part.stock_qty)
-        shortfall = required - available
-        if shortfall <= 1e-9:
-            continue
-        commitments = db.scalars(
-            select(PurchaseCommitment)
-            .where(
-                PurchaseCommitment.part_id == part_id,
-                PurchaseCommitment.status == "PLANNED",
-            )
-            .order_by(PurchaseCommitment.expected_arrival_at)
-        ).all() if shortfall > 0 else []
-        committed_quantity = sum(float(c.quantity) for c in commitments)
-        if committed_quantity + available + 1e-9 >= required:
-            covered = 0.0
-            for c in commitments:
-                if covered + 1e-9 >= shortfall:
-                    break
-                covered += float(c.quantity)
-                if c.expected_arrival_at:
-                    prev = part_eta_map.get(part_id)
-                    if prev is None or c.expected_arrival_at > prev:
-                        part_eta_map[part_id] = c.expected_arrival_at
-        else:
-            shortage_products.update(products_with_part[part_id])
 
     product_order = sorted(
         demands_by_product,
@@ -689,6 +726,18 @@ def _recalculate_plan_impl(
         demands = demands_by_product[product_id]
         total_quantity = int(sum(row["quantity"] for row in demands))
         product = demands[0]["line"].product
+        # 按生产优先顺序消耗物料时间轴，得到本批生产全部材料可满足的最早时间。
+        material_available: datetime | None = now
+        if product_id not in missing_bom_products:
+            for component in product.bom_components:
+                got = timeline.consume(
+                    component.part_id, float(component.quantity) * total_quantity
+                )
+                if got is None:
+                    material_available = None
+                    shortage_products.add(product_id)
+                elif material_available is not None and got > material_available:
+                    material_available = got
         choice = _choose_resources(
             calendar,
             product_id,
@@ -746,21 +795,14 @@ def _recalculate_plan_impl(
         if product_id in missing_bom_products:
             note = "产品未配置 BOM；机器排程 ETA 仅供参考，暂不可承诺"
         elif product_id in shortage_products:
-            note = "BOM 原材料不足；机器排程 ETA 仅供参考，暂不可承诺"
+            note = "原材料不足：现有库存加预计到货仍无法覆盖需求，ETA 仅供参考"
+        elif material_available is not None and material_available > now:
+            note = f"原材料在途，预计 {material_available:%m-%d} 到货后可排产"
+            for demand in demands:
+                if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < material_available:
+                    demand["line"].estimated_completion_at = material_available
         else:
-            product_part_etas = [
-                part_eta_map[comp.part_id]
-                for comp in product.bom_components
-                if comp.part_id in part_eta_map
-            ]
-            if product_part_etas:
-                latest_material = max(product_part_etas)
-                note = f"原材料在途，预计 {latest_material:%m-%d} 到货后可排产"
-                for demand in demands:
-                    if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_material:
-                        demand["line"].estimated_completion_at = latest_material
-            else:
-                note = ""
+            note = ""
         if product.requires_external_processing:
             ext_batches = db.scalars(
                 select(ExternalProcessingBatch)

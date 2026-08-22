@@ -303,3 +303,83 @@ def test_manual_drag_end_respects_calendar():
         )
         db.expire_all()
         assert run.planned_end_at == monday_night
+
+
+# ───────────────── 4D：Run-Level Material Timeline ─────────────────
+
+def make_part(db, sku, stock=0):
+    from app.models import InventoryItem as Item
+    part = Item(sku=sku, name=sku, kind="PART", stock_qty=stock)
+    db.add(part)
+    db.flush()
+    return part
+
+
+def add_bom(db, product, part, quantity):
+    from app.models import ProductBomItem
+    db.add(ProductBomItem(product_id=product.id, part_id=part.id, quantity=quantity))
+    db.flush()
+
+
+def add_commitment(db, part, quantity, arrival: datetime, status="PLANNED"):
+    from app.models import PurchaseCommitment
+    row = PurchaseCommitment(
+        part_id=part.id, quantity=quantity,
+        expected_arrival_at=arrival, status=status,
+        supplier_text="sup", notes="",
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def test_shared_part_stock_first_demand_wins_and_second_waits():
+    """X 库存 100：先排的 P01 用 80 立即生产；P02 需 80 只剩 20，等 8/30 的 60 件到货。"""
+    with database() as db:
+        add_setting(db, line_count=2)
+        part = make_part(db, "X", stock=100)
+        p01 = make_product(db, "P01", daily_capacity=80)
+        p02 = make_product(db, "P02", daily_capacity=80)
+        add_bom(db, p01, part, 1)
+        add_bom(db, p02, part, 1)
+        add_commitment(db, part, 60, datetime(2026, 8, 30, 8, 0))
+        order_a = add_order(db, "SO-A", [(p01, 80)], days_until_due=2)
+        order_b = add_order(db, "SO-B", [(p02, 80)], days_until_due=3)
+        recalculate_production_plan(db, NOW)
+        # P01：现有库存覆盖，ETA 就是机台完工时间（周四+1 生产日=周五）
+        assert order_a.items[0].estimated_completion_at == NOW + timedelta(days=1)
+        assert order_a.items[0].eta_reliable
+        # P02：只剩 20 + 60 在途 → 必须等 8/30，ETA 不得早于到货时间
+        assert order_b.items[0].estimated_completion_at >= datetime(2026, 8, 30, 8, 0)
+        assert "8-30" in (order_b.items[0].eta_note or "")
+
+
+def test_material_available_runs_out_notes_shortage():
+    """库存加承诺都不够：ETA 不可靠且注明供给不足，不伪造可靠时间。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=10)
+        p01 = make_product(db, "P01")
+        add_bom(db, p01, part, 1)
+        add_commitment(db, part, 20, datetime(2026, 8, 26, 8, 0))
+        order = add_order(db, "SO-A", [(p01, 100)])
+        result = recalculate_production_plan(db, NOW)
+        assert result["material_shortage_product_ids"] == [p01.id]
+        assert order.items[0].eta_reliable is False
+        assert "不足" in (order.items[0].eta_note or "")
+
+
+def test_arrived_and_cancelled_commitments_do_not_count():
+    """ARRIVED 已反映在真实库存、CANCELLED 忽略：只有 PLANNED 参与未来供给。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=0)
+        p01 = make_product(db, "P01")
+        add_bom(db, p01, part, 1)
+        add_commitment(db, part, 50, datetime(2026, 8, 25, 8, 0), status="ARRIVED")
+        add_commitment(db, part, 50, datetime(2026, 8, 26, 8, 0), status="CANCELLED")
+        add_commitment(db, part, 30, datetime(2026, 8, 28, 8, 0), status="PLANNED")
+        order = add_order(db, "SO-A", [(p01, 40)])
+        result = recalculate_production_plan(db, NOW)
+        # 只有 8/28 的 30 件有效：40 的需求仍缺 10 → shortage
+        assert result["material_shortage_product_ids"] == [p01.id]
