@@ -545,3 +545,60 @@ def test_send_with_explicit_return_date_wins():
             db,
         )
         assert batch["expected_return_at"] == "2026-08-27T08:00:00"
+
+
+# ───────────────── 4G：最终 ETA 汇总 ─────────────────
+
+def test_second_commitment_lot_sets_material_eta():
+    """库存 20 + 两批到货（30@8/25、30@8/26）：80 的需求要等到第二批 8/26。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=20)
+        p01 = make_product(db, "P01", daily_capacity=80)
+        add_bom(db, p01, part, 1)
+        add_commitment(db, part, 30, datetime(2026, 8, 25, 8, 0))
+        add_commitment(db, part, 30, datetime(2026, 8, 26, 8, 0))
+        order = add_order(db, "SO-A", [(p01, 80)], days_until_due=2)
+        recalculate_production_plan(db, NOW)
+        run = all_runs(db)[0]
+        # 材料可满足时间是 8/26（周三），批次起点不得早于它
+        assert run.planned_start_at == datetime(2026, 8, 26, 8, 0)
+        assert "08-26" in (order.items[0].eta_note or "")
+        assert order.items[0].eta_reliable
+
+
+def test_partial_stock_plus_production_combined_eta():
+    """成品库存 30 立即预留，剩余 70 进入生产：行 ETA = 生产完工时间。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        part = make_part(db, "X", stock=1000)
+        product = make_product(db, "P01", daily_capacity=70)
+        product.stock_qty = 30
+        add_bom(db, product, part, 1)
+        order = add_order(db, "SO-A", [(product, 100)])
+        recalculate_production_plan(db, NOW)
+        line = order.items[0]
+        assert int(line.reserved_quantity) == 30
+        run = all_runs(db)[0]
+        assert int(run.planned_quantity) == 70
+        # 30 件随时可发，70 件周五完工 → 行 ETA = 周五，且可承诺
+        assert line.estimated_completion_at == run.planned_end_at == NOW + timedelta(days=1)
+        assert line.eta_reliable
+
+
+def test_order_eta_is_max_of_lines():
+    """订单 ETA = 各行 ETA 的最大值。"""
+    with database() as db:
+        add_setting(db, line_count=2)
+        part = make_part(db, "X", stock=1000)
+        fast = make_product(db, "P-FAST", daily_capacity=100)
+        slow = make_product(db, "P-SLOW", daily_capacity=100)
+        add_bom(db, fast, part, 1)
+        add_bom(db, slow, part, 1)
+        order = add_order(db, "SO-A", [(fast, 100), (slow, 200)])
+        recalculate_production_plan(db, NOW)
+        # fast 1 个生产日 → 周五；slow 2 个生产日跨周末 → 下周一
+        assert order.items[0].estimated_completion_at == NOW + timedelta(days=1)
+        assert order.items[1].estimated_completion_at == datetime(2026, 8, 24, 8, 0)
+        assert order.estimated_completion_at == datetime(2026, 8, 24, 8, 0)
+        assert order.eta_reliable
