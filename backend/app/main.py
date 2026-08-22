@@ -92,10 +92,13 @@ from .services import (
     ensure_sku_available,
     hash_password,
     item_dict,
+    latest_semi_finished_unit_cost,
     load_order,
     operation_log_dict,
     order_dict,
     order_workflow_dict,
+    production_run_issue_unit_costs,
+    production_run_net_material_cost,
     rebalance_product_reservations,
     release_order_reservations,
     reserved_product_quantity,
@@ -1124,11 +1127,13 @@ def update_production_run_status(
             raise HTTPException(400, "合格数量与报废数量之和不能超过计划数量")
         unproduced = int(run.planned_quantity) - qualified - scrap
         if unproduced > 0:
+            # 退料按本批次领料时点成本快照计价，保持净材料成本可复算。
+            issue_costs = production_run_issue_unit_costs(db, run.id)
             return_changes = [
                 (
                     component.part,
                     float(component.quantity) * unproduced,
-                    component.part.cost_price,
+                    issue_costs.get(component.part_id, component.part.cost_price) or component.part.cost_price,
                 )
                 for component in run.product.bom_components
             ]
@@ -1141,11 +1146,14 @@ def update_production_run_status(
                 occurred_at=datetime.now(),
             )
         external_required = bool(run.product.requires_external_processing)
+        # 终止入库成本 = 净材料成本（领料 - 退料）÷ 合格数量；报废不入库、不摊成本。
+        net_material_cost = production_run_net_material_cost(db, run.id)
+        terminated_unit_cost = net_material_cost / qualified if qualified > 0 else float(run.product.cost_price)
         if qualified > 0:
             inbound_tx = create_transaction(
                 db,
                 "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
-                [(run.product, qualified, run.product.cost_price)],
+                [(run.product, qualified, round(terminated_unit_cost, 2))],
                 f"生产批次 {run.run_no} 终止入库，合格 {qualified}、报废 {scrap}",
                 related_production_run_id=run.id,
                 occurred_at=datetime.now(),
@@ -1342,6 +1350,8 @@ def complete_production_run(
         )
     elif total_consumed != int(run.planned_quantity):
         variance = total_consumed - int(run.planned_quantity)
+        # 补领/退料都按本批次领料时点的成本快照计价，不用完工时点的移动平均。
+        issue_costs = production_run_issue_unit_costs(db, run.id)
         create_transaction(
             db,
             "PRODUCTION_OUT" if variance > 0 else "PRODUCTION_RETURN",
@@ -1349,7 +1359,7 @@ def complete_production_run(
                 (
                     component.part,
                     -float(component.quantity) * variance,
-                    component.part.cost_price,
+                    issue_costs.get(component.part_id, component.part.cost_price) or component.part.cost_price,
                 )
                 for component in run.product.bom_components
             ],
@@ -1362,14 +1372,14 @@ def complete_production_run(
             occurred_at=occurred_at,
         )
     external_required = bool(run.product.requires_external_processing)
-    bom_unit_cost = (
-        sum(float(component.quantity) * float(component.part.cost_price) for component in run.product.bom_components)
-        * total_consumed / qualified
-    ) if qualified > 0 else float(run.product.cost_price)
+    # 完工成本 = 本批次净材料成本（含超产补领、扣少产退料）÷ 合格数量。
+    # 报废消耗的材料由合格品吸收，全部按领料时点快照，不用完工时点零件均价。
+    net_material_cost = production_run_net_material_cost(db, run.id)
+    finished_unit_cost = net_material_cost / qualified if qualified > 0 else float(run.product.cost_price)
     inbound_tx = create_transaction(
         db,
         "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
-        [(run.product, qualified, bom_unit_cost)],
+        [(run.product, qualified, round(finished_unit_cost, 2))],
         payload.notes or (
             f"生产批次 {run.run_no} 半成品入库，待{run.product.external_process_name}"
             if external_required
@@ -1406,6 +1416,8 @@ def complete_production_run(
         "qualified_quantity": qualified,
         "scrap_quantity": scrap,
         "excess_quantity": max(total_consumed - int(run.planned_quantity), 0),
+        "net_material_cost": round(net_material_cost, 2),
+        "finished_unit_cost": round(finished_unit_cost, 2),
         "inventory_bucket": "SEMI_FINISHED" if external_required else "FINISHED",
         "plan": plan,
     }
@@ -1428,6 +1440,7 @@ def external_batch_dict(batch: ExternalProcessingBatch) -> dict:
         "notes": batch.notes,
         "sent_at": batch.sent_at.isoformat(),
         "expected_return_at": batch.expected_return_at.isoformat() if batch.expected_return_at else None,
+        "processing_cost": float(batch.processing_cost or 0),
         "returned_at": batch.returned_at.isoformat() if batch.returned_at else None,
     }
 
@@ -1499,6 +1512,7 @@ def send_external_processing(
         notes=payload.notes.strip(),
         sent_at=occurred_at,
         expected_return_at=expected_return_at,
+        processing_cost=round(float(payload.processing_cost or 0), 2),
     )
     db.add(batch)
     db.commit()
@@ -1527,10 +1541,14 @@ def return_external_processing(
     if payload.quantity > remaining:
         raise HTTPException(409, f"本批次最多还能回厂 {remaining} {batch.product.unit}")
     occurred_at = datetime.combine(payload.occurred_date, time.min)
+    # 回厂成品成本 = 半成品材料成本快照 + 本批次外协费用按比例分摊。
+    semi_unit_cost = latest_semi_finished_unit_cost(db, batch.product_id, batch.product.cost_price)
+    per_unit_processing = float(batch.processing_cost or 0) / max(int(batch.quantity), 1)
+    return_unit_cost = round(semi_unit_cost + per_unit_processing, 2)
     inbound_tx = create_transaction(
         db,
         "PROCESS_RETURN_IN",
-        [(batch.product, payload.quantity, batch.product.cost_price)],
+        [(batch.product, payload.quantity, return_unit_cost)],
         payload.notes or f"{batch.process_name_snapshot}外协回厂",
         occurred_at=occurred_at,
         counterparty_name=batch.supplier,

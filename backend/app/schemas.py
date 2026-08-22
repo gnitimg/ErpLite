@@ -252,6 +252,7 @@ class ExternalProcessingSendPayload(BaseModel):
     occurred_date: date = Field(default_factory=date.today)
     lead_days: int = Field(default=0, ge=0)
     expected_return_at: datetime | None = None
+    processing_cost: float = Field(default=0, ge=0)
     notes: str = Field(default="", max_length=500)
 
 

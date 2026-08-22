@@ -415,6 +415,8 @@ class ExternalProcessingBatch(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     expected_return_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     returned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 本批次外协加工总费用（人工输入），回厂时按比例摊入成品成本。
+    processing_cost: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     product: Mapped[InventoryItem] = relationship()

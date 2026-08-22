@@ -390,6 +390,76 @@ def create_transaction(
     return tx
 
 
+def production_run_issue_unit_costs(db: Session, run_id: int) -> dict[int, float]:
+    """批次各零件的领料时刻成本快照（PRODUCTION_OUT 按数量加权平均）。
+
+    退料、完工成本计算都必须用它，而不是完工时点的 part.cost_price。
+    """
+    totals: dict[int, tuple[float, float]] = {}
+    rows = db.execute(
+        select(
+            StockTransactionItem.item_id,
+            StockTransactionItem.quantity_change,
+            StockTransactionItem.unit_cost,
+        )
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .where(
+            StockTransaction.related_production_run_id == run_id,
+            StockTransaction.transaction_type == "PRODUCTION_OUT",
+            StockTransaction.status != "REVERSED",
+        )
+    ).all()
+    for item_id, quantity_change, unit_cost in rows:
+        quantity = abs(float(quantity_change or 0))
+        value, weight = totals.get(item_id, (0.0, 0.0))
+        totals[item_id] = (value + quantity * float(unit_cost or 0), weight + quantity)
+    return {
+        item_id: value / weight if weight > 1e-9 else 0.0
+        for item_id, (value, weight) in totals.items()
+    }
+
+
+def production_run_net_material_cost(db: Session, run_id: int) -> float:
+    """批次净材料成本 = Σ(PRODUCTION_OUT |数量|×领料快照成本) − Σ(PRODUCTION_RETURN 数量×快照成本)。
+
+    超产补领的额外 PRODUCTION_OUT 自然计入；少产/终止退料自然扣减。
+    """
+    total = 0.0
+    rows = db.execute(
+        select(
+            StockTransaction.transaction_type,
+            StockTransactionItem.quantity_change,
+            StockTransactionItem.unit_cost,
+        )
+        .join(StockTransactionItem, StockTransactionItem.transaction_id == StockTransaction.id)
+        .where(
+            StockTransaction.related_production_run_id == run_id,
+            StockTransaction.transaction_type.in_(("PRODUCTION_OUT", "PRODUCTION_RETURN")),
+            StockTransaction.status != "REVERSED",
+        )
+    ).all()
+    for tx_type, quantity_change, unit_cost in rows:
+        value = abs(float(quantity_change or 0)) * float(unit_cost or 0)
+        total += value if tx_type == "PRODUCTION_OUT" else -value
+    return round(total, 2)
+
+
+def latest_semi_finished_unit_cost(db: Session, product_id: int, fallback: float) -> float:
+    """产品最近一次半成品入库的单位材料成本快照（外协回厂计价的基础）。"""
+    row = db.execute(
+        select(StockTransactionItem.unit_cost)
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .where(
+            StockTransactionItem.item_id == product_id,
+            StockTransaction.transaction_type == "SEMI_FINISHED_IN",
+            StockTransaction.status != "REVERSED",
+        )
+        .order_by(StockTransaction.id.desc())
+        .limit(1)
+    ).first()
+    return float(row[0]) if row and row[0] is not None else float(fallback)
+
+
 def load_order(db: Session, order_id: int) -> SalesOrder:
     order = db.scalar(
         select(SalesOrder)
