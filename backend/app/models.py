@@ -451,6 +451,11 @@ class PurchaseCommitment(Base):
     quantity: Mapped[float] = mapped_column(Float)
     expected_arrival_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
+    supplier_text: Mapped[str] = mapped_column(String(120), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
     part: Mapped[InventoryItem] = relationship()
 
 
