@@ -137,6 +137,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "样品库存", elIcon: "Present", keepAlive: true }
       },
       {
+        path: "reconciliation",
+        component: () => import("@/pages/erp/stock-reconciliation.vue"),
+        name: "StockReconciliation",
+        meta: { title: "库存对账", elIcon: "Histogram", keepAlive: true }
+      },
+      {
         path: "inventory",
         redirect: "/warehouse/parts-inventory",
         meta: { hidden: true }
@@ -204,6 +210,18 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/stock-document.vue"),
         name: "StockOperations",
         meta: { title: "出入库作业", elIcon: "Sort", keepAlive: true }
+      },
+      {
+        path: "purchase-arrival",
+        component: () => import("@/pages/erp/purchase-arrival.vue"),
+        name: "PurchaseArrival",
+        meta: { title: "采购到货", elIcon: "Goods", keepAlive: true }
+      },
+      {
+        path: "finance",
+        component: () => import("@/pages/erp/finance.vue"),
+        name: "Finance",
+        meta: { title: "财务管理", elIcon: "Money", keepAlive: true }
       }
     ]
   },
@@ -272,6 +290,18 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/backups.vue"),
         name: "Backups",
         meta: { title: "数据备份", elIcon: "RefreshLeft" }
+      },
+      {
+        path: "users",
+        component: () => import("@/pages/erp/users.vue"),
+        name: "Users",
+        meta: { title: "用户管理", elIcon: "User", keepAlive: true }
+      },
+      {
+        path: "calendar",
+        component: () => import("@/pages/erp/production-calendar.vue"),
+        name: "ProductionCalendar",
+        meta: { title: "生产日历", elIcon: "Calendar", keepAlive: true }
       }
     ]
   }

@@ -551,7 +551,7 @@ def _recalculate_plan_impl(
             material_required[component.part_id] += float(component.quantity) * total
             products_with_part[component.part_id].add(product_id)
     shortage_products: set[int] = set()
-    material_eta_constraints: list[datetime] = []
+    part_eta_map: dict[int, datetime] = {}
     for part_id, required in material_required.items():
         part = db.get(InventoryItem, part_id)
         if not part:
@@ -571,8 +571,15 @@ def _recalculate_plan_impl(
         ).all() if shortfall > 0 else []
         committed_quantity = sum(float(c.quantity) for c in commitments)
         if committed_quantity + available + 1e-9 >= required:
+            covered = 0.0
             for c in commitments:
-                material_eta_constraints.append(c.expected_arrival_at)
+                if covered + 1e-9 >= shortfall:
+                    break
+                covered += float(c.quantity)
+                if c.expected_arrival_at:
+                    prev = part_eta_map.get(part_id)
+                    if prev is None or c.expected_arrival_at > prev:
+                        part_eta_map[part_id] = c.expected_arrival_at
         else:
             shortage_products.update(products_with_part[part_id])
 
@@ -650,14 +657,20 @@ def _recalculate_plan_impl(
             note = "产品未配置 BOM；机器排程 ETA 仅供参考，暂不可承诺"
         elif product_id in shortage_products:
             note = "BOM 原材料不足；机器排程 ETA 仅供参考，暂不可承诺"
-        elif material_eta_constraints:
-            latest_material = max(material_eta_constraints)
-            note = f"原材料在途，预计 {latest_material:%m-%d} 到货后可排产"
-            for demand in demands:
-                if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_material:
-                    demand["line"].estimated_completion_at = latest_material
         else:
-            note = ""
+            product_part_etas = [
+                part_eta_map[comp.part_id]
+                for comp in product.bom_components
+                if comp.part_id in part_eta_map
+            ]
+            if product_part_etas:
+                latest_material = max(product_part_etas)
+                note = f"原材料在途，预计 {latest_material:%m-%d} 到货后可排产"
+                for demand in demands:
+                    if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_material:
+                        demand["line"].estimated_completion_at = latest_material
+            else:
+                note = ""
         if product.requires_external_processing:
             ext_batches = db.scalars(
                 select(ExternalProcessingBatch)
@@ -670,8 +683,9 @@ def _recalculate_plan_impl(
             ).all()
             if ext_batches:
                 latest_ext_return = ext_batches[0].expected_return_at
+                in_transit_qty = sum(int(b.quantity - b.returned_quantity) for b in ext_batches)
                 for demand in demands:
-                    if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_ext_return:
+                    if not demand["line"].estimated_completion_at or demand["line"].estimated_completion_at < latest_ext_return:
                         demand["line"].estimated_completion_at = latest_ext_return
                 if not note:
                     note = f"外协在途，预计 {latest_ext_return:%m-%d} 回厂"

@@ -93,6 +93,7 @@ class SalesOrderItem(Base):
     unit_price: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
     line_total: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
     production_required_quantity: Mapped[float] = mapped_column(Float, default=0)
+    replacement_pending_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     estimated_completion_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eta_reliable: Mapped[bool] = mapped_column(Boolean, default=False)
     eta_note: Mapped[str] = mapped_column(String(500), default="")
@@ -480,6 +481,9 @@ class Receivable(Base):
     receivable_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     order_id: Mapped[int | None] = mapped_column(
         ForeignKey("sales_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    related_stock_transaction_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     customer_name: Mapped[str] = mapped_column(String(120), index=True)
     amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)

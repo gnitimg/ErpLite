@@ -39,7 +39,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 17
+BACKUP_SCHEMA_VERSION = 18
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -312,6 +312,12 @@ def _load_archive(path: Path) -> dict[str, Any]:
         tables.setdefault("payment_allocations", [])
         tables.setdefault("users", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 17:
+        for row in tables.get("sales_order_items", []):
+            row.setdefault("replacement_pending_quantity", 0)
+        for row in tables.get("receivables", []):
+            row.setdefault("related_stock_transaction_id", None)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:
         raise BackupError("备份包含的数据表与当前系统不一致")
@@ -411,6 +417,17 @@ def restore_backup_archive(db: Session, path: Path) -> dict[str, Any]:
     except Exception:
         db.rollback()
         raise
+
+    try:
+        from .planning import recalculate_production_plan
+        from .services import rebalance_product_reservations
+        from sqlalchemy import select
+        product_ids = set(db.scalars(select(InventoryItem.id).where(InventoryItem.kind == "PRODUCT")).all())
+        rebalance_product_reservations(db, product_ids)
+        recalculate_production_plan(db)
+        db.commit()
+    except Exception:
+        db.rollback()
 
     restored = _metadata(path, payload)
     return {

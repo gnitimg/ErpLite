@@ -100,6 +100,7 @@ from .services import (
     transaction_dict,
     verify_password,
 )
+from .auth import create_access_token, verify_token, get_current_user, require_user, require_admin, extract_token
 
 
 StockStatus = Literal["LOW", "NORMAL"]
@@ -407,17 +408,33 @@ def login(payload: LoginPayload, db: Session = Depends(get_db)):
         select(User).where(User.username == payload.username.strip(), User.active.is_(True))
     )
     if user and verify_password(payload.password, user.password_hash):
-        return {"code": 0, "data": {"token": f"erp-user-{user.id}", "username": user.username, "display_name": user.display_name or user.username, "role": user.role}, "message": "success"}
+        token = create_access_token(user.id, user.username, user.role, user.display_name or user.username)
+        return {"code": 0, "data": {"token": token, "username": user.username, "display_name": user.display_name or user.username, "role": user.role}, "message": "success"}
     env_username = os.getenv("ERP_ADMIN_USER", "admin")
     env_password = os.getenv("ERP_ADMIN_PASSWORD", "12345678")
     if payload.username == env_username and payload.password == env_password:
-        return {"code": 0, "data": {"token": "lite-erp-local-admin", "username": env_username, "display_name": "仓库管理员", "role": "ADMIN"}, "message": "success"}
+        token = create_access_token(0, env_username, "ADMIN", "仓库管理员")
+        return {"code": 0, "data": {"token": token, "username": env_username, "display_name": "仓库管理员", "role": "ADMIN"}, "message": "success"}
     raise HTTPException(401, "用户名或密码错误")
 
 
 @app.get("/api/v1/users/me")
-def current_user():
-    return {"code": 0, "data": {"username": "仓库管理员", "roles": ["admin"], "permissions": []}, "message": "success"}
+def current_user(request: Request, db: Session = Depends(get_db)):
+    token = extract_token(request)
+    if not token:
+        env_username = os.getenv("ERP_ADMIN_USER", "admin")
+        return {"code": 0, "data": {"username": env_username, "display_name": "仓库管理员", "role": "ADMIN", "permissions": []}, "message": "success"}
+    try:
+        payload = verify_token(token)
+    except HTTPException:
+        env_username = os.getenv("ERP_ADMIN_USER", "admin")
+        return {"code": 0, "data": {"username": env_username, "display_name": "仓库管理员", "role": "ADMIN", "permissions": []}, "message": "success"}
+    user_id = int(payload.get("sub", "0"))
+    if user_id > 0:
+        user = db.scalar(select(User).where(User.id == user_id))
+        if user and user.active:
+            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "permissions": []}, "message": "success"}
+    return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": payload.get("role", ""), "permissions": []}, "message": "success"}
 
 
 @app.get("/api/dashboard")
@@ -971,6 +988,20 @@ def update_production_run_status(
             raise HTTPException(409, "只有待生产批次可以开始生产")
         if not run.product.bom_components:
             raise HTTPException(409, "产品未配置 BOM，不能开始生产")
+        reservation_map = {
+            r.part_id: float(r.quantity)
+            for r in run.material_reservations
+            if r.status == "ACTIVE"
+        }
+        for component in run.product.bom_components:
+            required = float(component.quantity) * int(run.planned_quantity)
+            reserved = reservation_map.get(component.part_id, 0.0)
+            if reserved + 1e-9 < required:
+                raise HTTPException(
+                    409,
+                    f"物料 {component.part.sku} {component.part.name} 预留不足："
+                    f"需要 {required:g}，已预留 {reserved:g}，缺口 {required - reserved:g}",
+                )
         component_changes = [
             (
                 component.part,
@@ -1253,10 +1284,14 @@ def complete_production_run(
             occurred_at=occurred_at,
         )
     external_required = bool(run.product.requires_external_processing)
+    bom_unit_cost = (
+        sum(float(component.quantity) * float(component.part.cost_price) for component in run.product.bom_components)
+        * total_consumed / qualified
+    ) if qualified > 0 else float(run.product.cost_price)
     inbound_tx = create_transaction(
         db,
         "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
-        [(run.product, qualified, run.product.cost_price)],
+        [(run.product, qualified, bom_unit_cost)],
         payload.notes or (
             f"生产批次 {run.run_no} 半成品入库，待{run.product.external_process_name}"
             if external_required
@@ -1789,18 +1824,7 @@ def inbound(payload: StockPayload, db: Session = Depends(get_db)):
     if payload.production_run_id is not None:
         raise HTTPException(410, "生产批次请从“生产入库”页面办理完工入库")
     if item.kind == "PRODUCT" and payload.consume_bom:
-        product = db.scalar(
-            select(InventoryItem)
-            .where(InventoryItem.id == item.id)
-            .options(
-                selectinload(InventoryItem.bom_components)
-                .selectinload(ProductBomItem.part)
-            )
-        )
-        if not product.bom_components:
-            raise HTTPException(409, "产品还没有 BOM，不能按 BOM 生产入库")
-        changes.extend((line.part, -line.quantity * payload.quantity, line.part.cost_price) for line in product.bom_components)
-        tx_type = "ASSEMBLY_IN"
+        raise HTTPException(410, 'BOM 生产入库请从"生产入库"页面办理完工入库')
     changes.append((item, payload.quantity, payload.unit_cost or item.cost_price))
     tx = create_transaction(db, tx_type, changes, payload.notes)
     if item.kind == "PRODUCT":
@@ -2115,6 +2139,8 @@ def create_order_return(
     for requested in payload.items:
         line = line_by_id[requested.order_item_id]
         line.returned_quantity = int(line.returned_quantity or 0) + requested.quantity
+        if payload.resolution == "REPLACE":
+            line.replacement_pending_quantity = int(line.replacement_pending_quantity or 0) + requested.quantity
         row = OrderReturn(
             return_no=return_no,
             order_id=order.id,
@@ -2248,6 +2274,7 @@ def _ship_order(
         db.add(Receivable(
             receivable_no=serial("AR"),
             order_id=order.id,
+            related_stock_transaction_id=tx.id,
             customer_name=order.customer_name,
             amount=round(shipped_total, 2),
             status="OPEN",
@@ -2340,6 +2367,7 @@ def cancel_order(
             ],
         })
     disposition = payload.disposition if payload else None
+    runs_to_shrink = {}
     for allocation in allocations:
         run = allocation.production_run
         if run.status == "RUNNING":
@@ -2357,12 +2385,24 @@ def cancel_order(
                     for reservation in run.material_reservations:
                         if reservation.status == "ACTIVE":
                             reservation.status = "RELEASED"
+                else:
+                    runs_to_shrink[run.id] = run
                 db.delete(allocation)
             elif disposition == "convert_to_replenishment":
                 run.source_type = "REPLENISHMENT"
                 db.delete(allocation)
             else:
                 db.delete(allocation)
+    db.flush()
+    for run in runs_to_shrink.values():
+        remaining_qty = sum(int(a.quantity) for a in run.allocations)
+        if remaining_qty > 0 and remaining_qty < int(run.planned_quantity):
+            run.planned_quantity = remaining_qty
+            duration_seconds = max(
+                float(remaining_qty) / max(float(run.effective_daily_capacity), 1e-9) * 86400,
+                60,
+            )
+            run.planned_end_at = run.planned_start_at + timedelta(seconds=duration_seconds)
     product_ids = {line.product_id for line in order.items}
     release_order_reservations(db, order)
     order.status = "CANCELLED"
@@ -2386,6 +2426,27 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
         raise HTTPException(409, "该流水已被冲销，不能再次冲销")
     if original.transaction_type == "REVERSAL":
         raise HTTPException(409, "冲销单不能再次冲销")
+    REVERSABLE_TYPES = {"GENERAL_IN", "GENERAL_OUT", "MANUAL_IN", "MANUAL_OUT", "PURCHASE_IN", "SALE_OUT"}
+    if original.transaction_type not in REVERSABLE_TYPES:
+        raise HTTPException(
+            409,
+            f"{original.transaction_type} 流水不支持通用冲销；生产/外协业务请使用专属逆操作",
+        )
+    if original.transaction_type == "SALE_OUT":
+        receivable = db.scalar(
+            select(Receivable)
+            .where(Receivable.related_stock_transaction_id == original.id)
+        )
+        if receivable:
+            allocated = float(receivable.settled_amount or 0)
+            if allocated > 1e-9:
+                raise HTTPException(
+                    409,
+                    f"该出库已关联应收 {receivable.receivable_no}，已核销 {allocated:.2f}；"
+                    "请先处理财务核销再冲销库存",
+                )
+            receivable.status = "CANCELLED"
+            receivable.notes = (receivable.notes or "") + f"；因冲销 {original.transaction_no} 而取消"
     changes = []
     for line in original.lines:
         changes.append((line.item, -line.quantity_change, line.unit_cost))
@@ -2495,6 +2556,7 @@ def receivable_dict(row: Receivable) -> dict:
         "id": row.id,
         "receivable_no": row.receivable_no,
         "order_id": row.order_id,
+        "related_stock_transaction_id": row.related_stock_transaction_id,
         "customer_name": row.customer_name,
         "amount": float(row.amount),
         "settled_amount": float(row.settled_amount or 0),
@@ -2633,7 +2695,8 @@ def allocate_payment(
 
 
 @app.get("/api/users")
-def list_users(db: Session = Depends(get_db)):
+def list_users(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     rows = db.scalars(
         select(User).where(User.active.is_(True)).order_by(User.id)
     ).all()
@@ -2651,7 +2714,8 @@ def list_users(db: Session = Depends(get_db)):
 
 
 @app.post("/api/users", status_code=201)
-def create_user(payload: UserPayload, db: Session = Depends(get_db)):
+def create_user(payload: UserPayload, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     existing = db.scalar(select(User).where(User.username == payload.username.strip()))
     if existing:
         raise HTTPException(409, "用户名已存在")
@@ -2673,7 +2737,8 @@ def create_user(payload: UserPayload, db: Session = Depends(get_db)):
 
 
 @app.put("/api/users/{user_id}")
-def update_user(user_id: int, payload: UserUpdatePayload, db: Session = Depends(get_db)):
+def update_user(user_id: int, payload: UserUpdatePayload, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
@@ -2687,7 +2752,8 @@ def update_user(user_id: int, payload: UserUpdatePayload, db: Session = Depends(
 
 
 @app.delete("/api/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(user_id: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
@@ -2697,7 +2763,8 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/backups", status_code=201)
-def create_backup(db: Session = Depends(get_db)):
+def create_backup(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     return create_backup_archive(db)
 
 
@@ -2713,7 +2780,8 @@ def download_backup(filename: str):
 
 
 @app.post("/api/backups/{filename}/restore")
-def restore_backup(filename: str, payload: BackupRestorePayload, db: Session = Depends(get_db)):
+def restore_backup(filename: str, payload: BackupRestorePayload, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
     if payload.confirm_filename != filename:
         raise HTTPException(400, "确认文件名与待恢复备份不一致")
     try:

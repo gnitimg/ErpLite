@@ -85,7 +85,7 @@ class StockPayload(BaseModel):
     quantity: float = Field(gt=0)
     unit_cost: float = Field(default=0, ge=0)
     notes: str = Field(default="", max_length=500)
-    consume_bom: bool = True
+    consume_bom: bool = False
     production_run_id: int | None = None
 
 

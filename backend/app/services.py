@@ -177,12 +177,14 @@ def order_dict(order: SalesOrder) -> dict:
                 "quantity": line.quantity,
                 "shipped_quantity": int(line.shipped_quantity or 0),
                 "returned_quantity": int(line.returned_quantity or 0),
+                "replacement_pending_quantity": int(line.replacement_pending_quantity or 0),
                 "returnable_quantity": max(
                     int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
                     0,
                 ),
                 "remaining_quantity": max(
-                    int(line.quantity) - int(line.shipped_quantity or 0),
+                    int(line.quantity) - int(line.shipped_quantity or 0)
+                    + int(line.replacement_pending_quantity or 0),
                     0,
                 ),
                 "reserved_quantity": line.reserved_quantity or 0,

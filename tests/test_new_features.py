@@ -21,6 +21,22 @@ from app.main import (
     save_product,
     update_user,
 )
+from app.auth import create_access_token
+
+
+class _MockRequest:
+    def __init__(self, token: str | None = None):
+        self._headers = {}
+        if token:
+            self._headers["authorization"] = f"Bearer {token}"
+
+    @property
+    def headers(self):
+        return self._headers
+
+
+def _admin_request() -> _MockRequest:
+    return _MockRequest(create_access_token(0, "admin", "ADMIN", "管理员"))
 from app.models import (
     InventoryItem,
     Payment,
@@ -292,19 +308,21 @@ def test_password_hashing_and_verification():
 
 def test_user_crud_lifecycle():
     with database() as db:
+        req = _admin_request()
         user = create_user(
             UserPayload(username="operator1", password="pass123", display_name="操作员", role="OPERATOR"),
+            req,
             db,
         )
         assert user["username"] == "operator1"
         assert user["role"] == "OPERATOR"
 
-        update_user(user["id"], UserUpdatePayload(display_name="高级操作员", role="ADMIN"), db)
+        update_user(user["id"], UserUpdatePayload(display_name="高级操作员", role="ADMIN"), req, db)
         users = [u for u in db.scalars(select(User)).all()]
         assert users[0].display_name == "高级操作员"
         assert users[0].role == "ADMIN"
 
-        delete_user(user["id"], db)
+        delete_user(user["id"], req, db)
         db.expire_all()
         assert not db.get(User, user["id"]).active
 
@@ -412,3 +430,123 @@ def test_replenishment_run_rejects_schedule_unlock():
         with pytest.raises(HTTPException) as error:
             unlock_production_run_schedule(run.id, db)
         assert error.value.status_code == 409
+
+
+def test_production_transaction_reversal_rejected():
+    with database() as db:
+        from app.main import reverse_stock_transaction
+        from app.services import create_transaction
+        product = make_product(db, "P01", stock=10)
+        db.flush()
+        tx = create_transaction(db, "ASSEMBLY_IN", [(product, 5, 10)], "生产入库")
+        db.commit()
+        with pytest.raises(HTTPException) as error:
+            reverse_stock_transaction(tx.id, db)
+        assert error.value.status_code == 409
+
+
+def test_sale_out_reversal_cancels_receivable():
+    with database() as db:
+        from app.main import reverse_stock_transaction
+        product = make_product(db, "P01", stock=100)
+        db.flush()
+        order = make_order(db, product, 10)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 10})
+        db.commit()
+        receivable = db.scalars(select(Receivable)).first()
+        assert receivable is not None
+        assert receivable.status == "OPEN"
+        assert receivable.related_stock_transaction_id is not None
+        tx = db.get(StockTransaction, receivable.related_stock_transaction_id)
+        reverse_stock_transaction(tx.id, db)
+        db.commit()
+        db.refresh(receivable)
+        assert receivable.status == "CANCELLED"
+
+
+def test_replace_return_creates_replacement_pending():
+    with database() as db:
+        from app.main import create_order_return
+        from app.schemas import OrderReturnPayload, OrderReturnLinePayload
+        product = make_product(db, "P01", stock=100)
+        db.flush()
+        order = make_order(db, product, 10)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 10})
+        db.commit()
+        result = create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=3, restock=False)],
+                resolution="REPLACE",
+            ),
+            db,
+        )
+        db.refresh(order)
+        assert int(order.items[0].replacement_pending_quantity or 0) == 3
+
+
+def test_jwt_token_creation_and_verification():
+    from app.auth import create_access_token, verify_token
+    token = create_access_token(42, "testuser", "OPERATOR", "测试员")
+    payload = verify_token(token)
+    assert payload["sub"] == "42"
+    assert payload["username"] == "testuser"
+    assert payload["role"] == "OPERATOR"
+    assert payload["display_name"] == "测试员"
+
+
+def test_jwt_token_invalid_rejected():
+    from app.auth import verify_token
+    with pytest.raises(HTTPException) as error:
+        verify_token("invalid.token.here")
+    assert error.value.status_code == 401
+
+
+def test_consume_bom_backdoor_rejected():
+    with database() as db:
+        from app.main import inbound
+        from app.schemas import StockPayload
+        product = make_product(db, "P01", stock=0)
+        part = InventoryItem(sku="X", name="零件X", kind="PART", stock_qty=100)
+        db.add(part)
+        db.flush()
+        db.add(ProductBomItem(product_id=product.id, part_id=part.id, quantity=2))
+        db.commit()
+        with pytest.raises(HTTPException) as error:
+            inbound(StockPayload(item_id=product.id, quantity=5, consume_bom=True), db)
+        assert error.value.status_code == 410
+
+
+def test_bom_based_cost_on_completion():
+    with database() as db:
+        from app.main import complete_production_run
+        from app.schemas import ProductionCompletionPayload
+        product = make_product(db, "P01", stock=0)
+        part = InventoryItem(sku="X", name="零件X", kind="PART", stock_qty=1000, cost_price=5)
+        db.add(part)
+        db.flush()
+        db.add(ProductBomItem(product_id=product.id, part_id=part.id, quantity=2))
+        db.add(ProductionSetting(id=1, line_count=1))
+        run = ProductionRun(
+            run_no="PR001", product_id=product.id, line_slot=1, mold_slot=1,
+            planned_quantity=10, produced_quantity=0,
+            planned_start_at=NOW, planned_end_at=datetime(2026, 8, 22, 10),
+            effective_daily_capacity=100, status="RUNNING",
+            actual_start_at=NOW, workflow_version=2,
+        )
+        db.add(run)
+        db.commit()
+        result = complete_production_run(
+            run.id,
+            ProductionCompletionPayload(qualified_quantity=8, scrap_quantity=2),
+            db,
+        )
+        db.commit()
+        expected_cost = (2 * 5 * 10) / 8
+        assert abs(float(product.cost_price) - expected_cost) < 0.01
