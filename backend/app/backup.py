@@ -21,6 +21,7 @@ from .models import (
     ProductionAllocation,
     ProductionCapability,
     ProductionLine,
+    ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
     SalesOrder,
@@ -32,7 +33,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 12
+BACKUP_SCHEMA_VERSION = 13
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -46,6 +47,7 @@ BACKUP_TABLES = (
     StockReservation.__table__,
     ProductionRun.__table__,
     ProductionAllocation.__table__,
+    ProductionMaterialReservation.__table__,
     StockTransaction.__table__,
     StockTransactionItem.__table__,
     OrderReturn.__table__,
@@ -56,6 +58,7 @@ DELETE_TABLES = (
     ExternalProcessingBatch.__table__,
     OrderReturn.__table__,
     ProductionAllocation.__table__,
+    ProductionMaterialReservation.__table__,
     StockTransactionItem.__table__,
     OperationLog.__table__,
     StockReservation.__table__,
@@ -251,6 +254,14 @@ def _load_archive(path: Path) -> dict[str, Any]:
             row.setdefault("pipeline_quantity", 0)
         tables.setdefault("order_returns", [])
         tables.setdefault("external_processing_batches", [])
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 12:
+        for row in tables.get("production_runs", []):
+            row.setdefault("scrap_quantity", 0)
+            row.setdefault("termination_reason", "")
+            row.setdefault("terminated_at", None)
+            row.setdefault("workflow_version", 1)
+        tables.setdefault("production_material_reservations", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

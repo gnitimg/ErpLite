@@ -29,6 +29,7 @@ from .models import (
     OrderReturn,
     ProductBomItem,
     ProductionAllocation,
+    ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
     SalesOrder,
@@ -43,6 +44,7 @@ from .schemas import (
     ExternalProcessingSendPayload,
     LoginPayload,
     ManualProductionRunPayload,
+    OrderCancelPayload,
     OrderPayload,
     OrderReturnPayload,
     OrderShipmentPayload,
@@ -59,6 +61,7 @@ from .schemas import (
     StockPayload,
 )
 from .planning import (
+    _recalculate_plan_impl,
     list_production_runs,
     production_demand_summary,
     purchase_requirement_summary,
@@ -810,6 +813,7 @@ def create_manual_production_run(
         source_type="REPLENISHMENT",
         notes=payload.notes.strip(),
         status="PLANNED",
+        workflow_version=2,
     )
     db.add(run)
     db.flush()
@@ -847,7 +851,7 @@ def create_manual_production_run(
         if remaining <= 0:
             break
     db.flush()
-    recalculate_production_plan(db)
+    _recalculate_plan_impl(db, datetime.now(), skip_rebuild_auto=True)
     db.commit()
     return next(row for row in list_production_runs(db) if row["id"] == run.id)
 
@@ -864,12 +868,16 @@ def update_production_run_status(
         .options(
             selectinload(ProductionRun.product)
             .selectinload(InventoryItem.bom_components)
-            .selectinload(ProductBomItem.part)
+            .selectinload(ProductBomItem.part),
+            selectinload(ProductionRun.allocations),
+            selectinload(ProductionRun.material_reservations),
         )
         .with_for_update()
     )
     if not run:
         raise HTTPException(404, "生产批次不存在")
+    consumption_tx = None
+    inbound_tx = None
     if payload.status == "RUNNING":
         if run.status != "PLANNED":
             raise HTTPException(409, "只有待生产批次可以开始生产")
@@ -894,19 +902,85 @@ def update_production_run_status(
         run.status = "RUNNING"
         run.schedule_locked = True
         run.actual_start_at = datetime.now()
-    else:
-        if run.status not in {"PLANNED", "RUNNING"}:
-            raise HTTPException(409, "该生产批次已结束，不能取消")
+        if run.workflow_version < 2:
+            run.workflow_version = 2
+        for reservation in run.material_reservations:
+            if reservation.status == "ACTIVE":
+                reservation.status = "CONSUMED"
+    elif payload.status == "CANCELLED":
+        if run.status != "PLANNED":
+            raise HTTPException(409, "已开工批次请使用终止生产；未开工批次才能直接取消")
         run.status = "CANCELLED"
+        for reservation in run.material_reservations:
+            if reservation.status == "ACTIVE":
+                reservation.status = "RELEASED"
+    elif payload.status == "TERMINATED":
+        if run.status != "RUNNING":
+            raise HTTPException(409, "只有生产中批次可以终止生产")
+        if payload.qualified_quantity is None:
+            raise HTTPException(400, "终止生产必须填写合格数量")
+        qualified = int(payload.qualified_quantity)
+        scrap = int(payload.scrap_quantity)
+        if qualified < 0 or scrap < 0:
+            raise HTTPException(400, "合格数量和报废数量不能为负")
+        if qualified + scrap > int(run.planned_quantity):
+            raise HTTPException(400, "合格数量与报废数量之和不能超过计划数量")
+        unproduced = int(run.planned_quantity) - qualified - scrap
+        if unproduced > 0:
+            return_changes = [
+                (
+                    component.part,
+                    float(component.quantity) * unproduced,
+                    component.part.cost_price,
+                )
+                for component in run.product.bom_components
+            ]
+            create_transaction(
+                db,
+                "PRODUCTION_RETURN",
+                return_changes,
+                payload.termination_reason or f"生产批次 {run.run_no} 终止退料，未生产 {unproduced} 套",
+                related_production_run_id=run.id,
+                occurred_at=datetime.now(),
+            )
+        external_required = bool(run.product.requires_external_processing)
+        if qualified > 0:
+            inbound_tx = create_transaction(
+                db,
+                "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
+                [(run.product, qualified, run.product.cost_price)],
+                f"生产批次 {run.run_no} 终止入库，合格 {qualified}、报废 {scrap}",
+                related_production_run_id=run.id,
+                occurred_at=datetime.now(),
+                apply_inventory=not external_required,
+            )
+            if external_required:
+                run.product.semi_finished_qty = int(run.product.semi_finished_qty or 0) + qualified
+        run.status = "TERMINATED"
+        run.produced_quantity = qualified
+        run.scrap_quantity = scrap
+        run.terminated_at = datetime.now()
+        run.termination_reason = payload.termination_reason.strip()
+        run.actual_end_at = datetime.now()
+        allocatable = qualified
+        for allocation in sorted(run.allocations, key=lambda row: row.sequence):
+            fulfilled = min(int(allocation.quantity), allocatable)
+            if fulfilled <= 0:
+                db.delete(allocation)
+                continue
+            allocation.quantity = fulfilled
+            allocation.estimated_completion_at = run.actual_end_at
+            allocatable -= fulfilled
+        if not external_required:
+            rebalance_product_reservations(db, {run.product_id})
     recalculate_production_plan(db)
     db.commit()
     return {
         "ok": True,
         "run_id": run_id,
         "status": run.status,
-        "consumption_transaction_id": (
-            consumption_tx.id if payload.status == "RUNNING" else None
-        ),
+        "consumption_transaction_id": consumption_tx.id if consumption_tx else None,
+        "inbound_transaction_id": inbound_tx.id if inbound_tx else None,
     }
 
 
@@ -941,11 +1015,19 @@ def complete_production_run(
     run = db.scalar(query)
     if not run:
         raise HTTPException(404, "生产批次不存在")
+    if run.workflow_version >= 2 and run.status != "RUNNING":
+        raise HTTPException(409, "新批次必须先开始生产再办理完工")
     if run.status not in {"PLANNED", "RUNNING"}:
         raise HTTPException(409, "只有待完工批次可以办理生产入库")
     if not run.product.bom_components:
         raise HTTPException(409, "产品未配置 BOM，不能办理生产入库")
-    actual = int(payload.actual_quantity)
+    qualified = int(payload.qualified_quantity)
+    scrap = int(payload.scrap_quantity)
+    if qualified <= 0:
+        raise HTTPException(400, "合格数量必须大于 0")
+    if scrap < 0:
+        raise HTTPException(400, "报废数量不能为负")
+    total_consumed = qualified + scrap
     occurred_at = datetime.combine(payload.completion_date, time.min)
     consumption_tx = db.scalar(
         select(StockTransaction)
@@ -956,11 +1038,10 @@ def complete_production_run(
         .order_by(StockTransaction.id.desc())
     )
     if consumption_tx is None:
-        # 兼容升级前已经开工的历史批次；新版批次均在“开始生产”时完成领料。
         component_changes = [
             (
                 component.part,
-                -float(component.quantity) * actual,
+                -float(component.quantity) * total_consumed,
                 component.part.cost_price,
             )
             for component in run.product.bom_components
@@ -973,10 +1054,8 @@ def complete_production_run(
             related_production_run_id=run.id,
             occurred_at=run.actual_start_at or occurred_at,
         )
-    elif actual != int(run.planned_quantity):
-        # 开工按计划数领料；完工数量有差异时只补记差额，保证 BOM 耗用仍与
-        # 实际合格数量一致。少产退料为正数，超产补领为负数。
-        variance = actual - int(run.planned_quantity)
+    elif total_consumed != int(run.planned_quantity):
+        variance = total_consumed - int(run.planned_quantity)
         create_transaction(
             db,
             "PRODUCTION_OUT" if variance > 0 else "PRODUCTION_RETURN",
@@ -1000,7 +1079,7 @@ def complete_production_run(
     inbound_tx = create_transaction(
         db,
         "SEMI_FINISHED_IN" if external_required else "ASSEMBLY_IN",
-        [(run.product, actual, run.product.cost_price)],
+        [(run.product, qualified, run.product.cost_price)],
         payload.notes or (
             f"生产批次 {run.run_no} 半成品入库，待{run.product.external_process_name}"
             if external_required
@@ -1011,12 +1090,12 @@ def complete_production_run(
         apply_inventory=not external_required,
     )
     if external_required:
-        run.product.semi_finished_qty = int(run.product.semi_finished_qty or 0) + actual
-    run.produced_quantity = actual
+        run.product.semi_finished_qty = int(run.product.semi_finished_qty or 0) + qualified
+    run.produced_quantity = qualified
+    run.scrap_quantity = scrap
     run.status = "COMPLETED"
     run.actual_end_at = datetime.combine(payload.completion_date, time.min)
-    # 实际少产时，历史分配也只能记录本批次真正完成的数量；剩余缺口由重算生成新批次。
-    allocatable = actual
+    allocatable = qualified
     for allocation in sorted(run.allocations, key=lambda row: row.sequence):
         fulfilled = min(int(allocation.quantity), allocatable)
         if fulfilled <= 0:
@@ -1034,8 +1113,9 @@ def complete_production_run(
         "consumption_transaction_id": consumption_tx.id,
         "run_id": run.id,
         "planned_quantity": run.planned_quantity,
-        "actual_quantity": actual,
-        "excess_quantity": max(actual - int(run.planned_quantity), 0),
+        "qualified_quantity": qualified,
+        "scrap_quantity": scrap,
+        "excess_quantity": max(total_consumed - int(run.planned_quantity), 0),
         "inventory_bucket": "SEMI_FINISHED" if external_required else "FINISHED",
         "plan": plan,
     }
@@ -1276,6 +1356,8 @@ def unlock_production_run_schedule(
         raise HTTPException(404, "生产批次不存在")
     if run.status != "PLANNED":
         raise HTTPException(409, "只有待生产批次可以恢复自动排期")
+    if run.source_type == "REPLENISHMENT":
+        raise HTTPException(409, "自主补库存计划不存在自动排产来源，不能恢复为系统建议")
     run.schedule_locked = False
     recalculate_production_plan(db)
     db.commit()
@@ -2015,12 +2097,74 @@ def fulfill_order(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/orders/{order_id}/cancel")
-def cancel_order(order_id: int, db: Session = Depends(get_db)):
+def cancel_order(
+    order_id: int,
+    payload: OrderCancelPayload | None = None,
+    db: Session = Depends(get_db),
+):
     order = load_order(db, order_id)
     if order.status in {"FULFILLED", "CANCELLED"}:
         raise HTTPException(409, "已完结客单不能取消")
     if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
         raise HTTPException(409, "订单已经发生出库，不能取消；请继续处理剩余数量")
+    line_ids = [line.id for line in order.items]
+    line_by_id = {line.id: line for line in order.items}
+    allocations = db.scalars(
+        select(ProductionAllocation)
+        .where(ProductionAllocation.order_item_id.in_(line_ids))
+        .options(selectinload(ProductionAllocation.production_run))
+    ).all() if line_ids else []
+    locked_planned_runs = []
+    running_runs = []
+    for allocation in allocations:
+        run = allocation.production_run
+        if run.status == "PLANNED" and run.schedule_locked:
+            if run not in locked_planned_runs:
+                locked_planned_runs.append(run)
+        elif run.status == "RUNNING":
+            if run not in running_runs:
+                running_runs.append(run)
+    if (locked_planned_runs or running_runs) and (payload is None or payload.disposition is None):
+        raise HTTPException(409, {
+            "message": "订单取消后，已有人工排定或生产中计划仍存在",
+            "locked_planned_runs": [
+                {"id": r.id, "run_no": r.run_no, "planned_quantity": r.planned_quantity}
+                for r in locked_planned_runs
+            ],
+            "running_runs": [
+                {"id": r.id, "run_no": r.run_no, "planned_quantity": r.planned_quantity}
+                for r in running_runs
+            ],
+            "options": [
+                {"value": "cancel_runs", "label": "同时取消未开工生产计划"},
+                {"value": "convert_to_replenishment", "label": "保留计划并转为自主补库存"},
+                {"value": "keep_runs", "label": "保留计划，仅解除订单关联"},
+            ],
+        })
+    disposition = payload.disposition if payload else None
+    for allocation in allocations:
+        run = allocation.production_run
+        if run.status == "RUNNING":
+            db.delete(allocation)
+        elif run.status == "PLANNED" and run.schedule_locked:
+            if disposition == "cancel_runs":
+                remaining_allocations = db.scalars(
+                    select(ProductionAllocation).where(
+                        ProductionAllocation.production_run_id == run.id,
+                        ProductionAllocation.id != allocation.id,
+                    )
+                ).all()
+                if not remaining_allocations:
+                    run.status = "CANCELLED"
+                    for reservation in run.material_reservations:
+                        if reservation.status == "ACTIVE":
+                            reservation.status = "RELEASED"
+                db.delete(allocation)
+            elif disposition == "convert_to_replenishment":
+                run.source_type = "REPLENISHMENT"
+                db.delete(allocation)
+            else:
+                db.delete(allocation)
     product_ids = {line.product_id for line in order.items}
     release_order_reservations(db, order)
     order.status = "CANCELLED"

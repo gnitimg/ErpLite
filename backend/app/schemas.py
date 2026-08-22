@@ -177,7 +177,10 @@ class PrintSettingsPayload(BaseModel):
 
 
 class ProductionRunStatusPayload(BaseModel):
-    status: Literal["RUNNING", "CANCELLED"]
+    status: Literal["RUNNING", "CANCELLED", "TERMINATED"]
+    qualified_quantity: int | None = Field(default=None, ge=0)
+    scrap_quantity: int = Field(default=0, ge=0)
+    termination_reason: str = Field(default="", max_length=500)
 
 
 class ManualProductionRunPayload(BaseModel):
@@ -189,7 +192,8 @@ class ManualProductionRunPayload(BaseModel):
 
 
 class ProductionCompletionPayload(BaseModel):
-    actual_quantity: int = Field(gt=0)
+    qualified_quantity: int = Field(gt=0)
+    scrap_quantity: int = Field(default=0, ge=0)
     completion_date: date = Field(default_factory=date.today)
     notes: str = Field(default="", max_length=500)
 
@@ -255,3 +259,7 @@ class ExternalProcessingReturnPayload(BaseModel):
 class ProductionRunSchedulePayload(BaseModel):
     line_slot: int = Field(ge=1, le=100)
     planned_start_at: datetime
+
+
+class OrderCancelPayload(BaseModel):
+    disposition: Literal["cancel_runs", "convert_to_replenishment", "keep_runs"] | None = None

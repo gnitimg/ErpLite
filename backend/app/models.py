@@ -258,6 +258,10 @@ class ProductionRun(Base):
     )
     notes: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
+    scrap_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    termination_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    terminated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    workflow_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -266,6 +270,9 @@ class ProductionRun(Base):
     mold: Mapped[Mold | None] = relationship()
     allocations: Mapped[list["ProductionAllocation"]] = relationship(
         cascade="all, delete-orphan", back_populates="production_run"
+    )
+    material_reservations: Mapped[list["ProductionMaterialReservation"]] = relationship(
+        cascade="all, delete-orphan", back_populates="production_run",
     )
 
     __table_args__ = (
@@ -386,3 +393,33 @@ class OperationLog(Base):
     status: Mapped[str] = mapped_column(String(20), default="SUCCESS", index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
+class ProductionMaterialReservation(Base):
+    """生产批次的物料占用预留，用于确定性的物料齐套检查。
+
+    按 planned_start_at、run_id 排序依次从真实零件库存分配，
+    避免多个 PLANNED 批次同时看到同一批库存可用。
+    """
+
+    __tablename__ = "production_material_reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    production_run_id: Mapped[int] = mapped_column(
+        ForeignKey("production_runs.id", ondelete="CASCADE"), index=True
+    )
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True
+    )
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    production_run: Mapped[ProductionRun] = relationship(back_populates="material_reservations")
+    part: Mapped[InventoryItem] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("production_run_id", "part_id", name="uq_run_part_reservation"),
+        Index("ix_reservation_part_status", "part_id", "status"),
+    )

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from .models import (
     InventoryItem,
     ProductionAllocation,
+    ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
     ProductBomItem,
@@ -40,18 +41,23 @@ def _integer_shares(total: int, weights: list[float]) -> list[int]:
 def _run_dict(run: ProductionRun) -> dict:
     material_shortages = []
     if run.status == "PLANNED":
+        reservation_map = {
+            r.part_id: float(r.quantity)
+            for r in (run.material_reservations or [])
+            if r.status == "ACTIVE"
+        }
         for component in run.product.bom_components:
             required = float(component.quantity) * int(run.planned_quantity)
-            available = float(component.part.stock_qty)
-            if available + 1e-9 < required:
+            reserved = reservation_map.get(component.part_id, 0.0)
+            if reserved + 1e-9 < required:
                 material_shortages.append({
                     "part_id": component.part_id,
                     "sku": component.part.sku,
                     "name": component.part.name,
                     "unit": component.part.unit,
                     "required_quantity": required,
-                    "available_quantity": available,
-                    "shortage_quantity": required - available,
+                    "reserved_quantity": reserved,
+                    "shortage_quantity": required - reserved,
                 })
     return {
         "id": run.id,
@@ -76,6 +82,10 @@ def _run_dict(run: ProductionRun) -> dict:
         "source_type": run.source_type or "ORDER",
         "notes": run.notes or "",
         "status": run.status,
+        "scrap_quantity": int(run.scrap_quantity or 0),
+        "termination_reason": run.termination_reason or "",
+        "terminated_at": run.terminated_at.isoformat() if run.terminated_at else None,
+        "workflow_version": int(run.workflow_version or 1),
         "materials_ready": not material_shortages,
         "material_shortages": material_shortages,
         "allocations": [
@@ -97,6 +107,62 @@ def _run_dict(run: ProductionRun) -> dict:
     }
 
 
+def rebuild_material_reservations(db: Session) -> None:
+    """按 planned_start_at、run_id 排序，依次从真实零件库存分配物料预留。
+
+    确保多个 PLANNED 批次不会同时看到同一批库存可用；先排产的批次优先占用。
+    """
+    runs = db.scalars(
+        select(ProductionRun)
+        .where(ProductionRun.status == "PLANNED")
+        .options(
+            selectinload(ProductionRun.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part),
+        )
+        .order_by(ProductionRun.planned_start_at, ProductionRun.id)
+    ).all()
+    existing = {
+        (r.production_run_id, r.part_id): r
+        for r in db.scalars(
+            select(ProductionMaterialReservation).where(
+                ProductionMaterialReservation.status == "ACTIVE"
+            )
+        ).all()
+    }
+    part_stock: dict[int, float] = {}
+    seen_runs: set[int] = set()
+    for run in runs:
+        seen_runs.add(run.id)
+        for component in run.product.bom_components:
+            required = float(component.quantity) * int(run.planned_quantity)
+            part = component.part
+            stock = part_stock.setdefault(part.id, float(part.stock_qty))
+            allocated = min(required, max(stock, 0))
+            reservation = existing.get((run.id, part.id))
+            if reservation is None:
+                reservation = ProductionMaterialReservation(
+                    production_run_id=run.id,
+                    part_id=part.id,
+                    quantity=allocated,
+                    status="ACTIVE",
+                )
+                db.add(reservation)
+            else:
+                reservation.quantity = allocated
+                reservation.status = "ACTIVE"
+            part_stock[part.id] = stock - allocated
+    stale = db.scalars(
+        select(ProductionMaterialReservation).where(
+            ProductionMaterialReservation.status == "ACTIVE",
+            ProductionMaterialReservation.production_run_id.notin_(seen_runs) if seen_runs else True,
+        )
+    ).all()
+    for reservation in stale:
+        reservation.status = "RELEASED"
+    db.flush()
+
+
 def list_production_runs(db: Session, status: str | None = None) -> list[dict]:
     query = select(ProductionRun).options(
         selectinload(ProductionRun.product)
@@ -105,6 +171,7 @@ def list_production_runs(db: Session, status: str | None = None) -> list[dict]:
         selectinload(ProductionRun.allocations)
         .selectinload(ProductionAllocation.order_item)
         .selectinload(SalesOrderItem.order),
+        selectinload(ProductionRun.material_reservations),
     )
     if status:
         query = query.where(ProductionRun.status == status.upper())
@@ -251,9 +318,16 @@ def _allocate_supply(
         ))
 
 
-def recalculate_production_plan(db: Session, now: datetime | None = None) -> dict:
-    """按 FCFS、最早完成资源组合和同产品合批，重算全部未完结客单 ETA。"""
-    now = now or datetime.now()
+def _recalculate_plan_impl(
+    db: Session,
+    now: datetime,
+    skip_rebuild_auto: bool = False,
+) -> dict:
+    """按 FCFS、最早完成资源组合和同产品合批，重算全部未完结客单 ETA。
+
+    skip_rebuild_auto=True 时跳过删除和重建未锁定 ORDER 批次，
+    用于自主计划创建后只需重算 ETA 和物料预留的场景。
+    """
     db.flush()
     settings_query = select(ProductionSetting).where(ProductionSetting.id == 1)
     if db.bind and db.bind.dialect.name != "sqlite":
@@ -280,18 +354,19 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         rebalance_product_reservations(db, product_ids)
 
     # 仅重建未被人工确认的模拟计划；人工排期和生产中批次作为固定时间轴保留。
-    planned_ids = db.scalars(
-        select(ProductionRun.id).where(
-            ProductionRun.status == "PLANNED",
-            ProductionRun.schedule_locked.is_(False),
-            ProductionRun.source_type == "ORDER",
-        )
-    ).all()
-    if planned_ids:
-        db.execute(delete(ProductionAllocation).where(
-            ProductionAllocation.production_run_id.in_(planned_ids)
-        ))
-        db.execute(delete(ProductionRun).where(ProductionRun.id.in_(planned_ids)))
+    if not skip_rebuild_auto:
+        planned_ids = db.scalars(
+            select(ProductionRun.id).where(
+                ProductionRun.status == "PLANNED",
+                ProductionRun.schedule_locked.is_(False),
+                ProductionRun.source_type == "ORDER",
+            )
+        ).all()
+        if planned_ids:
+            db.execute(delete(ProductionAllocation).where(
+                ProductionAllocation.production_run_id.in_(planned_ids)
+            ))
+            db.execute(delete(ProductionRun).where(ProductionRun.id.in_(planned_ids)))
     db.flush()
 
     for order in active_orders:
@@ -505,6 +580,7 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
                 planned_end_at=common_finish,
                 effective_daily_capacity=resource["effective_capacity"],
                 status="PLANNED",
+                workflow_version=2,
             )
             db.add(run)
             runs.append(run)
@@ -540,6 +616,7 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         order.eta_note = "；".join(notes)[:500]
 
     db.flush()
+    rebuild_material_reservations(db)
     return {
         "calculated_at": now.isoformat(),
         "active_order_count": len(active_orders),
@@ -549,6 +626,11 @@ def recalculate_production_plan(db: Session, now: datetime | None = None) -> dic
         "material_shortage_product_ids": sorted(shortage_products),
         "missing_bom_product_ids": sorted(missing_bom_products),
     }
+
+
+def recalculate_production_plan(db: Session, now: datetime | None = None) -> dict:
+    """全量重算生产计划的统一入口。"""
+    return _recalculate_plan_impl(db, now or datetime.now())
 
 
 def production_demand_summary(db: Session) -> list[dict]:
