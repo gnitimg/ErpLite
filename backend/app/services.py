@@ -471,6 +471,26 @@ def latest_semi_finished_unit_cost(db: Session, product_id: int, fallback: float
     return float(row[0]) if row and row[0] is not None else float(fallback)
 
 
+def latest_sale_out_unit_cost(db: Session, product_id: int, fallback: float) -> float:
+    """退货回库计价：最近一次有效销售出库的成本快照（发出时的库存成本）。
+
+    规则（第一版，明确可解释）：不指定出库批次时按最近一次未冲销 SALE_OUT
+    的行快照计价；没有历史出库时退回当前成本。禁止偷偷使用退货时点的移动平均。
+    """
+    row = db.execute(
+        select(StockTransactionItem.unit_cost)
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .where(
+            StockTransactionItem.item_id == product_id,
+            StockTransaction.transaction_type == "SALE_OUT",
+            StockTransaction.status != "REVERSED",
+        )
+        .order_by(StockTransaction.id.desc())
+        .limit(1)
+    ).first()
+    return float(row[0]) if row and row[0] is not None else float(fallback)
+
+
 def load_order(db: Session, order_id: int) -> SalesOrder:
     order = db.scalar(
         select(SalesOrder)

@@ -92,6 +92,7 @@ from .services import (
     ensure_sku_available,
     hash_password,
     item_dict,
+    latest_sale_out_unit_cost,
     latest_semi_finished_unit_cost,
     load_order,
     operation_log_dict,
@@ -2226,8 +2227,13 @@ def create_order_return(
                 f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
             )
         # restock 语义对所有 resolution 一致：勾选回库就生成退货入库（退款或换货皆可）。
+        # 回库成本用最近一次有效销售出库的快照，而不是退货时点的移动平均。
         if requested.restock:
-            restock_changes.append((line.product, requested.quantity, line.product.cost_price))
+            restock_changes.append((
+                line.product,
+                requested.quantity,
+                latest_sale_out_unit_cost(db, line.product_id, line.product.cost_price),
+            ))
     transaction = None
     if restock_changes:
         transaction = create_transaction(

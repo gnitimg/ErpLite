@@ -303,3 +303,57 @@ def test_purchase_reversal_allowed_when_stock_replenished():
         # 账面价值打到负数；不做 COGS 重放，价值下限 clamp 到 0。
         # 关键断言：数量正确、成本落在合理区间、不抛异常。
         assert 0 <= float(part.cost_price) < 100
+
+
+# ───────────────── 5C：销售退货成本 ─────────────────
+
+def test_sale_return_uses_historical_outbound_cost():
+    """出库时成本 5；退货前成品涨到 9；退货回库仍按 5 计价。"""
+    with database() as db:
+        from app.main import create_order_return
+        from app.schemas import OrderReturnLinePayload, OrderReturnPayload
+        part = make_part(db, "X")
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order = SalesOrder(
+            order_no="SO-1", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=100,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, None)
+        db.refresh(product)
+        assert float(product.stock_qty) == 0
+        # 退货前成品入库 10@9，当前均价变 9
+        inbound(db, product, 10, 9)
+        db.refresh(product)
+        assert float(product.cost_price) == 9
+
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=10, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        return_line = db.scalar(
+            select(StockTransactionItem)
+            .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+            .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
+        )
+        # 回库按发出时成本快照 5，而不是当前 9
+        assert float(return_line.unit_cost) == 5
+        db.refresh(product)
+        assert float(product.stock_qty) == 20
+        # 20 件价值 = 10×9 + 10×5 = 140 → 均价 7
+        assert float(part.cost_price if False else product.cost_price) == 7
