@@ -108,6 +108,7 @@ def item_dict(item: InventoryItem, include_bom: bool = False) -> dict:
         "processing_qty": int(item.processing_qty or 0),
         "requires_external_processing": bool(item.requires_external_processing),
         "external_process_name": item.external_process_name or "",
+        "default_external_lead_days": int(item.default_external_lead_days or 0),
         "sample_stock_qty": item.sample_stock_qty,
         "supply_mode": item.supply_mode if item.kind == "PART" else "STOCK",
         "active": item.active,

@@ -230,6 +230,7 @@ class OrderReturnLinePayload(BaseModel):
 
 class OrderReturnPayload(BaseModel):
     items: list[OrderReturnLinePayload] = Field(min_length=1)
+    resolution: Literal["REFUND", "REPLACE"] = "REFUND"
     occurred_date: date = Field(default_factory=date.today)
     notes: str = Field(default="", max_length=500)
 
@@ -247,6 +248,7 @@ class ExternalProcessingSendPayload(BaseModel):
     quantity: int = Field(gt=0)
     supplier: str = Field(default="", max_length=120)
     occurred_date: date = Field(default_factory=date.today)
+    lead_days: int = Field(default=0, ge=0)
     notes: str = Field(default="", max_length=500)
 
 
@@ -263,3 +265,15 @@ class ProductionRunSchedulePayload(BaseModel):
 
 class OrderCancelPayload(BaseModel):
     disposition: Literal["cancel_runs", "convert_to_replenishment", "keep_runs"] | None = None
+
+
+class PurchaseCommitmentPayload(BaseModel):
+    part_id: int
+    quantity: float = Field(gt=0)
+    expected_arrival_date: date
+    supplier_text: str = Field(default="", max_length=120)
+    notes: str = Field(default="", max_length=500)
+
+
+class PurchaseCommitmentStatusPayload(BaseModel):
+    status: Literal["PLANNED", "ARRIVED", "CANCELLED"]

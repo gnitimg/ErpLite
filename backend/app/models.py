@@ -25,6 +25,7 @@ class InventoryItem(Base):
     processing_qty: Mapped[int] = mapped_column(Integer, default=0)
     requires_external_processing: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     external_process_name: Mapped[str] = mapped_column(String(120), default="")
+    default_external_lead_days: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     sample_stock_qty: Mapped[int] = mapped_column(Integer, default=300)
     supply_mode: Mapped[str] = mapped_column(String(20), default="STOCK")  # STOCK / BUY_TO_ORDER（仅零件）
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -134,6 +135,7 @@ class OrderReturn(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
     quantity: Mapped[int] = mapped_column(Integer)
     restocked: Mapped[bool] = mapped_column(Boolean, default=True)
+    resolution: Mapped[str] = mapped_column(String(20), default="REFUND", server_default="REFUND")
     transaction_id: Mapped[int | None] = mapped_column(
         ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -380,6 +382,7 @@ class ExternalProcessingBatch(Base):
     )
     notes: Mapped[str] = mapped_column(Text, default="")
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    expected_return_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     returned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -432,3 +435,23 @@ class ProductionMaterialReservation(Base):
         UniqueConstraint("production_run_id", "part_id", name="uq_run_part_reservation"),
         Index("ix_reservation_part_status", "part_id", "status"),
     )
+
+
+class PurchaseCommitment(Base):
+    """轻量采购预计到货，用于 ETA 物料可用时间计算。"""
+
+    __tablename__ = "purchase_commitments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True
+    )
+    quantity: Mapped[float] = mapped_column(Float)
+    expected_arrival_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
+    supplier_text: Mapped[str] = mapped_column(String(120), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    part: Mapped[InventoryItem] = relationship()

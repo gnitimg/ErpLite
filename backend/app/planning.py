@@ -8,12 +8,14 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
+    ExternalProcessingBatch,
     InventoryItem,
     ProductionAllocation,
     ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
     ProductBomItem,
+    PurchaseCommitment,
     SalesOrder,
     SalesOrderItem,
 )
@@ -518,9 +520,29 @@ def _recalculate_plan_impl(
             material_required[component.part_id] += float(component.quantity) * total
             products_with_part[component.part_id].add(product_id)
     shortage_products: set[int] = set()
+    material_eta_constraints: list[datetime] = []
     for part_id, required in material_required.items():
         part = db.get(InventoryItem, part_id)
-        if not part or float(part.stock_qty) + 1e-9 < required:
+        if not part:
+            shortage_products.update(products_with_part[part_id])
+            continue
+        available = float(part.stock_qty)
+        shortfall = required - available
+        if shortfall <= 1e-9:
+            continue
+        commitments = db.scalars(
+            select(PurchaseCommitment)
+            .where(
+                PurchaseCommitment.part_id == part_id,
+                PurchaseCommitment.status == "PLANNED",
+            )
+            .order_by(PurchaseCommitment.expected_arrival_at)
+        ).all() if shortfall > 0 else []
+        committed_quantity = sum(float(c.quantity) for c in commitments)
+        if committed_quantity + available + 1e-9 >= required:
+            for c in commitments:
+                material_eta_constraints.append(c.expected_arrival_at)
+        else:
             shortage_products.update(products_with_part[part_id])
 
     product_order = sorted(
@@ -597,8 +619,31 @@ def _recalculate_plan_impl(
             note = "产品未配置 BOM；机器排程 ETA 仅供参考，暂不可承诺"
         elif product_id in shortage_products:
             note = "BOM 原材料不足；机器排程 ETA 仅供参考，暂不可承诺"
+        elif material_eta_constraints:
+            latest_material = max(material_eta_constraints)
+            note = f"原材料在途，预计 {latest_material:%m-%d} 到货后可排产"
+            for demand in demands:
+                if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_material:
+                    demand["line"].estimated_completion_at = latest_material
         else:
             note = ""
+        if product.requires_external_processing:
+            ext_batches = db.scalars(
+                select(ExternalProcessingBatch)
+                .where(
+                    ExternalProcessingBatch.product_id == product_id,
+                    ExternalProcessingBatch.expected_return_at.is_not(None),
+                    ExternalProcessingBatch.returned_quantity < ExternalProcessingBatch.quantity,
+                )
+                .order_by(ExternalProcessingBatch.expected_return_at.desc())
+            ).all()
+            if ext_batches:
+                latest_ext_return = ext_batches[0].expected_return_at
+                for demand in demands:
+                    if demand["line"].estimated_completion_at and demand["line"].estimated_completion_at < latest_ext_return:
+                        demand["line"].estimated_completion_at = latest_ext_return
+                if not note:
+                    note = f"外协在途，预计 {latest_ext_return:%m-%d} 回厂"
         for demand in demands:
             demand["line"].eta_reliable = reliable and bool(
                 demand["line"].estimated_completion_at

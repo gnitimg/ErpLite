@@ -123,11 +123,15 @@ def test_external_processing_uses_pipeline_without_duplicate_production():
         order = make_order(db, product, "SO-1", 10)
         recalculate_production_plan(db, NOW)
         run = db.query(ProductionRun).filter_by(status="PLANNED").one()
+        run.status = "RUNNING"
+        run.actual_start_at = NOW
+        db.flush()
 
         completed = complete_production_run(
             run.id,
             ProductionCompletionPayload(
-                actual_quantity=10,
+                qualified_quantity=10,
+                scrap_quantity=0,
                 completion_date=date(2026, 8, 22),
             ),
             db,

@@ -32,6 +32,7 @@ from .models import (
     ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
+    PurchaseCommitment,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
@@ -56,6 +57,8 @@ from .schemas import (
     ProductionRunStatusPayload,
     ProductionCompletionPayload,
     ProductionSettingsPayload,
+    PurchaseCommitmentPayload,
+    PurchaseCommitmentStatusPayload,
     SamplePayload,
     StockDocumentPayload,
     StockPayload,
@@ -231,6 +234,10 @@ def operation_action(path: str, method: str) -> str:
         )
     if path.startswith("/api/samples"):
         return "调整样品库存"
+    if path.startswith("/api/purchase"):
+        if path.endswith("/commitments"):
+            return "登记采购到货"
+        return "采购需求"
     if path.startswith("/api/production/plan"):
         return "重算生产计划"
     if path.startswith("/api/production/runs"):
@@ -994,6 +1001,95 @@ def purchase_requirements(db: Session = Depends(get_db)):
     return purchase_requirement_summary(db)
 
 
+def purchase_commitment_dict(row: PurchaseCommitment) -> dict:
+    return {
+        "id": row.id,
+        "part_id": row.part_id,
+        "part_sku": row.part.sku,
+        "part_name": row.part.name,
+        "unit": row.part.unit,
+        "quantity": row.quantity,
+        "expected_arrival_at": row.expected_arrival_at.isoformat(),
+        "status": row.status,
+        "supplier_text": row.supplier_text,
+        "notes": row.notes,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/purchase/commitments")
+def list_purchase_commitments(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = select(PurchaseCommitment).options(selectinload(PurchaseCommitment.part))
+    if status and status.strip():
+        query = query.where(PurchaseCommitment.status == status.strip().upper())
+    rows = db.scalars(
+        query.order_by(PurchaseCommitment.expected_arrival_at, PurchaseCommitment.id)
+    ).all()
+    return [purchase_commitment_dict(row) for row in rows]
+
+
+@app.post("/api/purchase/commitments", status_code=201)
+def create_purchase_commitment(
+    payload: PurchaseCommitmentPayload,
+    db: Session = Depends(get_db),
+):
+    part = find_item(db, payload.part_id, "PART")
+    commitment = PurchaseCommitment(
+        part_id=part.id,
+        quantity=payload.quantity,
+        expected_arrival_at=datetime.combine(payload.expected_arrival_date, time.min),
+        status="PLANNED",
+        supplier_text=payload.supplier_text.strip(),
+        notes=payload.notes.strip(),
+    )
+    db.add(commitment)
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    db.refresh(commitment)
+    commitment.part = part
+    return purchase_commitment_dict(commitment)
+
+
+@app.put("/api/purchase/commitments/{commitment_id}/status")
+def update_purchase_commitment_status(
+    commitment_id: int,
+    payload: PurchaseCommitmentStatusPayload,
+    db: Session = Depends(get_db),
+):
+    commitment = db.scalar(
+        select(PurchaseCommitment)
+        .where(PurchaseCommitment.id == commitment_id)
+        .options(selectinload(PurchaseCommitment.part))
+    )
+    if not commitment:
+        raise HTTPException(404, "采购到货记录不存在")
+    if commitment.status == "CANCELLED":
+        raise HTTPException(409, "已取消的记录不能再次修改")
+    commitment.status = payload.status
+    db.flush()
+    recalculate_production_plan(db)
+    db.commit()
+    return purchase_commitment_dict(commitment)
+
+
+@app.delete("/api/purchase/commitments/{commitment_id}")
+def delete_purchase_commitment(commitment_id: int, db: Session = Depends(get_db)):
+    commitment = db.get(PurchaseCommitment, commitment_id)
+    if not commitment:
+        raise HTTPException(404, "采购到货记录不存在")
+    if commitment.status == "ARRIVED":
+        raise HTTPException(409, "已到货的记录不能删除")
+    db.delete(commitment)
+    recalculate_production_plan(db)
+    db.commit()
+    return {"ok": True}
+
+
 @app.post("/api/production/runs/{run_id}/complete", status_code=201)
 def complete_production_run(
     run_id: int,
@@ -1137,6 +1233,7 @@ def external_batch_dict(batch: ExternalProcessingBatch) -> dict:
         "status": batch.status,
         "notes": batch.notes,
         "sent_at": batch.sent_at.isoformat(),
+        "expected_return_at": batch.expected_return_at.isoformat() if batch.expected_return_at else None,
         "returned_at": batch.returned_at.isoformat() if batch.returned_at else None,
     }
 
@@ -1190,6 +1287,10 @@ def send_external_processing(
         )
     product.semi_finished_qty = int(product.semi_finished_qty or 0) - payload.quantity
     product.processing_qty = int(product.processing_qty or 0) + payload.quantity
+    lead_days = int(payload.lead_days or 0)
+    if lead_days <= 0:
+        lead_days = int(product.default_external_lead_days or 0)
+    expected_return_at = occurred_at + timedelta(days=lead_days) if lead_days > 0 else None
     batch = ExternalProcessingBatch(
         batch_no=serial("EP"),
         product_id=product.id,
@@ -1199,6 +1300,7 @@ def send_external_processing(
         outbound_transaction_id=outbound_tx.id,
         notes=payload.notes.strip(),
         sent_at=occurred_at,
+        expected_return_at=expected_return_at,
     )
     db.add(batch)
     db.commit()
@@ -1871,6 +1973,7 @@ def order_return_dict(row: OrderReturn) -> dict:
         "unit": row.product.unit,
         "quantity": row.quantity,
         "restocked": row.restocked,
+        "resolution": row.resolution or "REFUND",
         "transaction_id": row.transaction_id,
         "notes": row.notes,
         "occurred_at": row.occurred_at.isoformat(),
@@ -1914,7 +2017,7 @@ def create_order_return(
                 409,
                 f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
             )
-        if requested.restock:
+        if requested.restock and payload.resolution == "REFUND":
             restock_changes.append((line.product, requested.quantity, line.product.cost_price))
     transaction = None
     if restock_changes:
@@ -1922,7 +2025,7 @@ def create_order_return(
             db,
             "SALE_RETURN_IN",
             restock_changes,
-            payload.notes or f"客单 {order.order_no} 退货入库",
+            payload.notes or f"客单 {order.order_no} 退货入库（退款）",
             related_order_id=order.id,
             occurred_at=occurred_at,
         )
@@ -1938,6 +2041,7 @@ def create_order_return(
             product_id=line.product_id,
             quantity=requested.quantity,
             restocked=requested.restock,
+            resolution=payload.resolution,
             transaction_id=transaction.id if requested.restock and transaction else None,
             notes=payload.notes.strip(),
             occurred_at=occurred_at,
@@ -1954,6 +2058,7 @@ def create_order_return(
         row.product = line_by_id[row.order_item_id].product
     return {
         "return_no": return_no,
+        "resolution": payload.resolution,
         "transaction_id": transaction.id if transaction else None,
         "items": [order_return_dict(row) for row in created],
         "order": order_dict(load_order(db, order.id)),

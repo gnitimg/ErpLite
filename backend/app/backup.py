@@ -24,6 +24,7 @@ from .models import (
     ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
+    PurchaseCommitment,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
@@ -33,7 +34,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 14
+BACKUP_SCHEMA_VERSION = 15
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -52,9 +53,11 @@ BACKUP_TABLES = (
     StockTransactionItem.__table__,
     OrderReturn.__table__,
     ExternalProcessingBatch.__table__,
+    PurchaseCommitment.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    PurchaseCommitment.__table__,
     ExternalProcessingBatch.__table__,
     OrderReturn.__table__,
     ProductionAllocation.__table__,
@@ -271,6 +274,15 @@ def _load_archive(path: Path) -> dict[str, Any]:
         for row in tables.get("stock_transaction_items", []):
             row.setdefault("inventory_bucket", "FINISHED")
             row.setdefault("affects_primary_stock", True)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 14:
+        for row in tables.get("inventory_items", []):
+            row.setdefault("default_external_lead_days", 0)
+        for row in tables.get("order_returns", []):
+            row.setdefault("resolution", "REFUND")
+        for row in tables.get("external_processing_batches", []):
+            row.setdefault("expected_return_at", None)
+        tables.setdefault("purchase_commitments", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

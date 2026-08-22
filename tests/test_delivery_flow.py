@@ -160,17 +160,21 @@ def test_completion_accepts_under_or_over_production(
         customer_order = order(db, "SO-1", [(finished, 100)])
         recalculate_production_plan(db, NOW)
         planned = db.query(ProductionRun).filter_by(status="PLANNED").one()
+        planned.status = "RUNNING"
+        planned.actual_start_at = NOW
+        db.flush()
 
         result = complete_production_run(
             planned.id,
             ProductionCompletionPayload(
-                actual_quantity=actual,
+                qualified_quantity=actual,
+                scrap_quantity=0,
                 completion_date=date(2026, 8, 22),
             ),
             db,
         )
 
-        assert result["actual_quantity"] == actual
+        assert result["qualified_quantity"] == actual
         assert db.get(InventoryItem, part.id).stock_qty == 1000 - actual * 2
         assert db.get(InventoryItem, finished.id).stock_qty == actual
         assert customer_order.items[0].reserved_quantity == min(actual, 100)
@@ -268,7 +272,7 @@ def test_first_shipment_freezes_order_and_snapshot_survives_master_rename():
             update_order(customer_order.id, payload, db)
         assert edit_error.value.status_code == 409
         with pytest.raises(HTTPException) as cancel_error:
-            cancel_order(customer_order.id, db)
+            cancel_order(customer_order.id, db=db)
         assert cancel_error.value.status_code == 409
 
         finished.name = "BBB"
