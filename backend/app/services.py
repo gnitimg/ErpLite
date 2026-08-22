@@ -211,6 +211,16 @@ def order_dict(order: SalesOrder) -> dict:
 
 
 def transaction_dict(tx: StockTransaction) -> dict:
+    # 换货补发数量（按物料汇总 REPLACEMENT 分配）；关系未预加载时跳过，避免列表接口 N+1。
+    replacement_by_item: dict[int, int] = {}
+    if "shipment_allocations" in tx.__dict__:
+        for allocation in tx.shipment_allocations:
+            if allocation.fulfillment_type == "REPLACEMENT" and allocation.order_item_id:
+                order_item = allocation.order_item
+                if order_item:
+                    replacement_by_item[order_item.product_id] = (
+                        replacement_by_item.get(order_item.product_id, 0) + int(allocation.quantity)
+                    )
     return {
         "id": tx.id,
         "transaction_no": tx.transaction_no,
@@ -252,6 +262,7 @@ def transaction_dict(tx: StockTransaction) -> dict:
                 "unit_cost": line.unit_cost,
                 "unit_price": line.unit_price_snapshot,
                 "line_total": line.line_total_snapshot,
+                "replacement_quantity": replacement_by_item.get(line.item_id, 0),
                 "inventory_bucket": line.inventory_bucket or "FINISHED",
                 "affects_primary_stock": bool(line.affects_primary_stock),
             }

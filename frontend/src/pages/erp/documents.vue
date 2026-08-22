@@ -313,13 +313,16 @@ useLiveRefresh(() => load(true))
           <el-table-column prop="sku" label="编码" min-width="130" />
           <el-table-column prop="name" label="物料" min-width="150" />
           <el-table-column prop="spec" label="规格" min-width="120" />
-          <el-table-column label="数量" min-width="110" align="right">
+          <el-table-column label="数量" min-width="130" align="right">
             <template #default="{ row }">
               {{
                 row.kind === 'PRODUCT'
                   ? productQty(Math.abs(row.quantity_change))
                   : qty(Math.abs(row.quantity_change))
               }}
+              <el-tag v-if="Number(row.replacement_quantity) > 0" type="warning" size="small" effect="plain" style="margin-left:6px">
+                换货 {{ qty(row.replacement_quantity) }}
+              </el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="unit" label="单位" min-width="70" />

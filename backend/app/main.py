@@ -104,8 +104,10 @@ from .services import (
     verify_password,
 )
 from .auth import (
+    EMERGENCY_TOKEN_TTL_SECONDS,
     authenticated_username,
     create_access_token,
+    current_role_for,
     emergency_admin_credentials,
     extract_token,
     load_user,
@@ -172,7 +174,11 @@ async def enforce_rbac(request: Request, call_next):
         payload = verify_token(token)
     except HTTPException as error:
         return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
-    role = str(payload.get("role") or "VIEWER")
+    # 每次请求按数据库当前状态校验：停用用户立即踢出，角色以库内当前值为准。
+    with SessionLocal() as session:
+        role = current_role_for(payload, session)
+    if role is None:
+        return JSONResponse(status_code=401, content={"detail": "登录状态无效，请重新登录"})
     if not role_allows(role, required):
         return JSONResponse(status_code=403, content={"detail": f"当前角色（{role}）无权执行该操作"})
     return await call_next(request)
@@ -196,13 +202,12 @@ class ChangeEventHub:
     def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
         self._queues.discard(queue)
 
-    def publish(self, *, path: str, method: str, source: str) -> None:
+    def publish(self, *, source: str) -> None:
+        # 公开端点只广播“有变化”信号，不携带 path/method 等业务信息。
         self._sequence += 1
         payload = json.dumps(
             {
                 "id": self._sequence,
-                "path": path,
-                "method": method,
                 "source": source,
                 "occurred_at": datetime.now().isoformat(),
             },
@@ -250,11 +255,7 @@ async def broadcast_successful_writes(request: Request, call_next):
         except Exception as audit_error:
             logging.getLogger("uvicorn.error").warning("记录操作日志失败: %s", audit_error)
         if status_code < 400 and not is_login:
-            change_events.publish(
-                path=request.url.path,
-                method=request.method,
-                source=request.headers.get("x-erp-client-id", ""),
-            )
+            change_events.publish(source=request.headers.get("x-erp-client-id", ""))
     if error:
         raise error
     return response
@@ -471,7 +472,8 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
             detail="Break-glass 应急管理员通过环境变量凭据登录",
         ))
         db.commit()
-        token = create_access_token(0, credentials[0], "ADMIN", "应急管理员")
+        # 应急令牌只活 2 小时；网关会在每次请求时确认开关仍然开启。
+        token = create_access_token(0, credentials[0], "ADMIN", "应急管理员", ttl_seconds=EMERGENCY_TOKEN_TTL_SECONDS)
         return {"code": 0, "data": {"token": token, "username": credentials[0], "display_name": "应急管理员", "role": "ADMIN"}, "message": "success"}
     raise HTTPException(401, "用户名或密码错误")
 
@@ -491,8 +493,8 @@ def current_user(request: Request, db: Session = Depends(get_db)):
         if user:
             return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": []}, "message": "success"}
         raise HTTPException(401, "登录状态无效，请重新登录")
-    if payload.get("role") == "ADMIN":
-        # 应急管理员令牌（sub=0）：签发时已通过强度校验并留有审计记录。
+    if payload.get("role") == "ADMIN" and emergency_admin_credentials() is not None:
+        # 应急管理员令牌（sub=0）：开关已关闭时立即失效。
         return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": []}, "message": "success"}
     raise HTTPException(401, "登录状态无效，请重新登录")
 
@@ -1780,6 +1782,7 @@ def _document_rows(
             selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item),
             selectinload(StockTransaction.related_order),
             selectinload(StockTransaction.related_production_run),
+            selectinload(StockTransaction.shipment_allocations).selectinload(OrderShipmentAllocation.order_item),
         )
     )
     if keyword.strip():
@@ -2184,7 +2187,8 @@ def create_order_return(
                 409,
                 f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
             )
-        if requested.restock and payload.resolution == "REFUND":
+        # restock 语义对所有 resolution 一致：勾选回库就生成退货入库（退款或换货皆可）。
+        if requested.restock:
             restock_changes.append((line.product, requested.quantity, line.product.cost_price))
     transaction = None
     if restock_changes:
@@ -2192,7 +2196,7 @@ def create_order_return(
             db,
             "SALE_RETURN_IN",
             restock_changes,
-            payload.notes or f"客单 {order.order_no} 退货入库（退款）",
+            payload.notes or f"客单 {order.order_no} 退货入库（{'退款' if payload.resolution == 'REFUND' else '换货'}）",
             related_order_id=order.id,
             occurred_at=occurred_at,
         )
@@ -2323,9 +2327,10 @@ def _ship_order(
         replacement_quantity = quantity - original_quantity
         changes.append((line.product, -quantity, line.product.cost_price))
         unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
+        # 单据金额快照只按原单履约计价：换货补发不产生新的销售金额。
         price_snapshots[line.product_id] = (
             unit_price,
-            round(unit_price * quantity, 2),
+            round(unit_price * original_quantity, 2),
         )
         fulfillment_plan.append((line, original_quantity, replacement_quantity, unit_price))
     tx = create_transaction(
@@ -2512,6 +2517,39 @@ def cancel_order(
     return order_dict(order)
 
 
+def _sale_out_reversal_deltas(db: Session, original: StockTransaction) -> dict[int, dict[str, int]]:
+    """冲销一张 SALE_OUT 需要恢复的订单行数量：{order_item_id: {original: x, replacement: y}}。
+
+    优先按履约分配精确计算；没有分配记录的历史流水退回旧行为（按产品反查，全部记 original）。
+    """
+    deltas: dict[int, dict[str, int]] = {}
+    allocations = db.scalars(
+        select(OrderShipmentAllocation)
+        .where(OrderShipmentAllocation.stock_transaction_id == original.id)
+    ).all()
+    if allocations:
+        for allocation in allocations:
+            entry = deltas.setdefault(allocation.order_item_id, {"original": 0, "replacement": 0})
+            key = "replacement" if allocation.fulfillment_type == "REPLACEMENT" else "original"
+            entry[key] += int(allocation.quantity)
+        return deltas
+    if not original.related_order_id:
+        return deltas
+    for line in original.lines:
+        if line.quantity_change >= 0:
+            continue
+        order_item = db.scalar(
+            select(SalesOrderItem).where(
+                SalesOrderItem.product_id == line.item_id,
+                SalesOrderItem.order_id == original.related_order_id,
+            )
+        )
+        if order_item:
+            entry = deltas.setdefault(order_item.id, {"original": 0, "replacement": 0})
+            entry["original"] += -int(line.quantity_change)
+    return deltas
+
+
 @app.post("/api/stock/transactions/{transaction_id}/reverse", status_code=201)
 def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)):
     original = db.scalar(
@@ -2546,6 +2584,20 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
                 )
             receivable.status = "CANCELLED"
             receivable.notes = (receivable.notes or "") + f"；因冲销 {original.transaction_no} 而取消"
+        # 冲销守卫：恢复发货数量后，"客户已退数量"不能超过"累计发货"，
+        # 否则说明这批货物已经发生退货，直接冲销会让退货账目悬空。
+        for order_item_id, delta in _sale_out_reversal_deltas(db, original).items():
+            order_item = db.get(SalesOrderItem, order_item_id)
+            if not order_item:
+                continue
+            shipped_after = int(order_item.shipped_quantity or 0) - delta["original"]
+            replacement_after = int(order_item.replacement_shipped_quantity or 0) - delta["replacement"]
+            if shipped_after + replacement_after < int(order_item.returned_quantity or 0):
+                raise HTTPException(
+                    409,
+                    f"{order_item.product.sku} 已发生退货 {int(order_item.returned_quantity or 0)} 件；"
+                    "直接冲销会使已退数量超过累计发货，请先处理退货记录",
+                )
     changes = []
     for line in original.lines:
         changes.append((line.item, -line.quantity_change, line.unit_cost))
@@ -2563,41 +2615,19 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
     original.status = "REVERSED"
     if original.transaction_type == "SALE_OUT" and original.related_order_id:
         order = db.get(SalesOrder, original.related_order_id)
-        # 优先按履约分配精确恢复；没有分配记录的历史流水退回旧行为（按产品反查）。
-        allocations = db.scalars(
-            select(OrderShipmentAllocation)
-            .where(OrderShipmentAllocation.stock_transaction_id == original.id)
-        ).all()
-        if allocations:
-            for allocation in allocations:
-                order_item = db.get(SalesOrderItem, allocation.order_item_id)
-                if not order_item:
-                    continue
-                if allocation.fulfillment_type == "REPLACEMENT":
-                    order_item.replacement_pending_quantity = (
-                        int(order_item.replacement_pending_quantity or 0) + int(allocation.quantity)
-                    )
-                    order_item.replacement_shipped_quantity = max(
-                        int(order_item.replacement_shipped_quantity or 0) - int(allocation.quantity), 0
-                    )
-                else:
-                    order_item.shipped_quantity = max(
-                        int(order_item.shipped_quantity or 0) - int(allocation.quantity), 0
-                    )
-        elif order:
-            for line in original.lines:
-                if line.quantity_change < 0:
-                    order_item = db.scalar(
-                        select(SalesOrderItem)
-                        .where(
-                            SalesOrderItem.product_id == line.item_id,
-                            SalesOrderItem.order_id == order.id,
-                        )
-                    )
-                    if order_item:
-                        order_item.shipped_quantity = max(
-                            int(order_item.shipped_quantity or 0) + int(line.quantity_change), 0
-                        )
+        for order_item_id, delta in _sale_out_reversal_deltas(db, original).items():
+            order_item = db.get(SalesOrderItem, order_item_id)
+            if not order_item:
+                continue
+            order_item.shipped_quantity = max(
+                int(order_item.shipped_quantity or 0) - delta["original"], 0
+            )
+            order_item.replacement_shipped_quantity = max(
+                int(order_item.replacement_shipped_quantity or 0) - delta["replacement"], 0
+            )
+            order_item.replacement_pending_quantity = (
+                int(order_item.replacement_pending_quantity or 0) + delta["replacement"]
+            )
         # 冲销让需求重新出现时，已完结订单必须重开，否则后续出库会被状态检查拒绝。
         if order and order.status == "FULFILLED" and any(
             int(line.shipped_quantity or 0) < int(line.quantity)

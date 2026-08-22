@@ -64,8 +64,6 @@ export async function apiBlob(path: string, options: RequestInit = {}): Promise<
 
 export interface DataChangeEvent {
   id: number
-  path: string
-  method: string
   source: string
   occurred_at: string
 }

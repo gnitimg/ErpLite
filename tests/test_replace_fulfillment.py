@@ -27,6 +27,7 @@ from app.models import (
     Receivable,
     SalesOrder,
     SalesOrderItem,
+    StockTransaction,
 )
 from app.planning import recalculate_production_plan
 from app.schemas import OrderReturnLinePayload, OrderReturnPayload
@@ -313,3 +314,112 @@ def test_returnable_includes_replacement_shipped():
             raise AssertionError("超出可退数量应当被拒绝")
         except HTTPException as error:
             assert error.status_code == 409
+
+
+def test_sale_out_reversal_blocked_when_returns_exist():
+    """已发生退货的出库不能直接冲销：否则已退数量会超过累计发货。"""
+    with database() as db:
+        product = make_product(db, stock=100)
+        order = make_order(db, product, 100)
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        shipment = _ship_order(db, order.id, None)
+        line = order.items[0]
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=line.id, quantity=10, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        try:
+            reverse_stock_transaction(shipment["transaction_id"], db)
+            raise AssertionError("已发生退货的出库应当拒绝冲销")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "退货" in error.detail
+        # 冲销被拒后，账面与库存保持原样
+        db.refresh(line)
+        assert int(line.shipped_quantity) == 100
+        assert float(product.stock_qty) == 0
+
+
+def test_sale_out_reversal_allowed_when_returns_still_covered():
+    """多张出库单场景：冲销后累计发货仍不低于已退数量时允许。"""
+    with database() as db:
+        product = make_product(db, stock=100)
+        order = make_order(db, product, 100)
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 60})
+        second = _ship_order(db, order.id, {order.items[0].id: 40})
+        line = order.items[0]
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=line.id, quantity=10, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        reverse_stock_transaction(second["transaction_id"], db)
+        db.refresh(line)
+        assert int(line.shipped_quantity) == 60
+        assert int(line.returned_quantity) == 10
+        assert float(product.stock_qty) == 40
+
+
+def test_shipment_snapshot_amount_counts_original_only():
+    """单据金额快照只按原单履约计价；换货数量单独暴露给单据/打印。"""
+    from sqlalchemy.orm import selectinload
+
+    from app.services import transaction_dict
+
+    def load_tx(db: Session, tx_id: int) -> StockTransaction:
+        return db.scalar(
+            select(StockTransaction)
+            .where(StockTransaction.id == tx_id)
+            .options(selectinload(StockTransaction.shipment_allocations).selectinload(OrderShipmentAllocation.order_item))
+        )
+
+    with database() as db:
+        product = make_product(db, stock=100)
+        order = make_order(db, product, 100)
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 30})
+        line = order.items[0]
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=line.id, quantity=5, restock=False)],
+                resolution="REPLACE",
+            ),
+            db,
+        )
+        inbound(db, product, 75)
+
+        # 混合出库：70 原单 + 5 换货 → 金额快照只算 70 的
+        mixed = _ship_order(db, order.id, {line.id: 75})
+        tx = load_tx(db, mixed["transaction_id"])
+        tx_line = tx.lines[0]
+        assert float(tx_line.line_total_snapshot) == 700
+        data = transaction_dict(tx)
+        assert data["lines"][0]["replacement_quantity"] == 5
+
+        # 纯换货补发：金额 0，换货数量完整暴露
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=line.id, quantity=10, restock=False)],
+                resolution="REPLACE",
+            ),
+            db,
+        )
+        inbound(db, product, 10)
+        pure = _ship_order(db, order.id, None)
+        tx2 = load_tx(db, pure["transaction_id"])
+        assert float(tx2.lines[0].line_total_snapshot) == 0
+        data2 = transaction_dict(tx2)
+        assert data2["lines"][0]["replacement_quantity"] == 10

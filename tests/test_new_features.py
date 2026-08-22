@@ -140,7 +140,8 @@ def test_bom_self_reference_rejected():
         assert error.value.status_code == 400
 
 
-def test_return_resolution_refund_restocks_and_replace_does_not():
+def test_return_restock_semantics_per_resolution():
+    """restock 勾选对所有 resolution 生效：勾了就回库，没勾就不回库。"""
     with database() as db:
         from app.main import create_order_return
         from app.schemas import OrderReturnLinePayload, OrderReturnPayload
@@ -162,6 +163,7 @@ def test_return_resolution_refund_restocks_and_replace_does_not():
         assert result["resolution"] == "REFUND"
         assert product.stock_qty == 6
 
+        # 换货 + 勾选回库：货回仓库，同时形成待补需求
         result2 = create_order_return(
             order.id,
             OrderReturnPayload(
@@ -172,7 +174,23 @@ def test_return_resolution_refund_restocks_and_replace_does_not():
             db,
         )
         assert result2["resolution"] == "REPLACE"
-        assert product.stock_qty == 6
+        assert product.stock_qty == 7
+        db.refresh(order.items[0])
+        assert int(order.items[0].replacement_pending_quantity or 0) == 1
+
+        # 换货 + 不回库（报废件）：库存不动，同样形成待补需求
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=1, restock=False)],
+                resolution="REPLACE",
+                occurred_date=date(2026, 8, 25),
+            ),
+            db,
+        )
+        assert product.stock_qty == 7
+        db.refresh(order.items[0])
+        assert int(order.items[0].replacement_pending_quantity or 0) == 2
 
 
 def test_external_processing_sets_expected_return_at():

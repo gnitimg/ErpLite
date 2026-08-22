@@ -175,7 +175,7 @@ class OrderShipmentAllocation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     order_item: Mapped[SalesOrderItem] = relationship()
-    transaction: Mapped["StockTransaction"] = relationship()
+    transaction: Mapped["StockTransaction"] = relationship(back_populates="shipment_allocations")
 
 
 class ProductionLine(Base):
@@ -369,6 +369,9 @@ class StockTransaction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     lines: Mapped[list["StockTransactionItem"]] = relationship(cascade="all, delete-orphan", back_populates="transaction")
+    shipment_allocations: Mapped[list["OrderShipmentAllocation"]] = relationship(
+        cascade="all, delete-orphan", back_populates="transaction"
+    )
     related_order: Mapped[SalesOrder | None] = relationship()
     related_production_run: Mapped[ProductionRun | None] = relationship()
 

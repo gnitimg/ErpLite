@@ -18,6 +18,9 @@ logger = logging.getLogger("uvicorn.error")
 
 TOKEN_TTL_SECONDS = 86400 * 7
 
+# Break-glass 应急管理员令牌只活 2 小时，且开关一关立即失效（见 current_role_for）。
+EMERGENCY_TOKEN_TTL_SECONDS = 3600 * 2
+
 # Break-glass 应急管理员密码的最小长度；弱口令直接拒绝启用。
 EMERGENCY_ADMIN_MIN_PASSWORD_LENGTH = 12
 
@@ -100,7 +103,9 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s.encode("utf-8"))
 
 
-def create_access_token(user_id: int, username: str, role: str, display_name: str = "") -> str:
+def create_access_token(
+    user_id: int, username: str, role: str, display_name: str = "", ttl_seconds: int | None = None
+) -> str:
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": str(user_id),
@@ -108,7 +113,7 @@ def create_access_token(user_id: int, username: str, role: str, display_name: st
         "role": role,
         "display_name": display_name,
         "iat": int(time.time()),
-        "exp": int(time.time()) + TOKEN_TTL_SECONDS,
+        "exp": int(time.time()) + (ttl_seconds or TOKEN_TTL_SECONDS),
     }
     h = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
     p = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
@@ -158,6 +163,27 @@ def authenticated_username(request: Request) -> str:
         return str(verify_token(token).get("username") or ANONYMOUS_USERNAME)[:120]
     except HTTPException:
         return ANONYMOUS_USERNAME
+
+
+def current_role_for(payload: dict, db: Session) -> str | None:
+    """按数据库当前状态解析令牌的角色；返回 None 表示令牌已失效。
+
+    - 普通用户：必须仍存在且 active，角色取数据库当前值（改角色/停用立即生效，
+      不等 7 天令牌过期）；
+    - 应急管理员令牌：开关关闭或凭据不再满足强度要求时立即作废。
+    """
+    try:
+        user_id = int(payload.get("sub", "0") or 0)
+    except (TypeError, ValueError):
+        return None
+    if user_id > 0:
+        user = db.get(User, user_id)
+        if not user or not user.active:
+            return None
+        return user.role
+    if payload.get("role") == "ADMIN":
+        return "ADMIN" if emergency_admin_credentials() is not None else None
+    return None
 
 
 def get_current_user(request: Request, db: Session = None) -> dict:

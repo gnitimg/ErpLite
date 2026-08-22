@@ -30,7 +30,7 @@ def make_request(method: str, path: str, client_id: str = "") -> Request:
     )
 
 
-def test_successful_write_broadcasts_source_and_path(monkeypatch):
+def test_successful_write_broadcasts_change_signal(monkeypatch):
     class AuditSession:
         def __enter__(self): return self
         def __exit__(self, *_args): return False
@@ -51,7 +51,8 @@ def test_successful_write_broadcasts_source_and_path(monkeypatch):
         )
         assert response.status_code == 201
         event = json.loads(queue.get_nowait())
-        assert event["path"] == "/api/parts"
+        # 公开信号不携带业务信息（无 path/method），只标识来源与时间。
+        assert set(event) == {"id", "source", "occurred_at"}
         assert event["source"] == "client-a"
     finally:
         change_events.unsubscribe(queue)

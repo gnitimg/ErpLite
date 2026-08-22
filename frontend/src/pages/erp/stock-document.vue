@@ -45,8 +45,9 @@ const orderId = computed(() => {
 const title = computed(() => direction.value === "INBOUND" ? "入库单" : "出库单")
 const counterpartyLabel = computed(() => direction.value === "INBOUND" ? "供应商" : "收货单位")
 const totalQuantity = computed(() => form.items.reduce((sum, line) => sum + Number(line.quantity || 0), 0))
+const totalReplacement = computed(() => form.items.reduce((sum, line) => sum + replacementQty(line), 0))
 const totalAmount = computed(() => form.items.reduce(
-  (sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_price || 0),
+  (sum, line) => sum + originalQty(line) * Number(line.unit_price || 0),
   0
 ))
 const availableItems = computed(() => {
@@ -94,6 +95,24 @@ function itemChanged(line: any) {
     )
   }
   documentNo.value = "提交后自动生成"
+}
+
+/** 本行中属于换货补发的数量：超出原单剩余（quantity - shipped）的部分。 */
+function replacementQty(line: any) {
+  if (!linkedOrder.value || !line.order_item_id) return 0
+  const orderLine = linkedOrder.value.items.find(
+    (candidate: any) => Number(candidate.id) === Number(line.order_item_id)
+  )
+  if (!orderLine) return 0
+  const originalRemaining = Math.max(
+    Number(orderLine.quantity || 0) - Number(orderLine.shipped_quantity || 0), 0
+  )
+  return Math.max(0, Number(line.quantity || 0) - originalRemaining)
+}
+
+/** 本行按原单计价的数量（换货补发不产生销售金额）。 */
+function originalQty(line: any) {
+  return Math.max(0, Number(line.quantity || 0) - replacementQty(line))
 }
 
 function applyOrder(order: any) {
@@ -327,7 +346,7 @@ useLiveRefresh(() => loadInventory(true))
           <el-table-column label="单位" width="80" align="center">
             <template #default="{ row }">{{ itemOf(row)?.unit || '-' }}</template>
           </el-table-column>
-          <el-table-column label="数量" width="150">
+          <el-table-column label="数量" width="170">
             <template #default="{ row }">
               <QuantityInput
                 v-model="row.quantity"
@@ -335,7 +354,9 @@ useLiveRefresh(() => loadInventory(true))
                 :integer="itemOf(row)?.kind === 'PRODUCT'"
                 :min="0"
               />
-              <span class="print-only">{{ qty(row.quantity) }}</span>
+              <span class="print-only">
+                {{ qty(row.quantity) }}<template v-if="replacementQty(row) > 0">（换货 {{ replacementQty(row) }}）</template>
+              </span>
             </template>
           </el-table-column>
           <el-table-column label="单价" width="150">
@@ -345,7 +366,7 @@ useLiveRefresh(() => loadInventory(true))
             </template>
           </el-table-column>
           <el-table-column label="金额" width="120" align="right">
-            <template #default="{ row }">{{ money(Number(row.quantity || 0) * Number(row.unit_price || 0)) }}</template>
+            <template #default="{ row }">{{ money(originalQty(row) * Number(row.unit_price || 0)) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="82" align="center" class-name="no-print">
             <template #default="{ row }">
@@ -355,6 +376,7 @@ useLiveRefresh(() => loadInventory(true))
         </el-table>
 
         <div class="document-summary">
+          <div v-if="totalReplacement > 0"><span>其中换货</span><strong>{{ qty(totalReplacement) }}</strong></div>
           <div><span>数量合计</span><strong>{{ qty(totalQuantity) }}</strong></div>
           <div><span>金额合计</span><strong>{{ money(totalAmount) }}</strong></div>
         </div>

@@ -61,7 +61,7 @@ def db(monkeypatch):
     main_module.app.dependency_overrides.pop(get_db, None)
 
 
-def add_user(factory, username: str, role: str, password: str = "pass-123456") -> User:
+def add_user(factory, username: str, role: str, password: str = "pass-123456") -> int:
     with factory() as session:
         user = User(
             username=username,
@@ -72,7 +72,7 @@ def add_user(factory, username: str, role: str, password: str = "pass-123456") -
         session.add(user)
         session.commit()
         session.refresh(user)
-        return user
+        return int(user.id)
 
 
 def login_token(username: str, password: str) -> str | None:
@@ -262,7 +262,58 @@ def test_production_starts_with_secret(monkeypatch):
 
 
 def test_token_roundtrip_in_same_process(db):
-    token = create_access_token(7, "u7", "OPERATOR", "U7")
+    user_id = add_user(db, "u7", "OPERATOR")
+    token = create_access_token(user_id, "u7", "OPERATOR", "U7")
     response = client.get("/api/orders", headers=auth(token))
-    # 令牌有效则不再 401/403（列表可能为空）。
+    # 有效签名 + 数据库中真实存在的 active 用户：放行（列表可能为空）。
     assert response.status_code == 200
+
+
+# ───────────────────── 角色与状态的即时生效 ─────────────────────
+
+def test_role_change_takes_effect_immediately(db):
+    """数据库里的角色对已签发令牌立即生效，不等令牌过期。"""
+    add_user(db, "op1", "OPERATOR")
+    token = login_token("op1", "pass-123456")
+    assert client.post("/api/parts", headers=auth(token), json={"sku": "X1", "name": "降级前"}).status_code == 201
+    with db() as session:
+        user = session.scalar(select(User).where(User.username == "op1"))
+        user.role = "VIEWER"
+        session.commit()
+    assert client.get("/api/orders", headers=auth(token)).status_code == 200
+    assert client.post("/api/parts", headers=auth(token), json={"sku": "X2", "name": "降级后"}).status_code == 403
+
+
+def test_deactivated_user_rejected_immediately(db):
+    add_user(db, "op1", "OPERATOR")
+    token = login_token("op1", "pass-123456")
+    assert client.get("/api/orders", headers=auth(token)).status_code == 200
+    with db() as session:
+        user = session.scalar(select(User).where(User.username == "op1"))
+        user.active = False
+        session.commit()
+    assert client.get("/api/orders", headers=auth(token)).status_code == 401
+
+
+# ───────────────────── 应急管理员令牌时效 ─────────────────────
+
+def test_emergency_admin_token_short_ttl(db, monkeypatch):
+    monkeypatch.setenv("ERP_ENABLE_EMERGENCY_ADMIN", "1")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emg")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_PASSWORD", "break-glass-pass-123")
+    from app.auth import verify_token
+    token = login_token("emg", "break-glass-pass-123")
+    payload = verify_token(token)
+    assert 0 < payload["exp"] - payload["iat"] <= 2 * 3600
+
+
+def test_emergency_token_dies_when_switch_turned_off(db, monkeypatch):
+    monkeypatch.setenv("ERP_ENABLE_EMERGENCY_ADMIN", "1")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emg")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_PASSWORD", "break-glass-pass-123")
+    token = login_token("emg", "break-glass-pass-123")
+    assert client.get("/api/orders", headers=auth(token)).status_code == 200
+    # 关闭开关后，未过期的令牌也立即失效
+    monkeypatch.delenv("ERP_ENABLE_EMERGENCY_ADMIN")
+    assert client.get("/api/orders", headers=auth(token)).status_code == 401
+    assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
