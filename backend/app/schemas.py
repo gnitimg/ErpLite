@@ -160,6 +160,7 @@ class OrderPayload(BaseModel):
 class ProductionSettingsPayload(BaseModel):
     line_count: int = Field(default=1, ge=1, le=100)
     schedule_auto_snap: bool = True
+    working_weekdays: str = Field(default="1,2,3,4,5", max_length=20)
 
 
 class PrintSettingsPayload(BaseModel):
@@ -277,3 +278,9 @@ class PurchaseCommitmentPayload(BaseModel):
 
 class PurchaseCommitmentStatusPayload(BaseModel):
     status: Literal["PLANNED", "ARRIVED", "CANCELLED"]
+
+
+class CalendarExceptionPayload(BaseModel):
+    exception_date: date
+    is_working_day: bool = False
+    note: str = Field(default="", max_length=200)

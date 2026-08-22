@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from math import floor
 
 from sqlalchemy import and_, delete, func, or_, select
@@ -11,6 +11,7 @@ from .models import (
     ExternalProcessingBatch,
     InventoryItem,
     ProductionAllocation,
+    ProductionCalendarException,
     ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
@@ -24,6 +25,36 @@ from .services import RESERVATION_STATUSES, rebalance_product_reservations, seri
 
 SECONDS_PER_DAY = 86400.0
 PARALLEL_IMPROVEMENT_THRESHOLD = 0.05
+
+
+def is_working_day(db: Session, check_date: date) -> bool:
+    """检查给定日期是否为工作日。优先查日历例外，再查默认工作日设置。"""
+    exception = db.scalar(
+        select(ProductionCalendarException)
+        .where(ProductionCalendarException.exception_date == check_date)
+    )
+    if exception:
+        return bool(exception.is_working_day)
+    settings = db.get(ProductionSetting, 1)
+    weekdays_str = (settings.working_weekdays if settings else "1,2,3,4,5") or "1,2,3,4,5"
+    try:
+        weekdays = {int(d.strip()) for d in weekdays_str.split(",") if d.strip()}
+    except ValueError:
+        weekdays = {1, 2, 3, 4, 5}
+    return check_date.isoweekday() in weekdays
+
+
+def next_working_start(db: Session, from_time: datetime) -> datetime:
+    """返回 from_time 之后最近的工作日开工时间（当日 08:00 或次日 08:00）。"""
+    check_date = from_time.date()
+    day_start = datetime.combine(check_date, time(8, 0))
+    if is_working_day(db, check_date) and from_time <= day_start:
+        return day_start
+    for _ in range(30):
+        check_date += timedelta(days=1)
+        if is_working_day(db, check_date):
+            return datetime.combine(check_date, time(8, 0))
+    return from_time
 
 
 def _integer_shares(total: int, weights: list[float]) -> list[int]:

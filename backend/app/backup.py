@@ -19,6 +19,7 @@ from .models import (
     ProductBomItem,
     ProductMold,
     ProductionAllocation,
+    ProductionCalendarException,
     ProductionCapability,
     ProductionLine,
     ProductionMaterialReservation,
@@ -34,7 +35,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 15
+BACKUP_SCHEMA_VERSION = 16
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -54,9 +55,11 @@ BACKUP_TABLES = (
     OrderReturn.__table__,
     ExternalProcessingBatch.__table__,
     PurchaseCommitment.__table__,
+    ProductionCalendarException.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    ProductionCalendarException.__table__,
     PurchaseCommitment.__table__,
     ExternalProcessingBatch.__table__,
     OrderReturn.__table__,
@@ -283,6 +286,11 @@ def _load_archive(path: Path) -> dict[str, Any]:
         for row in tables.get("external_processing_batches", []):
             row.setdefault("expected_return_at", None)
         tables.setdefault("purchase_commitments", [])
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 15:
+        for row in tables.get("production_settings", []):
+            row.setdefault("working_weekdays", "1,2,3,4,5")
+        tables.setdefault("production_calendar_exceptions", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

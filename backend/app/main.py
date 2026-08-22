@@ -29,6 +29,7 @@ from .models import (
     OrderReturn,
     ProductBomItem,
     ProductionAllocation,
+    ProductionCalendarException,
     ProductionMaterialReservation,
     ProductionRun,
     ProductionSetting,
@@ -41,6 +42,7 @@ from .models import (
 )
 from .schemas import (
     BackupRestorePayload,
+    CalendarExceptionPayload,
     ExternalProcessingReturnPayload,
     ExternalProcessingSendPayload,
     LoginPayload,
@@ -587,6 +589,8 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
     ):
         raise HTTPException(409, "该产品仍有半成品或外协在途，不能关闭外协工序")
     part_ids = [line.part_id for line in payload.components]
+    if product and product.id in part_ids:
+        raise HTTPException(400, "BOM 中不能包含产品自身作为零件")
     parts = {
         part.id: part
         for part in db.scalars(
@@ -660,6 +664,7 @@ def production_settings_dict(settings: ProductionSetting) -> dict:
     return {
         "line_count": settings.line_count,
         "schedule_auto_snap": settings.schedule_auto_snap,
+        "working_weekdays": settings.working_weekdays or "1,2,3,4,5",
         "updated_at": settings.updated_at.isoformat(),
     }
 
@@ -686,6 +691,7 @@ def update_production_settings(
         db.add(row)
     row.line_count = payload.line_count
     row.schedule_auto_snap = payload.schedule_auto_snap
+    row.working_weekdays = payload.working_weekdays.strip() or "1,2,3,4,5"
     db.flush()
     recalculate_production_plan(db)
     db.commit()
@@ -728,6 +734,57 @@ def update_print_settings(
     db.commit()
     db.refresh(row)
     return print_settings_dict(row)
+
+
+def calendar_exception_dict(row: ProductionCalendarException) -> dict:
+    return {
+        "id": row.id,
+        "exception_date": row.exception_date.isoformat(),
+        "is_working_day": row.is_working_day,
+        "note": row.note,
+        "created_at": row.created_at.isoformat(),
+    }
+
+
+@app.get("/api/system/calendar/exceptions")
+def list_calendar_exceptions(db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(ProductionCalendarException)
+        .order_by(ProductionCalendarException.exception_date)
+    ).all()
+    return [calendar_exception_dict(row) for row in rows]
+
+
+@app.post("/api/system/calendar/exceptions", status_code=201)
+def create_calendar_exception(
+    payload: CalendarExceptionPayload,
+    db: Session = Depends(get_db),
+):
+    existing = db.scalar(
+        select(ProductionCalendarException)
+        .where(ProductionCalendarException.exception_date == payload.exception_date)
+    )
+    if existing:
+        raise HTTPException(409, "该日期已有日历例外设置")
+    row = ProductionCalendarException(
+        exception_date=payload.exception_date,
+        is_working_day=payload.is_working_day,
+        note=payload.note.strip(),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return calendar_exception_dict(row)
+
+
+@app.delete("/api/system/calendar/exceptions/{exception_id}")
+def delete_calendar_exception(exception_id: int, db: Session = Depends(get_db)):
+    row = db.get(ProductionCalendarException, exception_id)
+    if not row:
+        raise HTTPException(404, "日历例外不存在")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/production/runs")

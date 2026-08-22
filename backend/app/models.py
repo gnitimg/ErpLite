@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -15,8 +15,8 @@ class InventoryItem(Base):
     kind: Mapped[str] = mapped_column(String(20), index=True)  # PART / PRODUCT
     unit: Mapped[str] = mapped_column(String(20), default="件")
     spec: Mapped[str] = mapped_column(String(200), default="")
-    cost_price: Mapped[float] = mapped_column(Float, default=0)
-    sale_price: Mapped[float] = mapped_column(Float, default=0)
+    cost_price: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    sale_price: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
     min_stock: Mapped[float] = mapped_column(Float, default=0)
     daily_capacity: Mapped[int] = mapped_column(Integer, default=0)
     mold_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -64,7 +64,7 @@ class SalesOrder(Base):
     status: Mapped[str] = mapped_column(String(20), default="DRAFT", index=True)
     order_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
     required_date: Mapped[date] = mapped_column(Date, default=date.today, index=True)
-    total_amount: Mapped[float] = mapped_column(Float, default=0)
+    total_amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
     estimated_completion_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     eta_calculated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eta_reliable: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -89,9 +89,9 @@ class SalesOrderItem(Base):
     returned_quantity: Mapped[int] = mapped_column(Integer, default=0)
     reserved_quantity: Mapped[int] = mapped_column(Integer, default=0)
     pipeline_quantity: Mapped[int] = mapped_column(Integer, default=0)
-    reference_price: Mapped[float] = mapped_column(Float, default=0)
-    unit_price: Mapped[float] = mapped_column(Float)
-    line_total: Mapped[float] = mapped_column(Float)
+    reference_price: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    unit_price: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
+    line_total: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
     production_required_quantity: Mapped[float] = mapped_column(Float, default=0)
     estimated_completion_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eta_reliable: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -172,6 +172,7 @@ class ProductionSetting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     line_count: Mapped[int] = mapped_column(Integer, default=1)
     schedule_auto_snap: Mapped[bool] = mapped_column(Boolean, default=True)
+    working_weekdays: Mapped[str] = mapped_column(String(20), default="1,2,3,4,5", server_default="1,2,3,4,5")
     print_paper_preset: Mapped[str] = mapped_column(String(30), default="A4_LANDSCAPE")
     print_width_mm: Mapped[float] = mapped_column(Float, default=297)
     print_height_mm: Mapped[float] = mapped_column(Float, default=210)
@@ -352,13 +353,13 @@ class StockTransactionItem(Base):
     transaction_id: Mapped[int] = mapped_column(ForeignKey("stock_transactions.id", ondelete="CASCADE"), index=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("inventory_items.id", ondelete="RESTRICT"), index=True)
     quantity_change: Mapped[float] = mapped_column(Float)
-    unit_cost: Mapped[float] = mapped_column(Float, default=0)
+    unit_cost: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
     sku_snapshot: Mapped[str | None] = mapped_column(String(50), nullable=True)
     name_snapshot: Mapped[str | None] = mapped_column(String(120), nullable=True)
     spec_snapshot: Mapped[str | None] = mapped_column(String(200), nullable=True)
     unit_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    unit_price_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
-    line_total_snapshot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit_price_snapshot: Mapped[float | None] = mapped_column(Numeric(18, 2, asdecimal=False), nullable=True)
+    line_total_snapshot: Mapped[float | None] = mapped_column(Numeric(18, 2, asdecimal=False), nullable=True)
     inventory_bucket: Mapped[str] = mapped_column(String(20), default="FINISHED", server_default="FINISHED")
     affects_primary_stock: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
@@ -449,9 +450,16 @@ class PurchaseCommitment(Base):
     quantity: Mapped[float] = mapped_column(Float)
     expected_arrival_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
-    supplier_text: Mapped[str] = mapped_column(String(120), default="")
-    notes: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
-
     part: Mapped[InventoryItem] = relationship()
+
+
+class ProductionCalendarException(Base):
+    """生产日历例外日期，覆盖默认工作日设置。"""
+
+    __tablename__ = "production_calendar_exceptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exception_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    is_working_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

@@ -326,9 +326,16 @@ def create_transaction(
     db.flush()
     for item, delta, unit_cost in normalized_changes:
         if apply_inventory:
-            item.stock_qty = round(item.stock_qty + delta, 6)
-        if apply_inventory and delta > 0 and unit_cost > 0:
-            item.cost_price = unit_cost
+            if delta > 0 and unit_cost > 0:
+                old_stock = float(item.stock_qty)
+                old_value = old_stock * float(item.cost_price)
+                new_value = old_value + float(delta) * float(unit_cost)
+                new_stock = old_stock + float(delta)
+                item.stock_qty = round(new_stock, 6)
+                if new_stock > 1e-9:
+                    item.cost_price = round(new_value / new_stock, 2)
+            else:
+                item.stock_qty = round(item.stock_qty + delta, 6)
         price, line_total = (price_snapshots or {}).get(item.id, (None, None))
         bucket = _infer_inventory_bucket(tx_type, item.kind)
         db.add(StockTransactionItem(
