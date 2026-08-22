@@ -23,7 +23,7 @@ from app.models import (
     SalesOrder,
     SalesOrderItem,
 )
-from app.planning import recalculate_production_plan
+from app.planning import calculate_production_end, recalculate_production_plan
 from app.schemas import (
     ManualProductionRunPayload,
     ProductPayload,
@@ -33,6 +33,9 @@ from app.services import item_dict
 
 
 NOW = datetime(2026, 8, 20, 8, 0, 0)
+# NOW 是周四；2026-08-22/23 是周末（默认日历周一至周五）。
+# 周四起 2 个生产日 = 周四 + 周五，结束落在下周一同一时刻。
+NEXT_MONDAY = datetime(2026, 8, 24, 8, 0, 0)
 
 
 def add_order(
@@ -126,8 +129,8 @@ def test_single_line_eta_and_two_products_run_in_parallel():
         recalculate_production_plan(db, NOW)
 
         assert order.items[0].estimated_completion_at == NOW + timedelta(days=1)
-        assert order.items[1].estimated_completion_at == NOW + timedelta(days=2)
-        assert order.estimated_completion_at == NOW + timedelta(days=2)
+        assert order.items[1].estimated_completion_at == NEXT_MONDAY
+        assert order.estimated_completion_at == NEXT_MONDAY
         assert db.query(ProductionRun).count() == 2
 
 
@@ -159,7 +162,8 @@ def test_single_mold_prevents_parallel_and_two_molds_allow_parallel():
         recalculate_production_plan(db, NOW)
         single_runs = db.query(ProductionRun).filter_by(product_id=single.id).all()
         assert len(single_runs) == 1
-        assert single_runs[0].planned_end_at == NOW + timedelta(days=2)
+        # 2 个生产日（周四+周五）跨周末，结束落在周一同一时刻
+        assert single_runs[0].planned_end_at == NEXT_MONDAY
 
         for row in db.query(SalesOrder).all():
             row.status = "CANCELLED"
@@ -223,7 +227,8 @@ def test_existing_running_resource_pushes_new_plan_start():
 
         planned = db.query(ProductionRun).filter_by(status="PLANNED").one()
         assert planned.planned_start_at == NOW + timedelta(days=1)
-        assert order.estimated_completion_at == NOW + timedelta(days=2)
+        # 周五开工 + 1 个生产日 → 周一同时刻完成
+        assert order.estimated_completion_at == NEXT_MONDAY
 
 
 def test_running_allocation_is_not_scheduled_twice():
@@ -314,8 +319,9 @@ def test_schedule_api_locks_run_and_keeps_single_machine_duration():
         assert result["schedule_locked"] is True
         assert result["line_slot"] == 1
         assert result["planned_start_at"] == requested_start.isoformat()
-        assert result["planned_end_at"] == (
-            requested_start + timedelta(days=0.5)
+        # 拖动改期后的结束时间与自动排产使用同一生产日历算法（含休息日跳过）。
+        assert result["planned_end_at"] == calculate_production_end(
+            db, requested_start, 5000, 10000
         ).isoformat()
 
 

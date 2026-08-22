@@ -1,5 +1,5 @@
 """Stage 4 专项测试：统一未来供给 / 生产日历 / 物料时间轴 / ETA 时间模型。"""
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 import sys
 
@@ -210,3 +210,96 @@ def test_free_supply_never_crosses_products():
         p02_runs = [r for r in runs if r.product_id == p02.id]
         assert len(p02_runs) == 1 and int(p02_runs[0].planned_quantity) == 600
         assert not [a for a in runs[0].allocations if a.order_item_id == order_b.items[0].id]
+
+
+# ───────────────── 4C：生产日历 ─────────────────
+
+def add_calendar_exception(db, day, is_working_day, note=""):
+    from app.models import ProductionCalendarException
+    row = ProductionCalendarException(exception_date=day, is_working_day=is_working_day, note=note)
+    db.add(row)
+    db.flush()
+    return row
+
+
+# NOW 是周四 2026-08-20 08:00；8/22(六)、8/23(日)休息。
+def test_two_production_days_from_thursday_end_monday():
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01")
+        add_order(db, "SO-1", [(product, 2000)])
+        recalculate_production_plan(db, NOW)
+        run = all_runs(db)[0]
+        # 周四 + 周五两个生产日，结束落在周一同时刻，不把周末计入产能
+        assert run.planned_start_at == NOW
+        assert run.planned_end_at == datetime(2026, 8, 24, 8, 0)
+
+
+def test_working_saturday_exception_contributes_capacity():
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01")
+        order1 = add_order(db, "SO-1", [(product, 2000)])
+        recalculate_production_plan(db, NOW)
+        assert all_runs(db)[0].planned_end_at == datetime(2026, 8, 24, 8, 0)
+        # 周六调班生产后重排：周四+周五完成 2 天任务，结束落在周六（调班日）同时刻
+        order1.status = "CANCELLED"
+        db.flush()
+        add_calendar_exception(db, date(2026, 8, 22), True, "调班")
+        order2 = add_order(db, "SO-2", [(product, 2000)], days_until_due=6)
+        recalculate_production_plan(db, NOW)
+        db.expire_all()
+        active = [r for r in all_runs(db) if r.status == "PLANNED"]
+        assert active[0].planned_end_at == datetime(2026, 8, 22, 8, 0)
+
+
+def test_resting_wednesday_exception_skips_capacity():
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01")
+        add_calendar_exception(db, date(2026, 8, 21), False, "厂休")
+        add_order(db, "SO-1", [(product, 1000)])
+        recalculate_production_plan(db, NOW)
+        run = all_runs(db)[0]
+        # 周四开工但周五被例外置为休息：1 个生产日落到下周一
+        assert run.planned_end_at == datetime(2026, 8, 24, 8, 0)
+
+
+def test_working_weekdays_change_recalculates_plan():
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01")
+        add_order(db, "SO-1", [(product, 2000)])
+        recalculate_production_plan(db, NOW)
+        assert all_runs(db)[0].planned_end_at == datetime(2026, 8, 24, 8, 0)
+        # 改成 7 天工作制：周四+周五连续，周五完成
+        setting = db.get(ProductionSetting, 1)
+        setting.working_weekdays = "1,2,3,4,5,6,7"
+        db.flush()
+        recalculate_production_plan(db, NOW)
+        db.expire_all()
+        # 7 天工作制：周四+周五连续产出，结束落在周六同时刻（与连续时间模型一致）
+        assert all_runs(db)[0].planned_end_at == datetime(2026, 8, 22, 8, 0)
+
+
+def test_manual_drag_end_respects_calendar():
+    with database() as db:
+        from app.main import update_production_run_schedule
+        from app.schemas import ProductionRunSchedulePayload
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01")
+        add_order(db, "SO-1", [(product, 1000)])
+        recalculate_production_plan(db, NOW)
+        run = all_runs(db)[0]
+        # 拖到（未来的）某个周五 22:00 开始，1 个生产日 → 跳过周末落到周一 22:00
+        today = date.today()
+        days_until_friday = (4 - today.weekday()) % 7 or 7
+        friday_night = datetime.combine(today + timedelta(days=days_until_friday), time(22, 0))
+        monday_night = datetime.combine(today + timedelta(days=days_until_friday + 3), time(22, 0))
+        update_production_run_schedule(
+            run.id,
+            ProductionRunSchedulePayload(line_slot=1, planned_start_at=friday_night),
+            db,
+        )
+        db.expire_all()
+        assert run.planned_end_at == monday_night

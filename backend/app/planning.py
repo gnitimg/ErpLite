@@ -25,23 +25,98 @@ from .services import RESERVATION_STATUSES, rebalance_product_reservations, seri
 
 SECONDS_PER_DAY = 86400.0
 PARALLEL_IMPROVEMENT_THRESHOLD = 0.05
+DEFAULT_WORKING_WEEKDAYS = "1,2,3,4,5"
+MAX_CALENDAR_LOOKAHEAD_DAYS = 400
+
+
+class WorkingCalendar:
+    """进程内生产日历：预载 working_weekdays 与例外，供排产热循环零查询判定。
+
+    时间抽象：一个工作日 = 一个完整生产日（贡献 daily_capacity 全部产能），
+    休息日产能为零；起止时刻的时分秒保留为展示语义，不影响产能计算。
+    """
+
+    def __init__(self, db: Session):
+        settings = db.get(ProductionSetting, 1)
+        weekdays_str = (settings.working_weekdays if settings else None) or DEFAULT_WORKING_WEEKDAYS
+        try:
+            self._weekdays = {int(d.strip()) for d in weekdays_str.split(",") if d.strip()}
+        except ValueError:
+            self._weekdays = {1, 2, 3, 4, 5}
+        self._exceptions = {
+            row.exception_date: bool(row.is_working_day)
+            for row in db.scalars(select(ProductionCalendarException)).all()
+        }
+
+    def is_working_day(self, day: date) -> bool:
+        if day in self._exceptions:
+            return self._exceptions[day]
+        return day.isoweekday() in self._weekdays
+
+    def next_working_day(self, day: date) -> date:
+        for _ in range(MAX_CALENDAR_LOOKAHEAD_DAYS):
+            day = day + timedelta(days=1)
+            if self.is_working_day(day):
+                return day
+        return day
+
+    def add_duration(self, start_at: datetime, production_days: float) -> datetime:
+        """按生产日历推进 production_days 个生产日，返回结束时刻。
+
+        不足一天的份额落在某个工作日内（时钟按比例推进，可跨午夜）；
+        整日消耗后结束时刻落在下一个工作日的同一时分秒。
+        连续工作日下与旧的“连续秒”算法结果一致。
+        """
+        remaining = float(production_days)
+        current = start_at
+        for _ in range(MAX_CALENDAR_LOOKAHEAD_DAYS):
+            if remaining <= 1e-9:
+                return current
+            if self.is_working_day(current.date()):
+                if abs(remaining - 1.0) <= 1e-9:
+                    return datetime.combine(self.next_working_day(current.date()), current.time())
+                if remaining < 1.0:
+                    return current + timedelta(days=remaining)
+                remaining -= 1.0
+            current = datetime.combine(current.date() + timedelta(days=1), start_at.time())
+        return current
+
+    def working_span(self, start: datetime, end: datetime) -> float:
+        """[start, end] 之间的生产日数（份额权重用，天粒度近似）。"""
+        if end <= start:
+            return 0.0
+        total = 0.0
+        day = start.date()
+        while day <= end.date():
+            if self.is_working_day(day):
+                if day == start.date() and day == end.date():
+                    total += max((end - start).total_seconds() / 86400.0, 0.0)
+                else:
+                    total += 1.0
+            day += timedelta(days=1)
+        return total
 
 
 def is_working_day(db: Session, check_date: date) -> bool:
     """检查给定日期是否为工作日。优先查日历例外，再查默认工作日设置。"""
-    exception = db.scalar(
-        select(ProductionCalendarException)
-        .where(ProductionCalendarException.exception_date == check_date)
-    )
-    if exception:
-        return bool(exception.is_working_day)
-    settings = db.get(ProductionSetting, 1)
-    weekdays_str = (settings.working_weekdays if settings else "1,2,3,4,5") or "1,2,3,4,5"
-    try:
-        weekdays = {int(d.strip()) for d in weekdays_str.split(",") if d.strip()}
-    except ValueError:
-        weekdays = {1, 2, 3, 4, 5}
-    return check_date.isoweekday() in weekdays
+    return WorkingCalendar(db).is_working_day(check_date)
+
+
+def calculate_production_end(
+    db: Session,
+    start_at: datetime,
+    quantity: float,
+    daily_capacity: float,
+    calendar: WorkingCalendar | None = None,
+) -> datetime:
+    """统一的生批结束时间计算：数量 / 日产能 = 生产日数，按生产日历推进。
+
+    自动排产、自主补库存、人工拖动改期、取消缩量全部必须走这一个函数，
+    禁止再出现 planned_start + 连续秒 的旁路算法。
+    """
+    capacity = max(float(daily_capacity or 0), 1e-9)
+    cal = calendar or WorkingCalendar(db)
+    return cal.add_duration(start_at, float(quantity) / capacity)
 
 
 def next_working_start(db: Session, from_time: datetime) -> datetime:
@@ -214,25 +289,31 @@ def list_production_runs(db: Session, status: str | None = None) -> list[dict]:
     return [_run_dict(row) for row in rows]
 
 
-def _finish_for_resources(resources: list[dict], quantity: float) -> datetime:
+def _finish_for_resources(calendar: WorkingCalendar, resources: list[dict], quantity: float) -> datetime:
+    """按生产日历计算完成时间：逐个工作日累加产能，休息日产能为零。"""
+    if not resources:
+        raise ValueError("至少需要一个生产资源")
     earliest = min(resource["start"] for resource in resources)
-    slowest_rate = min(resource["rate"] for resource in resources)
-    low = earliest
-    high = earliest + timedelta(seconds=max(quantity / slowest_rate, 1))
-    for _ in range(60):
-        midpoint = low + (high - low) / 2
-        produced = sum(
-            resource["rate"] * max((midpoint - resource["start"]).total_seconds(), 0)
-            for resource in resources
+    anchor_time = earliest.time()
+    day = earliest.date()
+    remaining = float(quantity)
+    for _ in range(MAX_CALENDAR_LOOKAHEAD_DAYS):
+        capacity_today = sum(
+            resource["rate"] for resource in resources if resource["start"].date() <= day
         )
-        if produced >= quantity:
-            high = midpoint
-        else:
-            low = midpoint
-    return high
+        if capacity_today > 1e-9 and calendar.is_working_day(day):
+            if remaining <= capacity_today + 1e-9:
+                fraction = remaining / capacity_today
+                if fraction >= 1.0 - 1e-9:
+                    return datetime.combine(calendar.next_working_day(day), anchor_time)
+                return datetime.combine(day, anchor_time) + timedelta(days=fraction)
+            remaining -= capacity_today
+        day += timedelta(days=1)
+    return datetime.combine(day, anchor_time)
 
 
 def _choose_resources(
+    calendar: WorkingCalendar,
     product_id: int,
     daily_capacity: int,
     quantity: float,
@@ -246,7 +327,7 @@ def _choose_resources(
     if effective_capacity <= 0:
         return None
     candidates = []
-    rate = effective_capacity / SECONDS_PER_DAY
+    rate = effective_capacity  # 以“件/生产日”为速率单位
     for line_slot in range(1, max(int(line_count), 1) + 1):
         for mold_slot in range(1, max(int(mold_count), 1) + 1):
             start = max(
@@ -266,7 +347,7 @@ def _choose_resources(
 
     candidates.sort(key=lambda row: row["start"] + timedelta(seconds=quantity / row["rate"]))
     selected = [candidates[0]]
-    current_finish = _finish_for_resources(selected, quantity)
+    current_finish = _finish_for_resources(calendar, selected, quantity)
     used_lines = {candidates[0]["line_slot"]}
     used_mold_slots = {candidates[0]["mold_slot"]}
     while True:
@@ -275,7 +356,7 @@ def _choose_resources(
         for candidate in candidates[1:]:
             if candidate["line_slot"] in used_lines or candidate["mold_slot"] in used_mold_slots:
                 continue
-            trial_finish = _finish_for_resources(selected + [candidate], quantity)
+            trial_finish = _finish_for_resources(calendar, selected + [candidate], quantity)
             if trial_finish < best_finish:
                 best_candidate = candidate
                 best_finish = trial_finish
@@ -294,6 +375,7 @@ def _choose_resources(
 
 def _allocate_supply(
     db: Session,
+    calendar: WorkingCalendar,
     runs: list[ProductionRun],
     demands: list[dict],
 ) -> None:
@@ -313,7 +395,7 @@ def _allocate_supply(
         if not active:
             continue
         rates = {
-            run.id: float(run.effective_daily_capacity) / SECONDS_PER_DAY
+            run.id: float(run.effective_daily_capacity)
             for run in active
         }
         total_rate = sum(rates.values())
@@ -322,12 +404,15 @@ def _allocate_supply(
             demand = demands[demand_index]
             line = demand["line"]
             needed = remaining[line.id]
-            interval_capacity = total_rate * (interval_end - cursor).total_seconds()
+            interval_capacity = total_rate * calendar.working_span(cursor, interval_end)
             produced = needed if needed <= interval_capacity + 1e-6 else floor(interval_capacity)
             if produced <= 0:
                 break
-            duration_seconds = produced / total_rate
-            completion = cursor + timedelta(seconds=duration_seconds)
+            # 完成时刻按生产日历推进（休息日不产出），并夹在区间内。
+            completion = min(
+                calendar.add_duration(cursor, produced / total_rate),
+                interval_end,
+            )
             shares = _integer_shares(produced, [rates[run.id] for run in active])
             for run, share in zip(active, shares):
                 key = (run.id, line.id)
@@ -371,6 +456,7 @@ def _recalculate_plan_impl(
         db.add(settings)
         db.flush()
     line_count = max(int(settings.line_count or 1), 1)
+    calendar = WorkingCalendar(db)
     active_orders = db.scalars(
         select(SalesOrder)
         .where(SalesOrder.status.in_(RESERVATION_STATUSES))
@@ -604,6 +690,7 @@ def _recalculate_plan_impl(
         total_quantity = int(sum(row["quantity"] for row in demands))
         product = demands[0]["line"].product
         choice = _choose_resources(
+            calendar,
             product_id,
             int(product.daily_capacity or 0),
             total_quantity,
@@ -623,9 +710,7 @@ def _recalculate_plan_impl(
         planned_shares = _integer_shares(
             total_quantity,
             [
-                resource["rate"] * max(
-                    (common_finish - resource["start"]).total_seconds(), 0
-                )
+                resource["rate"] * calendar.working_span(resource["start"], common_finish)
                 for resource in resources
             ],
         )
@@ -653,7 +738,7 @@ def _recalculate_plan_impl(
             line_available[resource["line_slot"]] = common_finish
             mold_available[(product_id, resource["mold_slot"])] = common_finish
         db.flush()
-        _allocate_supply(db, runs, demands)
+        _allocate_supply(db, calendar, runs, demands)
         reliable = (
             product_id not in shortage_products
             and product_id not in missing_bom_products

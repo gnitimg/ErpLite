@@ -78,6 +78,7 @@ from .schemas import (
 )
 from .planning import (
     _recalculate_plan_impl,
+    calculate_production_end,
     list_production_runs,
     production_demand_summary,
     purchase_requirement_summary,
@@ -885,6 +886,9 @@ def create_calendar_exception(
         note=payload.note.strip(),
     )
     db.add(row)
+    db.flush()
+    # 日历变化影响所有排期与 ETA，必须立即重算。
+    recalculate_production_plan(db)
     db.commit()
     db.refresh(row)
     return calendar_exception_dict(row)
@@ -896,6 +900,8 @@ def delete_calendar_exception(exception_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "日历例外不存在")
     db.delete(row)
+    db.flush()
+    recalculate_production_plan(db)
     db.commit()
     return {"ok": True}
 
@@ -939,11 +945,11 @@ def create_manual_production_run(
         planned_start = datetime.now().replace(second=0, microsecond=0)
     elif payload.planned_start_date < today:
         raise HTTPException(400, "计划开始日期不能早于今天")
-    duration_seconds = max(
-        float(payload.planned_quantity) / daily_capacity * 86400,
-        60,
+    # 自主补库存与自动排产使用同一生产日历结束时间算法。
+    planned_end = max(
+        calculate_production_end(db, planned_start, payload.planned_quantity, daily_capacity),
+        planned_start + timedelta(seconds=60),
     )
-    planned_end = planned_start + timedelta(seconds=duration_seconds)
 
     line_conflict = db.scalar(
         select(ProductionRun.id).where(
@@ -1577,13 +1583,13 @@ def update_production_run_schedule(
         planned_start = planned_start.astimezone().replace(tzinfo=None)
     if planned_start < datetime.now() - timedelta(minutes=1):
         raise HTTPException(400, "排产开始时间不能早于当前时间")
-    duration_seconds = max(
-        float(run.planned_quantity)
-        / max(float(run.effective_daily_capacity), 1e-9)
-        * 86400,
-        60,
+    # 人工拖动改期后的结束时间与自动排产使用同一生产日历算法。
+    planned_end = max(
+        calculate_production_end(
+            db, planned_start, run.planned_quantity, run.effective_daily_capacity
+        ),
+        planned_start + timedelta(seconds=60),
     )
-    planned_end = planned_start + timedelta(seconds=duration_seconds)
 
     line_conflict = db.scalar(
         select(ProductionRun.id).where(
@@ -2512,11 +2518,13 @@ def cancel_order(
         remaining_qty = sum(int(a.quantity) for a in run.allocations)
         if remaining_qty > 0 and remaining_qty < int(run.planned_quantity):
             run.planned_quantity = remaining_qty
-            duration_seconds = max(
-                float(remaining_qty) / max(float(run.effective_daily_capacity), 1e-9) * 86400,
-                60,
+            # 取消缩量后的结束时间同样走统一生产日历算法。
+            run.planned_end_at = max(
+                calculate_production_end(
+                    db, run.planned_start_at, remaining_qty, run.effective_daily_capacity
+                ),
+                run.planned_start_at + timedelta(seconds=60),
             )
-            run.planned_end_at = run.planned_start_at + timedelta(seconds=duration_seconds)
     product_ids = {line.product_id for line in order.items}
     release_order_reservations(db, order)
     order.status = "CANCELLED"
