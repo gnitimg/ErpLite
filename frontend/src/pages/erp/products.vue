@@ -29,6 +29,7 @@ const emptyForm = () => ({
   daily_capacity: 0,
   requires_external_processing: false,
   external_process_name: "",
+  default_external_lead_days: 0,
   components: [] as any[]
 })
 const form = reactive(emptyForm())
@@ -80,6 +81,7 @@ function openEdit(row: any) {
     daily_capacity: row.daily_capacity || 0,
     requires_external_processing: Boolean(row.requires_external_processing),
     external_process_name: row.external_process_name || "",
+    default_external_lead_days: Number(row.default_external_lead_days || 0),
     components: row.components.map((line: any) => ({
       part_id: line.part_id,
       quantity: line.quantity
@@ -285,6 +287,16 @@ useLiveRefresh(() => load(true))
             maxlength="120"
             placeholder="例如：喷漆、打铁件"
           />
+        </el-form-item>
+        <el-form-item v-if="form.requires_external_processing" label="默认外协周期（天）">
+          <el-input-number
+            v-model="form.default_external_lead_days"
+            :min="0"
+            :controls="false"
+            style="width: 160px"
+            placeholder="0"
+          />
+          <span class="form-hint">外协送出时预填；本次未填时按此计算预计回厂时间</span>
         </el-form-item>
         <div class="section-label">
           <span>BOM 零件清单</span><el-button size="small" plain @click="addComponent">

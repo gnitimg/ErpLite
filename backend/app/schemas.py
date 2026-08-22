@@ -53,6 +53,7 @@ class ProductPayload(BaseModel):
     daily_capacity: int = Field(default=0, ge=0)
     requires_external_processing: bool = False
     external_process_name: str = Field(default="", max_length=120)
+    default_external_lead_days: int = Field(default=0, ge=0)
     components: list[BomLinePayload] = Field(default_factory=list)
 
     @field_validator("sku", "name")
@@ -250,6 +251,7 @@ class ExternalProcessingSendPayload(BaseModel):
     supplier: str = Field(default="", max_length=120)
     occurred_date: date = Field(default_factory=date.today)
     lead_days: int = Field(default=0, ge=0)
+    expected_return_at: datetime | None = None
     notes: str = Field(default="", max_length=500)
 
 

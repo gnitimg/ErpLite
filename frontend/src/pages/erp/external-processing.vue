@@ -12,7 +12,15 @@ const sendDrawer = ref(false)
 const returnDrawer = ref(false)
 const activeBatch = ref<any>(null)
 const today = () => new Date().toISOString().slice(0, 10)
-const sendForm = reactive({ product_id: undefined as number | undefined, quantity: 1, supplier: "", occurred_date: today(), notes: "" })
+const sendForm = reactive({
+  product_id: undefined as number | undefined,
+  quantity: 1,
+  supplier: "",
+  occurred_date: today(),
+  lead_days: 0,
+  expected_return_at: "",
+  notes: ""
+})
 const returnForm = reactive({ quantity: 1, occurred_date: today(), notes: "" })
 const activeProduct = computed(() => products.value.find(row => row.id === sendForm.product_id))
 
@@ -40,8 +48,15 @@ function openSend(row?: any) {
   sendForm.quantity = Math.max(Number(row?.semi_finished_qty || 1), 1)
   sendForm.supplier = ""
   sendForm.occurred_date = today()
+  sendForm.lead_days = Number(activeProduct.value?.default_external_lead_days || row?.default_external_lead_days || 0)
+  sendForm.expected_return_at = ""
   sendForm.notes = ""
   sendDrawer.value = true
+}
+
+function onSendProductChange() {
+  // 选中产品后预填其默认外协周期；用户可修改本次数值或直接填回厂日期。
+  sendForm.lead_days = Number(activeProduct.value?.default_external_lead_days || 0)
 }
 
 function openReturn(row: any) {
@@ -59,7 +74,10 @@ async function submitSend() {
   }
   saving.value = true
   try {
-    await api("/api/external-processing/send", { method: "POST", body: JSON.stringify(sendForm) })
+    await api("/api/external-processing/send", {
+      method: "POST",
+      body: JSON.stringify({ ...sendForm, expected_return_at: sendForm.expected_return_at || null })
+    })
     ElMessage.success("半成品已送出，外协出库单已生成")
     sendDrawer.value = false
     await load()
@@ -152,6 +170,12 @@ useLiveRefresh(() => load(true))
         <el-table-column label="送出日期" width="120">
           <template #default="{ row }">{{ formatDate(row.sent_at) }}</template>
         </el-table-column>
+        <el-table-column label="预计回厂" width="120">
+          <template #default="{ row }">
+            <span v-if="row.expected_return_at">{{ formatDate(row.expected_return_at) }}</span>
+            <el-tag v-else type="info" size="small" effect="plain">未定</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="105">
           <template #default="{ row }">
             <el-tag :type="statusMeta[row.status]?.type as any" size="small">{{ statusMeta[row.status]?.label || row.status }}</el-tag>
@@ -169,7 +193,7 @@ useLiveRefresh(() => load(true))
     <el-drawer v-model="sendDrawer" title="外协加工送出" size="min(520px, 96vw)">
       <el-form label-position="top">
         <el-form-item label="半成品" required>
-          <el-select v-model="sendForm.product_id" filterable placeholder="选择待加工产品" style="width:100%">
+          <el-select v-model="sendForm.product_id" filterable placeholder="选择待加工产品" style="width:100%" @change="onSendProductChange">
             <el-option
               v-for="product in products"
               :key="product.id"
@@ -185,6 +209,13 @@ useLiveRefresh(() => load(true))
         </el-form-item>
         <el-form-item label="外协单位"><el-input v-model="sendForm.supplier" placeholder="加工商名称（可选）" /></el-form-item>
         <el-form-item label="送出日期"><el-date-picker v-model="sendForm.occurred_date" value-format="YYYY-MM-DD" style="width:100%" /></el-form-item>
+        <el-form-item label="本次加工周期（天）">
+          <el-input-number v-model="sendForm.lead_days" :min="0" :controls="false" style="width:140px" placeholder="0" />
+          <span class="form-hint">默认取产品配置（{{ activeProduct?.default_external_lead_days || 0 }} 天）</span>
+        </el-form-item>
+        <el-form-item label="预计回厂日期（可选，优先于周期）">
+          <el-date-picker v-model="sendForm.expected_return_at" type="date" value-format="YYYY-MM-DD" style="width:100%" placeholder="留空则按周期推算" />
+        </el-form-item>
         <el-form-item label="备注"><el-input v-model="sendForm.notes" type="textarea" :rows="3" /></el-form-item>
       </el-form>
       <div class="drawer-footer"><el-button @click="sendDrawer = false">取消</el-button><el-button type="primary" :loading="saving" @click="submitSend">确认送出并生成出库单</el-button></div>

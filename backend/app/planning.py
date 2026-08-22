@@ -588,25 +588,63 @@ def _recalculate_plan_impl(
             line.eta_reliable = line.production_required_quantity <= 1e-9
             line.eta_note = "成品库存已预留" if line.eta_reliable else ""
 
-    # 已完工但仍在厂内半成品区或外协单位的数量也是在途供给，不能重复排产。
-    # 按与成品预留相同的交期顺序，把在途供给分配给订单行。
-    pipeline_available = {
-        product_id: int((db.get(InventoryItem, product_id).semi_finished_qty or 0)
-                        + (db.get(InventoryItem, product_id).processing_qty or 0))
+    # 半成品（在厂待外协）与外协在途是两类不同的未来供给，必须区分并按
+    # 数量+时间分配：在途批次按 (expected_return_at, 剩余量) 逐单分配，
+    # 让不同订单拿到各自批次的回厂时间；无预计回厂时间的批次和未送出的
+    # 半成品只能覆盖数量、给不出时间 → 相关 ETA 不可靠。
+    dated_lots: dict[int, list[tuple[datetime, float]]] = defaultdict(list)
+    undated_batches: dict[int, float] = defaultdict(float)
+    for batch in db.scalars(
+        select(ExternalProcessingBatch).where(
+            ExternalProcessingBatch.quantity > ExternalProcessingBatch.returned_quantity
+        )
+    ).all():
+        remaining_qty = float(batch.quantity) - float(batch.returned_quantity or 0)
+        if remaining_qty <= 0:
+            continue
+        if batch.expected_return_at is not None:
+            dated_lots[batch.product_id].append((max(batch.expected_return_at, now), remaining_qty))
+        else:
+            undated_batches[batch.product_id] += remaining_qty
+    for lots in dated_lots.values():
+        lots.sort()
+    semi_pool = {
+        product_id: float(db.get(InventoryItem, product_id).semi_finished_qty or 0)
         for product_id in product_ids
     }
+    # pipeline_info[line.id] = {"dated"/"undated"/"semi"/"production"/"eta"}
+    pipeline_info: dict[int, dict] = {}
     for order in active_orders:
         for line in order.items:
-            available = max(pipeline_available.get(line.product_id, 0), 0)
-            raw_required = int(line.production_required_quantity or 0)
-            allocated = min(raw_required, available)
-            line.pipeline_quantity = allocated
-            line.production_required_quantity = raw_required - allocated
-            pipeline_available[line.product_id] = available - allocated
-            if allocated and line.production_required_quantity <= 0:
-                line.eta_note = "已有半成品或外协在途，待加工回厂"
-                line.eta_reliable = False
-                line.estimated_completion_at = None
+            required = int(line.production_required_quantity or 0)
+            if required <= 0:
+                continue
+            info: dict = {"dated": 0.0, "undated": 0.0, "semi": 0.0, "production": 0.0, "eta": None}
+            covered = 0.0
+            lots = dated_lots.get(line.product_id)
+            while lots and covered < required:
+                arrival, lot_quantity = lots[0]
+                take = min(lot_quantity, required - covered)
+                lots[0] = (arrival, lot_quantity - take)
+                covered += take
+                info["dated"] += take
+                info["eta"] = arrival if info["eta"] is None else max(info["eta"], arrival)
+                if lots[0][1] <= 1e-9:
+                    lots.pop(0)
+            if covered < required and undated_batches.get(line.product_id, 0) > 0:
+                take = min(undated_batches[line.product_id], required - covered)
+                undated_batches[line.product_id] -= take
+                info["undated"] += take
+                covered += take
+            if covered < required and semi_pool.get(line.product_id, 0) > 0:
+                take = min(semi_pool[line.product_id], required - covered)
+                semi_pool[line.product_id] -= take
+                info["semi"] += take
+                covered += take
+            line.pipeline_quantity = int(covered)
+            info["production"] = max(required - covered, 0)
+            line.production_required_quantity = int(info["production"])
+            pipeline_info[line.id] = info
 
     fixed_runs = db.scalars(
         select(ProductionRun)
@@ -816,29 +854,43 @@ def _recalculate_plan_impl(
                     demand["line"].estimated_completion_at = material_available
         else:
             note = ""
-        if product.requires_external_processing:
-            ext_batches = db.scalars(
-                select(ExternalProcessingBatch)
-                .where(
-                    ExternalProcessingBatch.product_id == product_id,
-                    ExternalProcessingBatch.expected_return_at.is_not(None),
-                    ExternalProcessingBatch.returned_quantity < ExternalProcessingBatch.quantity,
-                )
-                .order_by(ExternalProcessingBatch.expected_return_at.desc())
-            ).all()
-            if ext_batches:
-                latest_ext_return = ext_batches[0].expected_return_at
-                in_transit_qty = sum(int(b.quantity - b.returned_quantity) for b in ext_batches)
-                for demand in demands:
-                    if not demand["line"].estimated_completion_at or demand["line"].estimated_completion_at < latest_ext_return:
-                        demand["line"].estimated_completion_at = latest_ext_return
-                if not note:
-                    note = f"外协在途，预计 {latest_ext_return:%m-%d} 回厂"
         for demand in demands:
             demand["line"].eta_reliable = reliable and bool(
                 demand["line"].estimated_completion_at
             )
             demand["line"].eta_note = note or "按当前产能与资源占用模拟"
+
+    # 外协/半成品供给的最终 ETA 合并：一行的完整供给 = 生产部分 + 外协部分，
+    # 行 ETA 取两者较晚；含无时间来源的供给（未送出半成品/无预计回厂批次）时
+    # 不可靠并给出具体原因。
+    for order in active_orders:
+        for line in order.items:
+            info = pipeline_info.get(line.id)
+            if not info or (info["dated"] + info["undated"] + info["semi"]) <= 0:
+                continue
+            if info["production"] <= 0:
+                if info["undated"] > 0 or info["semi"] > 0:
+                    line.estimated_completion_at = None
+                    line.eta_reliable = False
+                    line.eta_note = "半成品待外协送出" if info["semi"] > 0 else "外协在途批次缺少预计回厂时间"
+                else:
+                    line.estimated_completion_at = info["eta"]
+                    line.eta_reliable = bool(info["eta"])
+                    line.eta_note = (
+                        f"外协在途，预计 {info['eta']:%m-%d} 回厂" if info["eta"] else "外协在途"
+                    )
+            else:
+                if info["eta"] is not None and (
+                    line.estimated_completion_at is None or line.estimated_completion_at < info["eta"]
+                ):
+                    line.estimated_completion_at = info["eta"]
+                if info["undated"] > 0 or info["semi"] > 0:
+                    line.eta_reliable = False
+                    line.eta_note = (
+                        (line.eta_note or "")
+                        + ("；" if line.eta_note else "")
+                        + ("半成品待外协送出" if info["semi"] > 0 else "外协在途批次缺少预计回厂时间")
+                    )
 
     for order in active_orders:
         item_etas = [line.estimated_completion_at for line in order.items]

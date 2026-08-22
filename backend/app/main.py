@@ -1484,7 +1484,11 @@ def send_external_processing(
     lead_days = int(payload.lead_days or 0)
     if lead_days <= 0:
         lead_days = int(product.default_external_lead_days or 0)
-    expected_return_at = occurred_at + timedelta(days=lead_days) if lead_days > 0 else None
+    # 优先级：明确填写预计回厂时间 > 本次加工天数 > 产品默认周期。
+    if payload.expected_return_at is not None:
+        expected_return_at = payload.expected_return_at
+    else:
+        expected_return_at = occurred_at + timedelta(days=lead_days) if lead_days > 0 else None
     batch = ExternalProcessingBatch(
         batch_no=serial("EP"),
         product_id=product.id,

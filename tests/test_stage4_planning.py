@@ -422,3 +422,126 @@ def test_unknown_material_gives_provisional_schedule_with_note():
         assert run.planned_end_at == NOW + timedelta(days=1)
         assert order.items[0].eta_reliable is False
         assert "理论机台排期" in (order.items[0].eta_note or "")
+
+
+# ───────────────── 4F：外协 Timeline ─────────────────
+
+def make_ext_batch(db, product, quantity, expected_return_at=None, returned=0, batch_no="EP-1"):
+    from app.models import ExternalProcessingBatch, StockTransaction
+    tx = StockTransaction(
+        transaction_no=f"{batch_no}-TX",
+        transaction_type="PROCESS_OUT",
+        occurred_at=NOW,
+        notes="",
+        status="POSTED",
+    )
+    db.add(tx)
+    db.flush()
+    batch = ExternalProcessingBatch(
+        batch_no=batch_no,
+        product_id=product.id,
+        process_name_snapshot="喷漆",
+        supplier="外协厂",
+        quantity=quantity,
+        returned_quantity=returned,
+        outbound_transaction_id=tx.id,
+        sent_at=NOW,
+        expected_return_at=expected_return_at,
+        notes="",
+    )
+    db.add(batch)
+    db.flush()
+    return batch
+
+
+def test_external_batches_allocated_by_time_per_order():
+    """Batch A 50@8/25、B 100@8/30：订单1×40 → 8/25；订单2×80 → 前10来自A、70来自B → 8/30。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01", daily_capacity=100)
+        product.requires_external_processing = True
+        product.external_process_name = "喷漆"
+        make_ext_batch(db, product, 50, datetime(2026, 8, 25, 8, 0), batch_no="EP-A")
+        make_ext_batch(db, product, 100, datetime(2026, 8, 30, 8, 0), batch_no="EP-B")
+        order1 = add_order(db, "SO-1", [(product, 40)], days_until_due=2)
+        order2 = add_order(db, "SO-2", [(product, 80)], days_until_due=3)
+        recalculate_production_plan(db)
+        assert order1.items[0].pipeline_quantity == 40
+        assert order1.items[0].estimated_completion_at == datetime(2026, 8, 25, 8, 0)
+        assert order1.items[0].eta_reliable
+        assert order2.items[0].pipeline_quantity == 80
+        assert order2.items[0].estimated_completion_at == datetime(2026, 8, 30, 8, 0)
+        assert order2.items[0].eta_reliable
+        # 全部由在途覆盖：不创建生产批次
+        assert all_runs(db) == []
+
+
+def test_pipeline_full_coverage_with_partial_return_keeps_eta():
+    """部分回厂后：已回部分成为成品库存（被预留），剩余按 expected_return_at 供 ETA。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01", daily_capacity=100)
+        product.requires_external_processing = True
+        product.external_process_name = "喷漆"
+        # 100 件送出、已回 40（进入成品库存），剩 60 预计 8/30 回厂
+        make_ext_batch(db, product, 100, datetime(2026, 8, 30, 8, 0), returned=40, batch_no="EP-C")
+        product.stock_qty = 40
+        product.processing_qty = 60
+        order = add_order(db, "SO-1", [(product, 100)], days_until_due=4)
+        recalculate_production_plan(db)
+        line = order.items[0]
+        # 40 由成品库存预留，60 由外协在途覆盖，ETA = 8/30
+        assert int(line.reserved_quantity) == 40
+        assert line.pipeline_quantity == 60
+        assert line.estimated_completion_at == datetime(2026, 8, 30, 8, 0)
+        assert line.eta_reliable
+
+
+def test_undated_batch_and_semi_finished_make_eta_unreliable():
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01", daily_capacity=100)
+        product.requires_external_processing = True
+        product.external_process_name = "喷漆"
+        make_ext_batch(db, product, 30, None, batch_no="EP-U")
+        order1 = add_order(db, "SO-1", [(product, 30)], days_until_due=2)
+        recalculate_production_plan(db)
+        # 无预计回厂时间：数量被覆盖但 ETA 不可靠
+        assert order1.items[0].pipeline_quantity == 30
+        assert order1.items[0].eta_reliable is False
+        assert "缺少预计回厂时间" in (order1.items[0].eta_note or "")
+
+        product2 = make_product(db, "P02", daily_capacity=100)
+        product2.requires_external_processing = True
+        product2.external_process_name = "电镀"
+        product2.semi_finished_qty = 20
+        order2 = add_order(db, "SO-2", [(product2, 20)], days_until_due=3)
+        recalculate_production_plan(db)
+        # 半成品未送出：不可交付，ETA 不可靠
+        assert order2.items[0].pipeline_quantity == 20
+        assert order2.items[0].eta_reliable is False
+        assert "半成品待外协送出" in (order2.items[0].eta_note or "")
+
+
+def test_send_with_explicit_return_date_wins():
+    from app.main import send_external_processing
+    from app.schemas import ExternalProcessingSendPayload
+
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P01", daily_capacity=100)
+        product.requires_external_processing = True
+        product.external_process_name = "喷漆"
+        product.default_external_lead_days = 5
+        product.semi_finished_qty = 50
+        db.flush()
+        batch = send_external_processing(
+            ExternalProcessingSendPayload(
+                product_id=product.id,
+                quantity=20,
+                lead_days=9,
+                expected_return_at=datetime(2026, 8, 27, 8, 0),
+            ),
+            db,
+        )
+        assert batch["expected_return_at"] == "2026-08-27T08:00:00"
