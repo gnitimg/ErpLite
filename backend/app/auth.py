@@ -155,7 +155,11 @@ def extract_token(request: Request) -> str | None:
 
 
 def authenticated_username(request: Request) -> str:
-    """审计用：从已验证的 JWT 取用户名，取不到时明确标记为未登录。"""
+    """审计用：优先复用网关按数据库校验后的身份，其次解析 JWT，最后标记未登录。"""
+    state = getattr(request, "state", None)
+    state_username = getattr(state, "current_username", None) if state is not None else None
+    if state_username:
+        return str(state_username)[:120]
     token = extract_token(request)
     if not token:
         return ANONYMOUS_USERNAME
@@ -165,12 +169,26 @@ def authenticated_username(request: Request) -> str:
         return ANONYMOUS_USERNAME
 
 
+def emergency_token_still_valid(payload: dict) -> bool:
+    """应急令牌仍有效的条件：开关开启、凭据满足强度，且用户名与当前配置一致。
+
+    管理员把 ERP_EMERGENCY_ADMIN_USER 从 A 改成 B 后，A 的旧令牌立即失效。
+    """
+    credentials = emergency_admin_credentials()
+    if credentials is None:
+        return False
+    return hmac.compare_digest(
+        str(payload.get("username") or "").encode("utf-8"),
+        credentials[0].encode("utf-8"),
+    )
+
+
 def current_role_for(payload: dict, db: Session) -> str | None:
     """按数据库当前状态解析令牌的角色；返回 None 表示令牌已失效。
 
     - 普通用户：必须仍存在且 active，角色取数据库当前值（改角色/停用立即生效，
       不等 7 天令牌过期）；
-    - 应急管理员令牌：开关关闭或凭据不再满足强度要求时立即作废。
+    - 应急管理员令牌：开关关闭、凭据不再满足强度要求、或用户名已轮换时立即作废。
     """
     try:
         user_id = int(payload.get("sub", "0") or 0)
@@ -182,7 +200,7 @@ def current_role_for(payload: dict, db: Session) -> str | None:
             return None
         return user.role
     if payload.get("role") == "ADMIN":
-        return "ADMIN" if emergency_admin_credentials() is not None else None
+        return "ADMIN" if emergency_token_still_valid(payload) else None
     return None
 
 
@@ -201,6 +219,14 @@ def require_user(request: Request) -> dict:
 
 
 def require_admin(request: Request) -> dict:
+    # 网关中间件已按数据库当前角色完成校验时直接复用结论；
+    # 只有未经网关的直接函数调用（测试）才回退读 JWT，生产 HTTP 流量不走该分支。
+    state = getattr(request, "state", None)
+    role = getattr(state, "current_role", None) if state is not None else None
+    if role is not None:
+        if role != "ADMIN":
+            raise HTTPException(403, "需要管理员权限")
+        return dict(getattr(state, "auth_payload", None) or {})
     payload = require_user(request)
     if payload.get("role") != "ADMIN":
         raise HTTPException(403, "需要管理员权限")

@@ -317,3 +317,36 @@ def test_emergency_token_dies_when_switch_turned_off(db, monkeypatch):
     monkeypatch.delenv("ERP_ENABLE_EMERGENCY_ADMIN")
     assert client.get("/api/orders", headers=auth(token)).status_code == 401
     assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
+
+
+def test_require_admin_uses_current_database_role(db):
+    """网关按数据库放行 ADMIN 后，endpoint 内的 require_admin 必须得出同一结论。"""
+    add_user(db, "op1", "OPERATOR")
+    token = login_token("op1", "pass-123456")
+    # 库里升为 ADMIN → 同一令牌访问用户管理 200（此前 endpoint 会按 JWT 旧角色 403）
+    with db() as session:
+        user = session.scalar(select(User).where(User.username == "op1"))
+        user.role = "ADMIN"
+        session.commit()
+    assert client.get("/api/users", headers=auth(token)).status_code == 200
+    # 降回 VIEWER → 同一令牌 403
+    with db() as session:
+        user = session.scalar(select(User).where(User.username == "op1"))
+        user.role = "VIEWER"
+        session.commit()
+    assert client.get("/api/users", headers=auth(token)).status_code == 403
+
+
+def test_emergency_admin_username_rotation(db, monkeypatch):
+    """轮换应急管理员用户名后，旧用户名的未过期令牌立即失效。"""
+    monkeypatch.setenv("ERP_ENABLE_EMERGENCY_ADMIN", "1")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emergency_a")
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_PASSWORD", "break-glass-pass-123")
+    old_token = login_token("emergency_a", "break-glass-pass-123")
+    assert client.get("/api/orders", headers=auth(old_token)).status_code == 200
+    # 用户名 A → B：A 的令牌作废，B 可正常登录
+    monkeypatch.setenv("ERP_EMERGENCY_ADMIN_USER", "emergency_b")
+    assert client.get("/api/orders", headers=auth(old_token)).status_code == 401
+    assert client.get("/api/v1/users/me", headers=auth(old_token)).status_code == 401
+    new_token = login_token("emergency_b", "break-glass-pass-123")
+    assert client.get("/api/orders", headers=auth(new_token)).status_code == 200

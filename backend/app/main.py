@@ -109,6 +109,7 @@ from .auth import (
     create_access_token,
     current_role_for,
     emergency_admin_credentials,
+    emergency_token_still_valid,
     extract_token,
     load_user,
     matches_emergency_admin,
@@ -179,6 +180,15 @@ async def enforce_rbac(request: Request, call_next):
         role = current_role_for(payload, session)
     if role is None:
         return JSONResponse(status_code=401, content={"detail": "登录状态无效，请重新登录"})
+    # 网关结论下传给 endpoint / 审计：require_admin 等不得再信任 JWT 内旧角色。
+    try:
+        user_id = int(payload.get("sub", "0") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    request.state.auth_payload = payload
+    request.state.current_role = role
+    request.state.current_user_id = user_id
+    request.state.current_username = str(payload.get("username") or "")[:120]
     if not role_allows(role, required):
         return JSONResponse(status_code=403, content={"detail": f"当前角色（{role}）无权执行该操作"})
     return await call_next(request)
@@ -493,8 +503,8 @@ def current_user(request: Request, db: Session = Depends(get_db)):
         if user:
             return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": []}, "message": "success"}
         raise HTTPException(401, "登录状态无效，请重新登录")
-    if payload.get("role") == "ADMIN" and emergency_admin_credentials() is not None:
-        # 应急管理员令牌（sub=0）：开关已关闭时立即失效。
+    if payload.get("role") == "ADMIN" and emergency_token_still_valid(payload):
+        # 应急管理员令牌（sub=0）：开关关闭或用户名已轮换时立即失效。
         return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": []}, "message": "success"}
     raise HTTPException(401, "登录状态无效，请重新登录")
 
