@@ -319,3 +319,21 @@ class UserUpdatePayload(BaseModel):
     role: Literal["ADMIN", "OPERATOR", "VIEWER"] = "OPERATOR"
     active: bool = True
     password: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class StockReconciliationLinePayload(BaseModel):
+    item_id: int
+    physical_count: float = Field(ge=0)
+
+
+class StockReconciliationPayload(BaseModel):
+    items: list[StockReconciliationLinePayload] = Field(min_length=1)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("items")
+    @classmethod
+    def unique_reconciliation_items(cls, value: list[StockReconciliationLinePayload]):
+        ids = [line.item_id for line in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("对账中不能重复选择同一物料")
+        return value

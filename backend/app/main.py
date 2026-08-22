@@ -70,6 +70,7 @@ from .schemas import (
     SamplePayload,
     StockDocumentPayload,
     StockPayload,
+    StockReconciliationPayload,
     UserPayload,
     UserUpdatePayload,
 )
@@ -218,6 +219,8 @@ def operation_action(path: str, method: str) -> str:
         return "物料入库"
     if path == "/api/stock/outbound":
         return "物料出库"
+    if path == "/api/stock/reconcile":
+        return "库存对账"
     if path == "/api/stock/documents":
         return "出入库开单"
     if path.startswith("/api/orders"):
@@ -2420,6 +2423,66 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
     recalculate_production_plan(db)
     db.commit()
     return transaction_dict(reversal_tx)
+
+
+@app.post("/api/stock/reconcile", status_code=201)
+def reconcile_stock(
+    payload: StockReconciliationPayload,
+    db: Session = Depends(get_db),
+):
+    item_ids = [line.item_id for line in payload.items]
+    items = {
+        item.id: item
+        for item in db.scalars(
+            select(InventoryItem)
+            .where(
+                InventoryItem.id.in_(item_ids),
+                InventoryItem.active.is_(True),
+                InventoryItem.kind.in_(("PART", "PRODUCT")),
+            )
+        ).all()
+    }
+    if len(items) != len(item_ids):
+        raise HTTPException(404, "对账中有物料不存在或已停用")
+    discrepancies = []
+    adjustment_changes: list[tuple[InventoryItem, float, float]] = []
+    for requested in payload.items:
+        item = items[requested.item_id]
+        system_qty = float(item.stock_qty)
+        physical_qty = float(requested.physical_count)
+        diff = round(physical_qty - system_qty, 6)
+        if abs(diff) > 1e-9:
+            discrepancies.append({
+                "item_id": item.id,
+                "sku": item.sku,
+                "name": item.name,
+                "unit": item.unit,
+                "system_quantity": system_qty,
+                "physical_quantity": physical_qty,
+                "difference": diff,
+            })
+            adjustment_changes.append((item, diff, item.cost_price))
+    transaction = None
+    if adjustment_changes:
+        transaction = create_transaction(
+            db,
+            "MANUAL_IN",
+            adjustment_changes,
+            payload.notes or "库存对账调整",
+            occurred_at=datetime.now(),
+        )
+    affected_products = {item_id for item_id in item_ids if items[item_id].kind == "PRODUCT"}
+    if affected_products:
+        rebalance_product_reservations(db, affected_products)
+    recalculate_production_plan(db)
+    db.commit()
+    return {
+        "reconciled_count": len(payload.items),
+        "discrepancy_count": len(discrepancies),
+        "discrepancies": discrepancies,
+        "transaction_id": transaction.id if transaction else None,
+        "transaction_no": transaction.transaction_no if transaction else None,
+    }
 
 
 @app.get("/api/backups")
