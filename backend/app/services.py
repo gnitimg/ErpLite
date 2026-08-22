@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 from .models import (
     InventoryItem,
     OperationLog,
+    OrderShipmentAllocation,
     ProductBomItem,
     SalesOrder,
     SalesOrderItem,
@@ -178,8 +179,11 @@ def order_dict(order: SalesOrder) -> dict:
                 "shipped_quantity": int(line.shipped_quantity or 0),
                 "returned_quantity": int(line.returned_quantity or 0),
                 "replacement_pending_quantity": int(line.replacement_pending_quantity or 0),
+                "replacement_shipped_quantity": int(line.replacement_shipped_quantity or 0),
                 "returnable_quantity": max(
-                    int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
+                    int(line.shipped_quantity or 0)
+                    + int(line.replacement_shipped_quantity or 0)
+                    - int(line.returned_quantity or 0),
                     0,
                 ),
                 "remaining_quantity": max(
@@ -399,6 +403,14 @@ RESERVATION_STATUSES = (
 )
 
 
+def effective_line_demand(line: SalesOrderItem) -> int:
+    """订单行的有效需求 = 原单剩余 + 待补换货。预留、排产、出库上限都用它。"""
+    return (
+        max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        + int(line.replacement_pending_quantity or 0)
+    )
+
+
 def _infer_inventory_bucket(tx_type: str, item_kind: str) -> str:
     if tx_type == "SAMPLE_ADJUST":
         return "SAMPLE"
@@ -451,7 +463,7 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
     remaining: dict[int, float] = {}
     for line in lines:
         available = remaining.setdefault(line.product_id, float(line.product.stock_qty))
-        demand = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        demand = effective_line_demand(line)
         reserved_quantity = int(min(demand, max(available, 0)))
         line.reserved_quantity = reserved_quantity
         reservation = reservations.get(line.id)
@@ -475,11 +487,14 @@ def rebalance_product_reservations(db: Session, product_ids: set[int] | None = N
         active_order = db.get(SalesOrder, order_id)
         order_lines = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id)).all()
         if active_order and active_order.status in RESERVATION_STATUSES:
-            all_shipped = all(int(line.shipped_quantity or 0) >= int(line.quantity) for line in order_lines)
+            all_shipped = all(
+                int(line.shipped_quantity or 0) >= int(line.quantity)
+                and int(line.replacement_pending_quantity or 0) <= 0
+                for line in order_lines
+            )
             any_shipped = any(int(line.shipped_quantity or 0) > 0 for line in order_lines)
             all_remaining_reserved = all(
-                int(line.reserved_quantity or 0)
-                >= max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+                int(line.reserved_quantity or 0) >= effective_line_demand(line)
                 for line in order_lines
             )
             if all_shipped:
@@ -515,7 +530,7 @@ def order_workflow_dict(db: Session, order: SalesOrder) -> dict:
     missing_bom: list[dict] = []
 
     for line in order.items:
-        remaining_quantity = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        remaining_quantity = effective_line_demand(line)
         reserved = min(int(line.reserved_quantity or 0), remaining_quantity)
         other_reserved = reserved_product_quantity(db, line.product_id, order.id)
         free_stock = max(float(line.product.stock_qty) - other_reserved - reserved, 0)

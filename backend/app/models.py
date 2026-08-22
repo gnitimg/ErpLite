@@ -94,6 +94,7 @@ class SalesOrderItem(Base):
     line_total: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False))
     production_required_quantity: Mapped[float] = mapped_column(Float, default=0)
     replacement_pending_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    replacement_shipped_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     estimated_completion_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     eta_reliable: Mapped[bool] = mapped_column(Boolean, default=False)
     eta_note: Mapped[str] = mapped_column(String(500), default="")
@@ -150,6 +151,31 @@ class OrderReturn(Base):
     transaction: Mapped["StockTransaction | None"] = relationship()
 
     __table_args__ = (Index("ix_order_returns_order_time", "order_id", "occurred_at"),)
+
+
+class OrderShipmentAllocation(Base):
+    """出库履约分配：记录每笔销售出库对订单行的完成来源（原单 ORIGINAL / 换货补发 REPLACEMENT）。
+
+    冲销 SALE_OUT 时据此精确恢复 shipped_quantity 或 replacement_pending_quantity；
+    换货已补发数量也从这里推导（已冲销流水的分配不计入）。
+    """
+
+    __tablename__ = "order_shipment_allocations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_item_id: Mapped[int] = mapped_column(
+        ForeignKey("sales_order_items.id", ondelete="CASCADE"), index=True
+    )
+    stock_transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_transactions.id", ondelete="CASCADE"), index=True
+    )
+    fulfillment_type: Mapped[str] = mapped_column(String(20), default="ORIGINAL", server_default="ORIGINAL")
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price_snapshot: Mapped[float | None] = mapped_column(Numeric(18, 2, asdecimal=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    order_item: Mapped[SalesOrderItem] = relationship()
+    transaction: Mapped["StockTransaction"] = relationship()
 
 
 class ProductionLine(Base):

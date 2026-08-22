@@ -16,6 +16,7 @@ from .models import (
     Mold,
     OperationLog,
     OrderReturn,
+    OrderShipmentAllocation,
     Payment,
     PaymentAllocation,
     ProductBomItem,
@@ -39,7 +40,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 18
+BACKUP_SCHEMA_VERSION = 19
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -56,6 +57,7 @@ BACKUP_TABLES = (
     ProductionMaterialReservation.__table__,
     StockTransaction.__table__,
     StockTransactionItem.__table__,
+    OrderShipmentAllocation.__table__,
     OrderReturn.__table__,
     ExternalProcessingBatch.__table__,
     PurchaseCommitment.__table__,
@@ -75,6 +77,7 @@ DELETE_TABLES = (
     PurchaseCommitment.__table__,
     ExternalProcessingBatch.__table__,
     OrderReturn.__table__,
+    OrderShipmentAllocation.__table__,
     ProductionAllocation.__table__,
     ProductionMaterialReservation.__table__,
     StockTransactionItem.__table__,
@@ -317,6 +320,11 @@ def _load_archive(path: Path) -> dict[str, Any]:
             row.setdefault("replacement_pending_quantity", 0)
         for row in tables.get("receivables", []):
             row.setdefault("related_stock_transaction_id", None)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 18:
+        tables.setdefault("order_shipment_allocations", [])
+        for row in tables.get("sales_order_items", []):
+            row.setdefault("replacement_shipped_quantity", 0)
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

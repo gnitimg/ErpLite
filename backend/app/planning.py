@@ -409,10 +409,12 @@ def _recalculate_plan_impl(
         order.eta_note = ""
         for line in order.items:
             line.pipeline_quantity = 0
+            # 生产需求 = 原单剩余 + 待补换货 - 已预留；换货与原单同样消耗库存与产能。
             line.production_required_quantity = max(
                 int(line.quantity)
                 - int(line.shipped_quantity or 0)
-                - int(line.reserved_quantity or 0),
+                - int(line.reserved_quantity or 0)
+                + int(line.replacement_pending_quantity or 0),
                 0,
             )
             line.estimated_completion_at = now if line.production_required_quantity <= 1e-9 else None

@@ -28,6 +28,7 @@ from .models import (
     InventoryItem,
     OperationLog,
     OrderReturn,
+    OrderShipmentAllocation,
     Payment,
     PaymentAllocation,
     ProductBomItem,
@@ -86,6 +87,7 @@ from .services import (
     RESERVATION_STATUSES,
     create_transaction,
     client_ip,
+    effective_line_demand,
     ensure_sku_available,
     hash_password,
     item_dict,
@@ -2172,7 +2174,9 @@ def create_order_return(
     for requested in payload.items:
         line = line_by_id[requested.order_item_id]
         returnable = max(
-            int(line.shipped_quantity or 0) - int(line.returned_quantity or 0),
+            int(line.shipped_quantity or 0)
+            + int(line.replacement_shipped_quantity or 0)
+            - int(line.returned_quantity or 0),
             0,
         )
         if requested.quantity > returnable:
@@ -2213,8 +2217,14 @@ def create_order_return(
         )
         db.add(row)
         created.append(row)
-        if requested.restock:
+        # 换货（REPLACE）即使不回库也改变了有效需求与订单状态，必须重算预留；
+        # 否则订单停留在 FULFILLED，换货补发会被出库状态检查拒绝。
+        if requested.restock or payload.resolution == "REPLACE":
             affected_products.add(line.product_id)
+    if payload.resolution == "REPLACE" and order.status == "FULFILLED":
+        # 已完结订单出现待补换货 → 重开为部分出库，让预留/排产重新接管；
+        # FULFILLED 不在预留状态集合里，不重开的话补发会被出库状态检查永久拒绝。
+        order.status = "PARTIALLY_SHIPPED"
     if affected_products:
         rebalance_product_reservations(db, affected_products)
         recalculate_production_plan(db)
@@ -2274,7 +2284,7 @@ def _ship_order(
     line_by_id = {line.id: line for line in lines}
     if requested is None:
         requested = {
-            line.id: max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+            line.id: effective_line_demand(line)
             for line in lines
         }
     if not requested or any(line_id not in line_by_id for line_id in requested):
@@ -2290,22 +2300,34 @@ def _ship_order(
     }
     changes = []
     price_snapshots: dict[int, tuple[float, float]] = {}
+    # 履约计划：每行拆成 (原单数量, 换货数量)，出库流水与后续记账都用它。
+    fulfillment_plan: list[tuple[SalesOrderItem, int, int, float]] = []
     for line_id, quantity in requested.items():
         line = line_by_id[line_id]
-        remaining = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        original_remaining = max(int(line.quantity) - int(line.shipped_quantity or 0), 0)
+        replacement_remaining = int(line.replacement_pending_quantity or 0)
+        effective_remaining = original_remaining + replacement_remaining
         reserved = int(reservations.get(line_id).quantity if reservations.get(line_id) else 0)
         if quantity <= 0:
             raise HTTPException(422, "出库数量必须为正整数")
-        if quantity > remaining:
-            raise HTTPException(409, f"{line.product.name} 本次出库超过剩余数量 {remaining}")
+        if quantity > effective_remaining:
+            raise HTTPException(
+                409,
+                f"{line.product.name} 本次出库超过剩余数量 {effective_remaining}"
+                + (f"（含待补换货 {replacement_remaining}）" if replacement_remaining else ""),
+            )
         if quantity > reserved:
             raise HTTPException(409, f"{line.product.name} 当前仅为本单预留 {reserved} {line.product.unit}")
+        # 拆分规则：先满足原单剩余，其余数量记为换货补发。
+        original_quantity = min(quantity, original_remaining)
+        replacement_quantity = quantity - original_quantity
         changes.append((line.product, -quantity, line.product.cost_price))
         unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
         price_snapshots[line.product_id] = (
             unit_price,
             round(unit_price * quantity, 2),
         )
+        fulfillment_plan.append((line, original_quantity, replacement_quantity, unit_price))
     tx = create_transaction(
         db,
         "SALE_OUT",
@@ -2320,21 +2342,40 @@ def _ship_order(
         counterparty_address=counterparty_address,
     )
     affected_products = set()
-    shipped_total = 0.0
-    for line_id, quantity in requested.items():
-        line = line_by_id[line_id]
-        line.shipped_quantity = int(line.shipped_quantity or 0) + quantity
+    # 应收只按原单履约计价：换货补发是对已收货款的补货，不再产生新的应收。
+    original_total = 0.0
+    for line, original_quantity, replacement_quantity, unit_price in fulfillment_plan:
+        if original_quantity > 0:
+            line.shipped_quantity = int(line.shipped_quantity or 0) + original_quantity
+            original_total += unit_price * original_quantity
+            db.add(OrderShipmentAllocation(
+                order_item_id=line.id,
+                stock_transaction_id=tx.id,
+                fulfillment_type="ORIGINAL",
+                quantity=original_quantity,
+                unit_price_snapshot=round(unit_price, 2),
+            ))
+        if replacement_quantity > 0:
+            line.replacement_pending_quantity = max(
+                int(line.replacement_pending_quantity or 0) - replacement_quantity, 0
+            )
+            line.replacement_shipped_quantity = int(line.replacement_shipped_quantity or 0) + replacement_quantity
+            db.add(OrderShipmentAllocation(
+                order_item_id=line.id,
+                stock_transaction_id=tx.id,
+                fulfillment_type="REPLACEMENT",
+                quantity=replacement_quantity,
+                unit_price_snapshot=round(unit_price, 2),
+            ))
         affected_products.add(line.product_id)
-        unit_price = float((price_overrides or {}).get(line_id, line.unit_price))
-        shipped_total += unit_price * quantity
     db.flush()
-    if shipped_total > 0:
+    if original_total > 0:
         db.add(Receivable(
             receivable_no=serial("AR"),
             order_id=order.id,
             related_stock_transaction_id=tx.id,
             customer_name=order.customer_name,
-            amount=round(shipped_total, 2),
+            amount=round(original_total, 2),
             status="OPEN",
             notes=f"客单 {order.order_no} 出库应收",
         ))
@@ -2522,7 +2563,28 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
     original.status = "REVERSED"
     if original.transaction_type == "SALE_OUT" and original.related_order_id:
         order = db.get(SalesOrder, original.related_order_id)
-        if order:
+        # 优先按履约分配精确恢复；没有分配记录的历史流水退回旧行为（按产品反查）。
+        allocations = db.scalars(
+            select(OrderShipmentAllocation)
+            .where(OrderShipmentAllocation.stock_transaction_id == original.id)
+        ).all()
+        if allocations:
+            for allocation in allocations:
+                order_item = db.get(SalesOrderItem, allocation.order_item_id)
+                if not order_item:
+                    continue
+                if allocation.fulfillment_type == "REPLACEMENT":
+                    order_item.replacement_pending_quantity = (
+                        int(order_item.replacement_pending_quantity or 0) + int(allocation.quantity)
+                    )
+                    order_item.replacement_shipped_quantity = max(
+                        int(order_item.replacement_shipped_quantity or 0) - int(allocation.quantity), 0
+                    )
+                else:
+                    order_item.shipped_quantity = max(
+                        int(order_item.shipped_quantity or 0) - int(allocation.quantity), 0
+                    )
+        elif order:
             for line in original.lines:
                 if line.quantity_change < 0:
                     order_item = db.scalar(
@@ -2536,6 +2598,15 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
                         order_item.shipped_quantity = max(
                             int(order_item.shipped_quantity or 0) + int(line.quantity_change), 0
                         )
+        # 冲销让需求重新出现时，已完结订单必须重开，否则后续出库会被状态检查拒绝。
+        if order and order.status == "FULFILLED" and any(
+            int(line.shipped_quantity or 0) < int(line.quantity)
+            or int(line.replacement_pending_quantity or 0) > 0
+            for line in db.scalars(
+                select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)
+            ).all()
+        ):
+            order.status = "PARTIALLY_SHIPPED"
     affected_products = {line.item_id for line in original.lines if line.item.kind == "PRODUCT"}
     if affected_products:
         rebalance_product_reservations(db, affected_products)
