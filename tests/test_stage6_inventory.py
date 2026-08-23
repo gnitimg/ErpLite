@@ -8,9 +8,9 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
-from app.main import audit_primary_stock, reverse_stock_transaction, stocktake
+from app.main import audit_primary_stock, reverse_stock_transaction, stocktake, update_sample
 from app.models import InventoryItem, StockTransaction
-from app.schemas import StocktakeLinePayload, StocktakePayload
+from app.schemas import SamplePayload, StocktakeLinePayload, StocktakePayload
 from app.services import create_transaction
 
 
@@ -146,3 +146,30 @@ def test_audit_uses_current_stock_as_baseline_without_history():
         assert result[0]["ledger_stock"] == 12
         assert result[0]["ok"] is True
         assert result[0]["audit_note"] == "无历史流水，使用当前库存作为基准"
+
+
+def test_sample_adjustments_never_pollute_primary_product_audit():
+    with database() as db:
+        product = InventoryItem(
+            sku="SAMPLE",
+            name="样品产品",
+            kind="PRODUCT",
+            stock_qty=0,
+            sample_stock_qty=0,
+            daily_capacity=1,
+            mold_count=1,
+        )
+        db.add(product)
+        db.commit()
+
+        update_sample(product.id, SamplePayload(stock_qty=5), db)
+        result = audit_primary_stock(db)
+
+        assert result[0]["stored_stock"] == 0
+        assert result[0]["ledger_stock"] == 0
+        assert result[0]["ok"] is True
+        line = db.scalar(select(StockTransaction).where(
+            StockTransaction.transaction_type == "SAMPLE_ADJUST"
+        )).lines[0]
+        assert line.inventory_bucket == "SAMPLE"
+        assert line.affects_primary_stock is False

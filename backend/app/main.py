@@ -708,6 +708,8 @@ def update_sample(
             item_id=product.id,
             quantity_change=stock_delta,
             unit_cost=0,
+            inventory_bucket="SAMPLE",
+            affects_primary_stock=False,
         ))
     db.commit()
     db.refresh(product)
@@ -3131,6 +3133,7 @@ def audit_primary_stock(db: Session = Depends(get_db)):
         .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
         .where(
             StockTransactionItem.affects_primary_stock.is_(True),
+            StockTransaction.transaction_type != "SAMPLE_ADJUST",
             # Historical-sum rule: a REVERSED original and its POSTED REVERSAL
             # both participate, so their deltas cancel exactly once.
             StockTransaction.status.in_(("POSTED", "REVERSED")),

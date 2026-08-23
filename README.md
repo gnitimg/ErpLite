@@ -77,6 +77,13 @@
 - 后端：Python 3、FastAPI、SQLAlchemy、PyMySQL。
 - 数据库：MySQL 8，默认数据库 `lite_erp`。
 
+## 运行与安全模式
+
+- 开发环境可使用 `ERP_ENV=dev`。未配置 `ERP_JWT_SECRET` 时后端会生成仅当前进程有效的随机密钥，进程重启后现有令牌全部失效。
+- 生产环境必须设置 `ERP_ENV=production` 和高强度随机 `ERP_JWT_SECRET`；缺少密钥时服务拒绝启动。生产数据库使用 MySQL。
+- Break-glass emergency admin 默认关闭。仅在明确设置 `ERP_ENABLE_EMERGENCY_ADMIN=1` 及应急凭据时启用；建立正常 ADMIN 后应立即关闭，应急账号不能替代系统至少一个启用的正常管理员。
+- 部署或升级数据库使用 `alembic upgrade head`。正式发布前还应阅读 [Full V1 已知技术边界](docs/FULL_VERSION_KNOWN_LIMITATIONS.md) 与 [Stage 7 独立发布审计](docs/STAGE7_RELEASE_AUDIT.md)。
+
 ## 1. 本机 MySQL
 
 默认使用电脑上已安装的 MySQL 8.4 程序，在项目目录创建隔离数据目录并监听 `127.0.0.1:3307`。它不会修改或停止已有的 3306 MySQL 服务。首次启动会自动创建 `lite_erp` 数据库及独立用户。
@@ -128,7 +135,7 @@ python run.py
 如需改用前台方式，先运行 `./service.ps1 stop`。后台停止命令会结束完整的
 Python 子进程树，确保 8000 端口真正释放。
 
-默认登录信息：用户名 `admin`，密码 `12345678`。账号可在 `.env` 中修改；当前本机版本暂未启用验证码。
+系统不提供源码内置的默认管理员密码。全新数据库首次配置时，可临时启用 break-glass emergency admin，登录后创建正常 ADMIN，再关闭应急开关。
 
 ## 开发调试
 
@@ -160,7 +167,7 @@ MySQL 暂未启动时，页面与无验证码登录仍可使用；依赖库存�
 3. 恢复时需要输入完整备份文件名进行二次确认。
 4. 系统会在恢复前自动创建一份“恢复前自动备份”，随后在单个数据库事务中替换数据；任一步骤失败都会回滚本次恢复。
 
-备份覆盖零件/产品、BOM、客单、退货、成品/半成品/外协在途库存、外协批次、库存流水、成品预留、生产设置、生产批次、订单产量分配及历史单据快照，文件默认保存在项目根目录的 `backups\`。备份格式版本为 12；旧版 1–11 快照恢复时会自动补齐新字段和空的退货、外协数据表。备份文件含业务数据，请按敏感数据管理，不要提交到 Git 仓库。
+备份覆盖零件/产品、BOM、客单、退货、CustomerCredit、出库履约分配、成品/半成品/外协在途库存、外协批次、库存流水、成品预留、生产设置、生产批次、订单产量分配及历史单据快照，文件默认保存在项目根目录的 `backups\`。备份格式版本为 22；旧版 1–21 快照恢复时会自动补齐兼容字段和空表，但旧退货 snapshot 无法凭空恢复。备份文件含业务数据，请按敏感数据管理，不要提交到 Git 仓库。
 
 ### 订单、生产与交付流程
 
@@ -224,6 +231,7 @@ mysql-local.ps1     隔离的本机 MySQL 启停脚本
 | 外协加工 | `GET /api/external-processing`、`POST /api/external-processing/send`、`POST /api/external-processing/{id}/return` |
 | 库存 | `GET /api/inventory`；返回订单需求、缺口和可快捷入库数量 |
 | 出入库 | `POST /api/stock/documents` 创建普通多行入库单或出库单；保留 `POST /api/stock/inbound`、`POST /api/stock/outbound` 兼容旧入口 |
+| 库存盘点/对账 | `POST /api/stock/stocktake` 盘点并按盘盈/盘亏生成调整流水；`GET /api/stock/audit` 只读比较主库存与流水；旧 `POST /api/stock/reconcile` 为 deprecated 兼容入口 |
 | 流水 | `GET /api/stock/transactions` |
 | 操作日志 | `GET /api/operation-logs`、`GET /api/operation-logs/actions` |
 | 客单 | `GET/POST/PUT /api/orders`、`GET /api/orders/{id}`，以及 `confirm/ship/ship-all/cancel`；`availability` 返回库存占用、半成品/外协在途、待生产和 ETA；`GET/POST /api/orders/{id}/returns` 查询或登记退货 |
