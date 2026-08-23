@@ -11,6 +11,7 @@ interface InventoryRow {
   spec: string
   stock_qty: number
   unit: string
+  active: boolean
 }
 
 const loading = ref(false)
@@ -23,7 +24,7 @@ const notes = ref("")
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    const data = await api("/api/inventory?kind=PART&pageSize=9999")
+    const data = await api("/api/inventory?kind=PART&pageSize=9999&include_inactive=true")
     rows.value = data.items || data || []
   } catch (error: any) {
     ElMessage.error(error.message)
@@ -89,6 +90,12 @@ useLiveRefresh(() => load(true))
         <el-table-column label="SKU" prop="sku" width="140" />
         <el-table-column label="名称" prop="name" min-width="120" />
         <el-table-column label="规格" prop="spec" width="120" />
+        <el-table-column label="状态" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="!row.active" type="info" size="small">停用</el-tag>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="账面库存" prop="stock_qty" width="100" align="right" />
         <el-table-column label="实物盘点" width="140">
           <template #default="{ row }">

@@ -637,6 +637,16 @@ def delete_part(item_id: int, db: Session = Depends(get_db)):
     item = find_item(db, item_id, "PART")
     if db.scalar(select(ProductBomItem.id).where(ProductBomItem.part_id == item_id).limit(1)):
         raise HTTPException(409, "该零件已用于产品 BOM，不能停用")
+    if float(item.stock_qty or 0) != 0:
+        raise HTTPException(409, f"该零件库存余量为 {float(item.stock_qty)}，不能停用")
+    planned_commit = db.scalar(
+        select(func.count(PurchaseCommitment.id)).where(
+            PurchaseCommitment.part_id == item_id,
+            PurchaseCommitment.status == "PLANNED",
+        )
+    )
+    if planned_commit and planned_commit > 0:
+        raise HTTPException(409, "该零件有未到货的采购预计，不能停用")
     item.active = False
     db.commit()
     return {"ok": True}
@@ -775,6 +785,31 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
     product = find_item(db, item_id, "PRODUCT")
     if db.scalar(select(SalesOrderItem.id).where(SalesOrderItem.product_id == item_id).limit(1)):
         raise HTTPException(409, "该产品已有客单记录，不能停用")
+    stock_fields = {
+        "库存": float(product.stock_qty or 0),
+        "半成品": float(product.semi_finished_qty or 0),
+        "外协在制": float(product.processing_qty or 0),
+        "样品库存": float(product.sample_stock_qty or 0),
+    }
+    nonzero = {k: v for k, v in stock_fields.items() if abs(v) > 1e-9}
+    if nonzero:
+        raise HTTPException(409, f"该产品仍有库存（{', '.join(f'{k}={v}' for k, v in nonzero.items())}），不能停用")
+    active_run = db.scalar(
+        select(func.count(ProductionRun.id)).where(
+            ProductionRun.product_id == item_id,
+            ProductionRun.status.in_(["PLANNED", "RUNNING"]),
+        )
+    )
+    if active_run and active_run > 0:
+        raise HTTPException(409, "该产品有未完成的生产工单，不能停用")
+    active_batch = db.scalar(
+        select(func.count(ExternalProcessingBatch.id)).where(
+            ExternalProcessingBatch.product_id == item_id,
+            ExternalProcessingBatch.status.in_(["SENT", "PARTIALLY_RETURNED"]),
+        )
+    )
+    if active_batch and active_batch > 0:
+        raise HTTPException(409, "该产品有未回厂的外协批次，不能停用")
     product.active = False
     db.commit()
     return {"ok": True}
@@ -1700,11 +1735,13 @@ def inventory(
     stock_status: StockStatus | None = None,
     keyword: str = "",
     db: Session = Depends(get_db),
+    include_inactive: bool = False,
 ):
     query = select(InventoryItem).where(
-        InventoryItem.active.is_(True),
         InventoryItem.kind.in_(["PART", "PRODUCT"]),
     )
+    if not include_inactive:
+        query = query.where(InventoryItem.active.is_(True))
     if kind in {"PART", "PRODUCT"}:
         query = query.where(InventoryItem.kind == kind)
     if stock_status == "LOW" or (stock_status is None and low_stock):
@@ -2971,19 +3008,22 @@ def reconcile_stock(
     db: Session = Depends(get_db),
 ):
     item_ids = [line.item_id for line in payload.items]
+    item_query = (
+        select(InventoryItem)
+        .where(
+            InventoryItem.id.in_(item_ids),
+            InventoryItem.kind.in_(("PART", "PRODUCT")),
+        )
+        .order_by(InventoryItem.id)
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        item_query = item_query.with_for_update()
     items = {
         item.id: item
-        for item in db.scalars(
-            select(InventoryItem)
-            .where(
-                InventoryItem.id.in_(item_ids),
-                InventoryItem.active.is_(True),
-                InventoryItem.kind.in_(("PART", "PRODUCT")),
-            )
-        ).all()
+        for item in db.scalars(item_query).all()
     }
     if len(items) != len(item_ids):
-        raise HTTPException(404, "对账中有物料不存在或已停用")
+        raise HTTPException(404, "对账中有物料不存在")
     discrepancies = []
     adjustment_changes: list[tuple[InventoryItem, float, float]] = []
     for requested in payload.items:
