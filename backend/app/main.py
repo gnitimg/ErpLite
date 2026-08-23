@@ -2251,29 +2251,42 @@ def _order_item_weighted_sale_price(db: Session, order_item: SalesOrderItem) -> 
 
 
 def _order_item_sale_return_unit_cost(db: Session, order_item: SalesOrderItem) -> float:
-    """退货回库成本：该订单行最近一次未冲销 ORIGINAL SALE_OUT 的库存成本快照。
+    """退货回库成本：该订单行所有未冲销物理 SALE_OUT（ORIGINAL + REPLACEMENT）
+    的数量加权平均 unit_cost。
 
-    不使用全局 product 最近一次出库（可能属于其他客户/订单）。
+    对于无 Lot/序列号追踪的系统，加权平均比伪 LIFO 更稳：
+    多次不同成本出库后全部退回，总价值守恒。
+    退款价格仍然只使用 ORIGINAL 实际销售价格（见 _order_item_weighted_sale_price）。
     没有匹配的出库时退回当前 product.cost_price。
     """
-    row = db.execute(
-        select(StockTransactionItem.unit_cost)
-        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+    rows = db.execute(
+        select(
+            OrderShipmentAllocation.quantity,
+            StockTransactionItem.unit_cost,
+        )
+        .join(StockTransaction, StockTransaction.id == OrderShipmentAllocation.stock_transaction_id)
         .join(
-            OrderShipmentAllocation,
-            OrderShipmentAllocation.stock_transaction_id == StockTransaction.id,
+            StockTransactionItem,
+            and_(
+                StockTransactionItem.transaction_id == StockTransaction.id,
+                StockTransactionItem.item_id == order_item.product_id,
+            ),
         )
         .where(
             OrderShipmentAllocation.order_item_id == order_item.id,
-            OrderShipmentAllocation.fulfillment_type == "ORIGINAL",
             StockTransaction.transaction_type == "SALE_OUT",
             StockTransaction.status != "REVERSED",
-            StockTransactionItem.item_id == order_item.product_id,
         )
-        .order_by(StockTransaction.id.desc())
-        .limit(1)
-    ).first()
-    return float(row[0]) if row and row[0] is not None else float(order_item.product.cost_price)
+    ).all()
+    total_qty = 0
+    total_value = 0.0
+    for qty, unit_cost in rows:
+        if qty and unit_cost is not None:
+            total_qty += qty
+            total_value += float(qty) * float(unit_cost)
+    if total_qty > 0:
+        return round(total_value / total_qty, 2)
+    return float(order_item.product.cost_price)
 
 
 def _receivable_net_remaining(receivable: Receivable, credit_offset: float) -> float:
@@ -2369,7 +2382,23 @@ def create_order_return(
     payload: OrderReturnPayload,
     db: Session = Depends(get_db),
 ):
-    order = load_order(db, order_id)
+    # MySQL 下锁 SalesOrder 行，与 _ship_order 使用同一主锁，
+    # 串行化同订单的出库×退货、退货×退货并发。
+    order_query = (
+        select(SalesOrder)
+        .where(SalesOrder.id == order_id)
+        .options(
+            selectinload(SalesOrder.items)
+            .selectinload(SalesOrderItem.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        order_query = order_query.with_for_update()
+    order = db.scalar(order_query)
+    if not order:
+        raise HTTPException(404, "客单不存在")
     line_by_id = {line.id: line for line in order.items}
     if any(line.order_item_id not in line_by_id for line in payload.items):
         raise HTTPException(400, "退货明细不属于该客单")

@@ -849,3 +849,150 @@ def test_sale_return_cost_scoped_to_order_item():
             .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
         )
         assert float(return_line.unit_cost) == 5
+
+
+# ───────────────── Stage 5.6 审计回归 ─────────────────
+
+def test_multi_shipment_return_weighted_average_cost_conservation():
+    """同一订单行分多次不同成本出库，全部退回后总价值守恒。
+
+    5@5 + 5@9 → 加权平均 7；两次各退5 → 5×7 + 5×7 = 70 = 原出库总价值。
+    """
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        # 采购 10 件 @9，均价变 7（库存 20 件）
+        inbound(db, product, 10, 9)
+        db.refresh(product)
+        assert float(product.cost_price) == 7
+        order = SalesOrder(
+            order_no="SO-WT", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=100,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        # 分两次出库：先 5 件（成本 7），再 5 件（成本 7）
+        _ship_order(db, order.id, {order.items[0].id: 5})
+        _ship_order(db, order.id, {order.items[0].id: 5})
+        db.refresh(product)
+        assert float(product.stock_qty) == 10
+        # 第一次退 5 件
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=5, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        return_lines = db.scalars(
+            select(StockTransactionItem)
+            .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+            .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
+            .order_by(StockTransactionItem.id)
+        ).all()
+        assert len(return_lines) == 1
+        first_cost = float(return_lines[0].unit_cost)
+        # 第二次退 5 件
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=5, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        return_lines = db.scalars(
+            select(StockTransactionItem)
+            .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+            .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
+            .order_by(StockTransactionItem.id)
+        ).all()
+        assert len(return_lines) == 2
+        second_cost = float(return_lines[1].unit_cost)
+        # 两次退货成本相同（加权平均），总价值 = 5×7 + 5×7 = 70
+        assert first_cost == second_cost
+        total_return_value = 5 * first_cost + 5 * second_cost
+        assert total_return_value == 70
+
+
+def test_replacement_shipment_included_in_return_cost():
+    """REPLACEMENT 出库的物理成本也计入退货回库加权平均。"""
+    from app.models import OrderShipmentAllocation
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 20
+        product.cost_price = 5
+        db.flush()
+        order = SalesOrder(
+            order_no="SO-REP", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=200,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        # 原始出库 10 件 @5
+        _ship_order(db, order.id, None)
+        db.refresh(product)
+        assert float(product.stock_qty) == 10
+        # 退货 10 件 REPLACE，不回库
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=10, restock=False)],
+                resolution="REPLACE",
+            ),
+            db,
+        )
+        db.refresh(order)
+        db.refresh(order.items[0])
+        assert int(order.items[0].replacement_pending_quantity) == 10
+        # 补料生产 + 入库 10 件 @8
+        inbound(db, product, 10, 8)
+        db.refresh(product)
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        # 换货补发 10 件 @8
+        _ship_order(db, order.id, None)
+        db.refresh(product)
+        assert float(product.stock_qty) == 10
+        # 确认有 ORIGINAL 和 REPLACEMENT 两种 allocation
+        allocations = db.scalars(
+            select(OrderShipmentAllocation).where(
+                OrderShipmentAllocation.order_item_id == order.items[0].id,
+            )
+        ).all()
+        fulfillment_types = {a.fulfillment_type for a in allocations}
+        assert "ORIGINAL" in fulfillment_types
+        assert "REPLACEMENT" in fulfillment_types
+        # 退货 10 件回库：成本应为 (10×5 + 10×6.5) / 20 = 5.75
+        # REPLACEMENT 出库时均价 = (10×5 + 10×8)/20 = 6.5
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=10, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        return_line = db.scalar(
+            select(StockTransactionItem)
+            .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+            .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
+        )
+        assert float(return_line.unit_cost) == 5.75

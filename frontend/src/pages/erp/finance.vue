@@ -132,6 +132,16 @@ async function openAllocateDialog(payment: Payment) {
   allocateForm.payment_id = payment.id
   allocateForm.receivable_id = 0
   allocateForm.amount = payment.amount - payment.allocated_amount
+  allocateDialog.value = true
+}
+
+function onAllocateReceivableChange() {
+  const payment = paymentRows.value.find(p => p.id === allocateForm.payment_id)
+  const receivable = availableReceivables.value.find(r => r.id === allocateForm.receivable_id)
+  if (!payment || !receivable) return
+  const paymentRemaining = payment.amount - (payment.allocated_amount || 0)
+  const receivableRemaining = receivable.remaining_amount ?? (receivable.amount - (receivable.settled_amount || 0))
+  allocateForm.amount = Math.min(paymentRemaining, receivableRemaining)
 }
 
 async function allocatePayment() {
@@ -300,7 +310,7 @@ useLiveRefresh(() => load(true))
     <el-dialog v-model="allocateDialog" title="核销应收" width="480px">
       <el-form label-position="top">
         <el-form-item label="选择应收">
-          <el-select v-model="allocateForm.receivable_id" style="width:100%" placeholder="选择待核销应收">
+          <el-select v-model="allocateForm.receivable_id" style="width:100%" placeholder="选择待核销应收" @change="onAllocateReceivableChange">
             <el-option v-for="r in availableReceivables" :key="r.id" :label="`${r.receivable_no} - ${r.customer_name} (余${(r.remaining_amount ?? (r.amount - r.settled_amount)).toFixed(2)})`" :value="r.id" />
           </el-select>
         </el-form-item>
