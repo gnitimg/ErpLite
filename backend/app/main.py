@@ -3360,9 +3360,7 @@ def settle_customer_credit(
 @app.get("/api/users")
 def list_users(request: Request, db: Session = Depends(get_db)):
     require_admin(request)
-    rows = db.scalars(
-        select(User).where(User.active.is_(True)).order_by(User.id)
-    ).all()
+    rows = db.scalars(select(User).order_by(User.id)).all()
     return [
         {
             "id": row.id,
@@ -3374,6 +3372,29 @@ def list_users(request: Request, db: Session = Depends(get_db)):
         }
         for row in rows
     ]
+
+
+def _guard_last_active_admin(
+    db: Session,
+    user: User,
+    *,
+    new_role: str,
+    new_active: bool,
+) -> None:
+    if not (user.active and user.role == "ADMIN"):
+        return
+    if new_active and new_role == "ADMIN":
+        return
+    query = (
+        select(User.id)
+        .where(User.active.is_(True), User.role == "ADMIN")
+        .order_by(User.id)
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    active_admin_ids = db.scalars(query).all()
+    if len(active_admin_ids) <= 1:
+        raise HTTPException(409, "系统必须至少保留一个启用的管理员账号。")
 
 
 @app.post("/api/users", status_code=201)
@@ -3405,12 +3426,27 @@ def update_user(user_id: int, payload: UserUpdatePayload, request: Request, db: 
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
+    previous_role = user.role
+    previous_active = bool(user.active)
+    _guard_last_active_admin(
+        db,
+        user,
+        new_role=payload.role,
+        new_active=payload.active,
+    )
     user.display_name = payload.display_name.strip()
     user.role = payload.role
     user.active = payload.active
     if payload.password:
         user.password_hash = hash_password(payload.password)
     db.commit()
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.audit_target = user.username
+        state.audit_summary = (
+            f"用户 {user.username} 状态 {('启用' if previous_active else '停用')}→{('启用' if user.active else '停用')}，"
+            f"角色 {previous_role}→{user.role}"
+        )
     return {"ok": True}
 
 
@@ -3420,8 +3456,13 @@ def delete_user(user_id: int, request: Request, db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
+    _guard_last_active_admin(db, user, new_role=user.role, new_active=False)
     user.active = False
     db.commit()
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.audit_target = user.username
+        state.audit_summary = f"用户 {user.username} 已停用（账号保留用于审计）"
     return {"ok": True}
 
 

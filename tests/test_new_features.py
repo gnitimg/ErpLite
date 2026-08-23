@@ -336,9 +336,18 @@ def test_user_crud_lifecycle():
         assert user["role"] == "OPERATOR"
 
         update_user(user["id"], UserUpdatePayload(display_name="高级操作员", role="ADMIN"), req, db)
-        users = [u for u in db.scalars(select(User)).all()]
-        assert users[0].display_name == "高级操作员"
-        assert users[0].role == "ADMIN"
+        updated = db.get(User, user["id"])
+        assert updated.display_name == "高级操作员"
+        assert updated.role == "ADMIN"
+
+        # 保留另一个启用管理员后，才允许停用当前管理员。
+        db.add(User(
+            username="safety-admin",
+            password_hash=hash_password("pass123"),
+            display_name="安全管理员",
+            role="ADMIN",
+        ))
+        db.commit()
 
         delete_user(user["id"], req, db)
         db.expire_all()

@@ -18,7 +18,7 @@ const keyword = ref("")
 const rows = ref<UserRow[]>([])
 const dialog = ref(false)
 const editing = ref<UserRow | null>(null)
-const form = reactive({ username: "", password: "", display_name: "", role: "OPERATOR" })
+const form = reactive({ username: "", password: "", display_name: "", role: "OPERATOR", active: true })
 
 const roleLabels: Record<string, string> = { ADMIN: "管理员", OPERATOR: "操作员", VIEWER: "只读" }
 
@@ -39,6 +39,7 @@ function openCreate() {
   form.password = ""
   form.display_name = ""
   form.role = "OPERATOR"
+  form.active = true
   dialog.value = true
 }
 
@@ -48,6 +49,7 @@ function openEdit(row: UserRow) {
   form.password = ""
   form.display_name = row.display_name
   form.role = row.role
+  form.active = row.active
   dialog.value = true
 }
 
@@ -56,7 +58,7 @@ async function save() {
     if (editing.value) {
       await api(`/api/users/${editing.value.id}`, {
         method: "PUT",
-        body: JSON.stringify({ display_name: form.display_name, role: form.role, active: true, password: form.password || undefined })
+        body: JSON.stringify({ display_name: form.display_name, role: form.role, active: form.active, password: form.password || undefined })
       })
       ElMessage.success("用户已更新")
     } else {
@@ -84,6 +86,19 @@ async function deactivate(row: UserRow) {
     await load()
   } catch (error: any) {
     if (error !== "cancel" && error !== "close") ElMessage.error(error.message)
+  }
+}
+
+async function reactivate(row: UserRow) {
+  try {
+    await api(`/api/users/${row.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ display_name: row.display_name, role: row.role, active: true })
+    })
+    ElMessage.success("用户已启用")
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
   }
 }
 
@@ -119,10 +134,11 @@ useLiveRefresh(() => load(true))
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row as any)">编辑</el-button>
             <el-button v-if="row.active" link type="danger" @click="deactivate(row as any)">停用</el-button>
+            <el-button v-else link type="success" @click="reactivate(row as any)">启用</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -139,6 +155,9 @@ useLiveRefresh(() => load(true))
             <el-option label="操作员" value="OPERATOR" />
             <el-option label="只读" value="VIEWER" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="editing" label="账号状态">
+          <el-switch v-model="form.active" active-text="启用" inactive-text="停用" />
         </el-form-item>
       </el-form>
       <template #footer>

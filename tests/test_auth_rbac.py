@@ -245,6 +245,74 @@ def test_user_management_requires_admin(db):
     assert response.status_code == 403
 
 
+def test_one_of_two_active_admins_can_be_deactivated(db):
+    first_id = add_user(db, "admin1", "ADMIN")
+    second_id = add_user(db, "admin2", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{second_id}",
+        headers=auth(token),
+        json={"display_name": "admin2", "role": "ADMIN", "active": False},
+    )
+
+    assert response.status_code == 200
+    with db() as session:
+        assert session.get(User, first_id).active is True
+        assert session.get(User, second_id).active is False
+
+
+def test_last_active_admin_cannot_deactivate_self(db):
+    admin_id = add_user(db, "admin1", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{admin_id}",
+        headers=auth(token),
+        json={"display_name": "admin1", "role": "ADMIN", "active": False},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "系统必须至少保留一个启用的管理员账号。"
+
+
+def test_last_active_admin_cannot_downgrade_self(db):
+    admin_id = add_user(db, "admin1", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{admin_id}",
+        headers=auth(token),
+        json={"display_name": "admin1", "role": "OPERATOR", "active": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "系统必须至少保留一个启用的管理员账号。"
+
+
+def test_inactive_users_are_listed_and_can_be_reactivated(db):
+    add_user(db, "admin1", "ADMIN")
+    operator_id = add_user(db, "operator1", "OPERATOR")
+    with db() as session:
+        session.get(User, operator_id).active = False
+        session.commit()
+    token = login_token("admin1", "pass-123456")
+
+    listed = client.get("/api/users", headers=auth(token))
+
+    assert listed.status_code == 200
+    inactive = next(row for row in listed.json() if row["id"] == operator_id)
+    assert inactive["active"] is False
+
+    reactivated = client.put(
+        f"/api/users/{operator_id}",
+        headers=auth(token),
+        json={"display_name": "operator1", "role": "OPERATOR", "active": True},
+    )
+    assert reactivated.status_code == 200
+    assert login_token("operator1", "pass-123456")
+
+
 # ───────────────────────── JWT 密钥配置 ─────────────────────────
 
 def test_production_refuses_to_start_without_secret(monkeypatch):
