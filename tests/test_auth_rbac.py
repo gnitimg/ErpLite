@@ -222,6 +222,30 @@ def test_operator_write_allowed_and_audited_with_jwt_username(db):
         assert {log.username for log in logs} == {"op1"}
 
 
+def test_failed_write_is_audited_without_sensitive_request_data(db):
+    add_user(db, "viewer1", "VIEWER", password="viewer-secret-password")
+    token = login_token("viewer1", "viewer-secret-password")
+
+    response = client.post(
+        "/api/parts",
+        headers=auth(token),
+        json={"sku": "DENIED", "name": "不应创建", "password": "body-secret"},
+    )
+
+    assert response.status_code == 403
+    with db() as session:
+        log = session.scalar(select(OperationLog).where(
+            OperationLog.path == "/api/parts",
+            OperationLog.status == "FAILED",
+        ))
+        assert log is not None
+        assert log.username == "viewer1"
+        logged_text = f"{log.detail} {log.business_summary} {log.target}"
+        assert "viewer-secret-password" not in logged_text
+        assert "body-secret" not in logged_text
+        assert token not in logged_text
+
+
 def test_backup_endpoints_admin_only(db):
     add_user(db, "viewer1", "VIEWER")
     add_user(db, "op1", "OPERATOR")
@@ -243,6 +267,74 @@ def test_user_management_requires_admin(db):
     operator_token = login_token("op1", "pass-123456")
     response = client.get("/api/users", headers=auth(operator_token))
     assert response.status_code == 403
+
+
+def test_one_of_two_active_admins_can_be_deactivated(db):
+    first_id = add_user(db, "admin1", "ADMIN")
+    second_id = add_user(db, "admin2", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{second_id}",
+        headers=auth(token),
+        json={"display_name": "admin2", "role": "ADMIN", "active": False},
+    )
+
+    assert response.status_code == 200
+    with db() as session:
+        assert session.get(User, first_id).active is True
+        assert session.get(User, second_id).active is False
+
+
+def test_last_active_admin_cannot_deactivate_self(db):
+    admin_id = add_user(db, "admin1", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{admin_id}",
+        headers=auth(token),
+        json={"display_name": "admin1", "role": "ADMIN", "active": False},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "系统必须至少保留一个启用的管理员账号。"
+
+
+def test_last_active_admin_cannot_downgrade_self(db):
+    admin_id = add_user(db, "admin1", "ADMIN")
+    token = login_token("admin1", "pass-123456")
+
+    response = client.put(
+        f"/api/users/{admin_id}",
+        headers=auth(token),
+        json={"display_name": "admin1", "role": "OPERATOR", "active": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "系统必须至少保留一个启用的管理员账号。"
+
+
+def test_inactive_users_are_listed_and_can_be_reactivated(db):
+    add_user(db, "admin1", "ADMIN")
+    operator_id = add_user(db, "operator1", "OPERATOR")
+    with db() as session:
+        session.get(User, operator_id).active = False
+        session.commit()
+    token = login_token("admin1", "pass-123456")
+
+    listed = client.get("/api/users", headers=auth(token))
+
+    assert listed.status_code == 200
+    inactive = next(row for row in listed.json() if row["id"] == operator_id)
+    assert inactive["active"] is False
+
+    reactivated = client.put(
+        f"/api/users/{operator_id}",
+        headers=auth(token),
+        json={"display_name": "operator1", "role": "OPERATOR", "active": True},
+    )
+    assert reactivated.status_code == 200
+    assert login_token("operator1", "pass-123456")
 
 
 # ───────────────────────── JWT 密钥配置 ─────────────────────────

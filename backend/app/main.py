@@ -21,7 +21,14 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
+from .backup import (
+    BackupError,
+    BackupRestoreError,
+    create_backup_archive,
+    list_backup_archives,
+    resolve_backup_file,
+    restore_backup_archive,
+)
 from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
     CustomerCredit,
@@ -75,6 +82,7 @@ from .schemas import (
     StockDocumentPayload,
     StockPayload,
     StockReconciliationPayload,
+    StocktakePayload,
     UserPayload,
     UserUpdatePayload,
 )
@@ -258,15 +266,22 @@ async def broadcast_successful_writes(request: Request, call_next):
         status_code = response.status_code if response else 500
         try:
             with SessionLocal() as audit_db:
+                action = operation_action(request.url.path, request.method)
+                target = str(getattr(request.state, "audit_target", request.url.path))[:255]
                 audit_db.add(OperationLog(
                     username=authenticated_username(request),
-                    action=operation_action(request.url.path, request.method),
-                    target=request.url.path[:255],
+                    action=action,
+                    target=target,
                     method=request.method,
                     path=request.url.path[:255],
                     ip_address=client_ip(request)[:64],
                     status="SUCCESS" if status_code < 400 else "FAILED",
-                    detail=f"HTTP {status_code}",
+                    detail=str(getattr(request.state, "audit_detail", f"HTTP {status_code}")),
+                    business_summary=str(getattr(
+                        request.state,
+                        "audit_summary",
+                        f"{action}：{target}",
+                    ))[:500],
                 ))
                 audit_db.commit()
         except Exception as audit_error:
@@ -285,8 +300,8 @@ def operation_action(path: str, method: str) -> str:
         return "物料入库"
     if path == "/api/stock/outbound":
         return "物料出库"
-    if path == "/api/stock/reconcile":
-        return "库存对账"
+    if path in {"/api/stock/reconcile", "/api/stock/stocktake"}:
+        return "库存盘点"
     if path == "/api/stock/documents":
         return "出入库开单"
     if path.startswith("/api/orders"):
@@ -322,6 +337,10 @@ def operation_action(path: str, method: str) -> str:
     if path.startswith("/api/production/plan"):
         return "重算生产计划"
     if path.startswith("/api/production/runs"):
+        if path.endswith("/complete"):
+            return "生产完工"
+        if path.endswith("/status"):
+            return "生产开工/终止"
         if path.endswith("/schedule"):
             return "调整订单排产"
         return "更新生产批次"
@@ -331,8 +350,14 @@ def operation_action(path: str, method: str) -> str:
         return "修改打印设置"
     if path.startswith("/api/finance"):
         if path.endswith("/allocate"):
-            return "核销付款"
-        return "登记付款"
+            return "应收核销"
+        if path.endswith("/settle"):
+            return "客户退款登记"
+        if "/payments" in path:
+            return "收款创建"
+        return "财务操作"
+    if path.startswith("/api/stock/transactions") and path.endswith("/reverse"):
+        return "库存流水冲销"
     if path.startswith("/api/users"):
         return {"POST": "新建用户", "PUT": "编辑用户", "DELETE": "停用用户"}.get(method, "用户管理")
     if path.startswith("/api/backups"):
@@ -693,6 +718,8 @@ def update_sample(
             item_id=product.id,
             quantity_change=stock_delta,
             unit_cost=0,
+            inventory_bucket="SAMPLE",
+            affects_primary_stock=False,
         ))
     db.commit()
     db.refresh(product)
@@ -2216,6 +2243,16 @@ def order_availability(order_id: int, db: Session = Depends(get_db)):
 
 
 def order_return_dict(row: OrderReturn) -> dict:
+    refund_unit_price = (
+        float(row.refund_unit_price_snapshot)
+        if row.refund_unit_price_snapshot is not None
+        else None
+    )
+    return_unit_cost = (
+        float(row.return_unit_cost_snapshot)
+        if row.return_unit_cost_snapshot is not None
+        else None
+    )
     return {
         "id": row.id,
         "return_no": row.return_no,
@@ -2228,6 +2265,18 @@ def order_return_dict(row: OrderReturn) -> dict:
         "quantity": row.quantity,
         "restocked": row.restocked,
         "resolution": row.resolution or "REFUND",
+        "refund_unit_price_snapshot": refund_unit_price,
+        "refund_total": (
+            round(refund_unit_price * int(row.quantity), 2)
+            if refund_unit_price is not None
+            else None
+        ),
+        "return_unit_cost_snapshot": return_unit_cost,
+        "return_cost_total": (
+            round(return_unit_cost * int(row.quantity), 2)
+            if return_unit_cost is not None
+            else None
+        ),
         "transaction_id": row.transaction_id,
         "notes": row.notes,
         "occurred_at": row.occurred_at.isoformat(),
@@ -2868,7 +2917,11 @@ def _sale_out_reversal_deltas(db: Session, original: StockTransaction) -> dict[i
 
 
 @app.post("/api/stock/transactions/{transaction_id}/reverse", status_code=201)
-def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)):
+def reverse_stock_transaction(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
     original = db.scalar(
         select(StockTransaction)
         .where(StockTransaction.id == transaction_id)
@@ -2999,14 +3052,17 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
         rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
+    state = getattr(request, "state", None) if request is not None else None
+    if state is not None:
+        state.audit_target = original.transaction_no
+        state.audit_summary = (
+            f"{original.transaction_type} 流水 {original.transaction_no} 已冲销，"
+            f"冲销流水 {reversal_tx.transaction_no}"
+        )
     return transaction_dict(reversal_tx)
 
 
-@app.post("/api/stock/reconcile", status_code=201)
-def reconcile_stock(
-    payload: StockReconciliationPayload,
-    db: Session = Depends(get_db),
-):
+def _apply_stocktake(payload: StocktakePayload, db: Session) -> dict:
     item_ids = [line.item_id for line in payload.items]
     item_query = (
         select(InventoryItem)
@@ -3023,9 +3079,10 @@ def reconcile_stock(
         for item in db.scalars(item_query).all()
     }
     if len(items) != len(item_ids):
-        raise HTTPException(404, "对账中有物料不存在")
+        raise HTTPException(404, "盘点中有物料不存在")
     discrepancies = []
-    adjustment_changes: list[tuple[InventoryItem, float, float]] = []
+    inbound_changes: list[tuple[InventoryItem, float, float]] = []
+    outbound_changes: list[tuple[InventoryItem, float, float]] = []
     for requested in payload.items:
         item = items[requested.item_id]
         system_qty = float(item.stock_qty)
@@ -3041,28 +3098,109 @@ def reconcile_stock(
                 "physical_quantity": physical_qty,
                 "difference": diff,
             })
-            adjustment_changes.append((item, diff, item.cost_price))
-    transaction = None
-    if adjustment_changes:
-        transaction = create_transaction(
+            target = inbound_changes if diff > 0 else outbound_changes
+            target.append((item, diff, item.cost_price))
+    transactions: list[StockTransaction] = []
+    if inbound_changes:
+        transactions.append(create_transaction(
             db,
             "MANUAL_IN",
-            adjustment_changes,
-            payload.notes or "库存对账调整",
+            inbound_changes,
+            payload.notes or "库存盘点盘盈调整",
             occurred_at=datetime.now(),
-        )
+        ))
+    if outbound_changes:
+        transactions.append(create_transaction(
+            db,
+            "MANUAL_OUT",
+            outbound_changes,
+            payload.notes or "库存盘点盘亏调整",
+            occurred_at=datetime.now(),
+        ))
     affected_products = {item_id for item_id in item_ids if items[item_id].kind == "PRODUCT"}
     if affected_products:
         rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
+    transaction_rows = [
+        {
+            "id": transaction.id,
+            "transaction_no": transaction.transaction_no,
+            "transaction_type": transaction.transaction_type,
+        }
+        for transaction in transactions
+    ]
     return {
+        "stocktake_count": len(payload.items),
         "reconciled_count": len(payload.items),
         "discrepancy_count": len(discrepancies),
         "discrepancies": discrepancies,
-        "transaction_id": transaction.id if transaction else None,
-        "transaction_no": transaction.transaction_no if transaction else None,
+        "transactions": transaction_rows,
+        # 兼容旧客户端：混合盘盈盘亏时仅指向第一张调整单。
+        "transaction_id": transactions[0].id if transactions else None,
+        "transaction_no": transactions[0].transaction_no if transactions else None,
     }
+
+
+@app.post("/api/stock/stocktake", status_code=201)
+def stocktake(payload: StocktakePayload, db: Session = Depends(get_db)):
+    return _apply_stocktake(payload, db)
+
+
+@app.post("/api/stock/reconcile", status_code=201, deprecated=True)
+def reconcile_stock(payload: StockReconciliationPayload, db: Session = Depends(get_db)):
+    """Deprecated compatibility endpoint; use /api/stock/stocktake."""
+    return _apply_stocktake(payload, db)
+
+
+@app.get("/api/stock/audit")
+def audit_primary_stock(db: Session = Depends(get_db)):
+    """Compare stored primary stock with the immutable historical ledger."""
+    items = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.active.is_(True),
+            InventoryItem.kind.in_(("PART", "PRODUCT")),
+        )
+        .order_by(InventoryItem.sku, InventoryItem.id)
+    ).all()
+    ledger_rows = db.execute(
+        select(
+            StockTransactionItem.item_id,
+            func.coalesce(func.sum(StockTransactionItem.quantity_change), 0),
+            func.count(StockTransactionItem.id),
+        )
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .where(
+            StockTransactionItem.affects_primary_stock.is_(True),
+            StockTransaction.transaction_type != "SAMPLE_ADJUST",
+            # Historical-sum rule: a REVERSED original and its POSTED REVERSAL
+            # both participate, so their deltas cancel exactly once.
+            StockTransaction.status.in_(("POSTED", "REVERSED")),
+        )
+        .group_by(StockTransactionItem.item_id)
+    ).all()
+    ledger_by_item = {
+        item_id: (float(quantity or 0), int(line_count or 0))
+        for item_id, quantity, line_count in ledger_rows
+    }
+    result = []
+    for item in items:
+        stored_stock = float(item.stock_qty or 0)
+        ledger_stock, line_count = ledger_by_item.get(item.id, (stored_stock, 0))
+        difference = round(stored_stock - ledger_stock, 6)
+        result.append({
+            "item_id": item.id,
+            "sku": item.sku,
+            "name": item.name,
+            "kind": item.kind,
+            "stored_stock": stored_stock,
+            "ledger_stock": round(ledger_stock, 6),
+            "difference": difference,
+            "ok": abs(difference) <= 1e-9,
+            "audit_note": "无历史流水，使用当前库存作为基准" if line_count == 0 else None,
+        })
+    return result
 
 
 @app.get("/api/backups")
@@ -3314,9 +3452,7 @@ def settle_customer_credit(
 @app.get("/api/users")
 def list_users(request: Request, db: Session = Depends(get_db)):
     require_admin(request)
-    rows = db.scalars(
-        select(User).where(User.active.is_(True)).order_by(User.id)
-    ).all()
+    rows = db.scalars(select(User).order_by(User.id)).all()
     return [
         {
             "id": row.id,
@@ -3328,6 +3464,29 @@ def list_users(request: Request, db: Session = Depends(get_db)):
         }
         for row in rows
     ]
+
+
+def _guard_last_active_admin(
+    db: Session,
+    user: User,
+    *,
+    new_role: str,
+    new_active: bool,
+) -> None:
+    if not (user.active and user.role == "ADMIN"):
+        return
+    if new_active and new_role == "ADMIN":
+        return
+    query = (
+        select(User.id)
+        .where(User.active.is_(True), User.role == "ADMIN")
+        .order_by(User.id)
+    )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    active_admin_ids = db.scalars(query).all()
+    if len(active_admin_ids) <= 1:
+        raise HTTPException(409, "系统必须至少保留一个启用的管理员账号。")
 
 
 @app.post("/api/users", status_code=201)
@@ -3359,12 +3518,27 @@ def update_user(user_id: int, payload: UserUpdatePayload, request: Request, db: 
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
+    previous_role = user.role
+    previous_active = bool(user.active)
+    _guard_last_active_admin(
+        db,
+        user,
+        new_role=payload.role,
+        new_active=payload.active,
+    )
     user.display_name = payload.display_name.strip()
     user.role = payload.role
     user.active = payload.active
     if payload.password:
         user.password_hash = hash_password(payload.password)
     db.commit()
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.audit_target = user.username
+        state.audit_summary = (
+            f"用户 {user.username} 状态 {('启用' if previous_active else '停用')}→{('启用' if user.active else '停用')}，"
+            f"角色 {previous_role}→{user.role}"
+        )
     return {"ok": True}
 
 
@@ -3374,8 +3548,13 @@ def delete_user(user_id: int, request: Request, db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
+    _guard_last_active_admin(db, user, new_role=user.role, new_active=False)
     user.active = False
     db.commit()
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.audit_target = user.username
+        state.audit_summary = f"用户 {user.username} 已停用（账号保留用于审计）"
     return {"ok": True}
 
 
@@ -3404,11 +3583,20 @@ def restore_backup(filename: str, payload: BackupRestorePayload, request: Reques
         raise HTTPException(400, "确认文件名与待恢复备份不一致")
     try:
         path = resolve_backup_file(filename)
-        return restore_backup_archive(db, path)
+        result = restore_backup_archive(db, path)
+        request.state.audit_target = filename
+        request.state.audit_detail = f"backup={filename}; stage=COMPLETED"
+        request.state.audit_summary = f"备份 {filename} 恢复成功，派生状态已重建并通过校验"
+        return result
     except BackupError as error:
         raise HTTPException(400, str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(404, "备份文件不存在") from error
+    except BackupRestoreError as error:
+        request.state.audit_target = filename
+        request.state.audit_detail = f"backup={filename}; stage={error.stage}; {error}"
+        request.state.audit_summary = f"备份 {filename} 恢复失败（{error.stage}）"
+        raise HTTPException(500, str(error)) from error
 
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
