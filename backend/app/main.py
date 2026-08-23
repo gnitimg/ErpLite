@@ -21,7 +21,14 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
+from .backup import (
+    BackupError,
+    BackupRestoreError,
+    create_backup_archive,
+    list_backup_archives,
+    resolve_backup_file,
+    restore_backup_archive,
+)
 from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
     CustomerCredit,
@@ -261,12 +268,13 @@ async def broadcast_successful_writes(request: Request, call_next):
                 audit_db.add(OperationLog(
                     username=authenticated_username(request),
                     action=operation_action(request.url.path, request.method),
-                    target=request.url.path[:255],
+                    target=str(getattr(request.state, "audit_target", request.url.path))[:255],
                     method=request.method,
                     path=request.url.path[:255],
                     ip_address=client_ip(request)[:64],
                     status="SUCCESS" if status_code < 400 else "FAILED",
-                    detail=f"HTTP {status_code}",
+                    detail=str(getattr(request.state, "audit_detail", f"HTTP {status_code}")),
+                    business_summary=str(getattr(request.state, "audit_summary", ""))[:500],
                 ))
                 audit_db.commit()
         except Exception as audit_error:
@@ -3364,11 +3372,20 @@ def restore_backup(filename: str, payload: BackupRestorePayload, request: Reques
         raise HTTPException(400, "确认文件名与待恢复备份不一致")
     try:
         path = resolve_backup_file(filename)
-        return restore_backup_archive(db, path)
+        result = restore_backup_archive(db, path)
+        request.state.audit_target = filename
+        request.state.audit_detail = f"backup={filename}; stage=COMPLETED"
+        request.state.audit_summary = f"备份 {filename} 恢复成功，派生状态已重建并通过校验"
+        return result
     except BackupError as error:
         raise HTTPException(400, str(error)) from error
     except FileNotFoundError as error:
         raise HTTPException(404, "备份文件不存在") from error
+    except BackupRestoreError as error:
+        request.state.audit_target = filename
+        request.state.audit_detail = f"backup={filename}; stage={error.stage}; {error}"
+        request.state.audit_summary = f"备份 {filename} 恢复失败（{error.stage}）"
+        raise HTTPException(500, str(error)) from error
 
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
-from sqlalchemy import Date, DateTime
+from sqlalchemy import Date, DateTime, select
 from sqlalchemy.orm import Session
 
 from .database import PROJECT_ROOT
@@ -102,6 +102,21 @@ DELETE_TABLES = (
 
 class BackupError(ValueError):
     pass
+
+
+class BackupRestoreError(RuntimeError):
+    """A validated archive could not be restored completely."""
+
+    def __init__(
+        self,
+        stage: str,
+        message: str,
+        *,
+        safety_backup: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.safety_backup = safety_backup
 
 
 def _json_value(value: Any) -> Any:
@@ -420,6 +435,55 @@ def create_backup_archive(
     return _metadata(target, payload)
 
 
+def _validate_rebuilt_state(db: Session) -> None:
+    """Validate the small set of derived facts required for safe operation."""
+    active_lines = db.scalars(
+        select(SalesOrderItem)
+        .join(SalesOrder, SalesOrder.id == SalesOrderItem.order_id)
+        .where(SalesOrder.status.in_((
+            "CONFIRMED",
+            "WAITING_MATERIALS",
+            "READY_TO_SHIP",
+            "PARTIALLY_SHIPPED",
+        )))
+    ).all()
+    line_ids = [line.id for line in active_lines]
+    reservations = {
+        row.order_item_id: row
+        for row in db.scalars(
+            select(StockReservation).where(StockReservation.order_item_id.in_(line_ids))
+        ).all()
+    } if line_ids else {}
+    for line in active_lines:
+        reservation = reservations.get(line.id)
+        if reservation is None:
+            raise BackupError(f"订单行 {line.id} 缺少库存预留")
+        if reservation.product_id != line.product_id:
+            raise BackupError(f"订单行 {line.id} 的库存预留产品不一致")
+        if int(reservation.quantity or 0) != int(line.reserved_quantity or 0):
+            raise BackupError(f"订单行 {line.id} 的库存预留缓存不一致")
+        if any(float(value or 0) < 0 for value in (
+            line.reserved_quantity,
+            line.pipeline_quantity,
+            line.production_required_quantity,
+        )):
+            raise BackupError(f"订单行 {line.id} 的派生数量无效")
+
+    invalid_allocations = db.scalars(
+        select(ProductionAllocation).where(ProductionAllocation.quantity <= 0)
+    ).first()
+    if invalid_allocations is not None:
+        raise BackupError("生产计划包含无效的非正数分配")
+    invalid_material_reservations = db.scalars(
+        select(ProductionMaterialReservation).where(
+            ProductionMaterialReservation.status == "ACTIVE",
+            ProductionMaterialReservation.quantity <= 0,
+        )
+    ).first()
+    if invalid_material_reservations is not None:
+        raise BackupError("生产计划包含无效的物料预留")
+
+
 def restore_backup_archive(db: Session, path: Path) -> dict[str, Any]:
     payload = _load_archive(path)
     decoded_tables: dict[str, list[dict[str, Any]]] = {}
@@ -427,7 +491,14 @@ def restore_backup_archive(db: Session, path: Path) -> dict[str, Any]:
     for table_name, rows in payload["tables"].items():
         decoded_tables[table_name] = [_decode_row(table_by_name[table_name], row) for row in rows]
 
-    safety_backup = create_backup_archive(db, "PRE_RESTORE", path.name)
+    try:
+        safety_backup = create_backup_archive(db, "PRE_RESTORE", path.name)
+    except Exception as error:
+        raise BackupRestoreError(
+            "PRE_RESTORE",
+            "无法创建恢复前安全备份，恢复操作已取消",
+        ) from error
+
     db.rollback()
     try:
         for table in DELETE_TABLES:
@@ -436,21 +507,22 @@ def restore_backup_archive(db: Session, path: Path) -> dict[str, Any]:
             rows = decoded_tables[table.name]
             if rows:
                 db.execute(table.insert(), rows)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    try:
         from .planning import recalculate_production_plan
         from .services import rebalance_product_reservations
-        from sqlalchemy import select
+
         product_ids = set(db.scalars(select(InventoryItem.id).where(InventoryItem.kind == "PRODUCT")).all())
         rebalance_product_reservations(db, product_ids)
         recalculate_production_plan(db)
+        _validate_rebuilt_state(db)
         db.commit()
-    except Exception:
+    except Exception as error:
         db.rollback()
+        db.expire_all()
+        raise BackupRestoreError(
+            "RESTORE_REBUILD_VALIDATE",
+            "备份恢复或派生状态重建失败，数据事务已回滚；系统未将本次操作视为恢复成功，请管理员检查并保留 PRE_RESTORE 安全备份",
+            safety_backup=safety_backup,
+        ) from error
 
     restored = _metadata(path, payload)
     return {
