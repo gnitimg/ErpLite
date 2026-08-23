@@ -41,7 +41,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 21
+BACKUP_SCHEMA_VERSION = 22
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -335,6 +335,11 @@ def _load_archive(path: Path) -> dict[str, Any]:
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     if schema_version <= 20:
         tables.setdefault("customer_credits", [])
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 21:
+        for row in tables.get("order_returns", []):
+            row.setdefault("refund_unit_price_snapshot", None)
+            row.setdefault("return_unit_cost_snapshot", None)
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

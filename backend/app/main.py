@@ -2221,11 +2221,11 @@ def _receivable_credit_offset(db: Session, receivable_id: int) -> float:
     return round(float(total or 0), 2)
 
 
-def _order_item_weighted_sale_price(db: Session, order_item: SalesOrderItem) -> float:
-    """退款计价：对该订单行所有未冲销 ORIGINAL 出库分配的实际成交价做加权平均。
+def _order_item_refund_unit_price(db: Session, order_item: SalesOrderItem) -> float:
+    """退款单价：剩余未退款 ORIGINAL 销售价值池 ÷ 剩余未退款数量。
 
-    不使用订单模板 unit_price（可能被 price_overrides 覆盖），也不使用全局最近出库。
-    没有任何出库分配时退回订单行 unit_price。
+    每次退货从尚未退款的出库价值池中消费，已退部分通过
+    OrderReturn.refund_unit_price_snapshot 锁定，后续出库不能改写历史。
     """
     rows = db.execute(
         select(
@@ -2245,19 +2245,27 @@ def _order_item_weighted_sale_price(db: Session, order_item: SalesOrderItem) -> 
         if qty and price is not None:
             total_qty += qty
             total_value += float(qty) * float(price)
+    prior_returns = db.execute(
+        select(OrderReturn.quantity, OrderReturn.refund_unit_price_snapshot).where(
+            OrderReturn.order_item_id == order_item.id,
+            OrderReturn.resolution == "REFUND",
+        )
+    ).all()
+    for qty, snapshot in prior_returns:
+        if qty and snapshot is not None:
+            total_qty -= qty
+            total_value -= float(qty) * float(snapshot)
     if total_qty > 0:
         return round(total_value / total_qty, 2)
     return float(order_item.unit_price)
 
 
-def _order_item_sale_return_unit_cost(db: Session, order_item: SalesOrderItem) -> float:
-    """退货回库成本：该订单行所有未冲销物理 SALE_OUT（ORIGINAL + REPLACEMENT）
-    的数量加权平均 unit_cost。
+def _order_item_return_unit_cost(db: Session, order_item: SalesOrderItem) -> float:
+    """退货回库成本：剩余未退物理出库价值池 ÷ 剩余未退数量。
 
-    对于无 Lot/序列号追踪的系统，加权平均比伪 LIFO 更稳：
-    多次不同成本出库后全部退回，总价值守恒。
-    退款价格仍然只使用 ORIGINAL 实际销售价格（见 _order_item_weighted_sale_price）。
-    没有匹配的出库时退回当前 product.cost_price。
+    包含 ORIGINAL + REPLACEMENT 所有物理出库。
+    每次退货（无论 REFUND/REPLACE、restock true/false）都从池中消费，
+    通过 OrderReturn.return_unit_cost_snapshot 锁定，后续出库不能改写历史。
     """
     rows = db.execute(
         select(
@@ -2284,6 +2292,15 @@ def _order_item_sale_return_unit_cost(db: Session, order_item: SalesOrderItem) -
         if qty and unit_cost is not None:
             total_qty += qty
             total_value += float(qty) * float(unit_cost)
+    prior_returns = db.execute(
+        select(OrderReturn.quantity, OrderReturn.return_unit_cost_snapshot).where(
+            OrderReturn.order_item_id == order_item.id,
+        )
+    ).all()
+    for qty, snapshot in prior_returns:
+        if qty and snapshot is not None:
+            total_qty -= qty
+            total_value -= float(qty) * float(snapshot)
     if total_qty > 0:
         return round(total_value / total_qty, 2)
     return float(order_item.product.cost_price)
@@ -2404,7 +2421,9 @@ def create_order_return(
         raise HTTPException(400, "退货明细不属于该客单")
     return_no = serial("RT")
     occurred_at = datetime.combine(payload.occurred_date, time.min)
-    restock_changes = []
+    # 5.7：在创建 OrderReturn 之前，按剩余池计算本次退货的单价/成本快照。
+    # 已退部分通过 prior OrderReturn snapshots 扣除，后续出库不能改写本次快照。
+    line_snapshots: dict[int, tuple[float, float]] = {}
     for requested in payload.items:
         line = line_by_id[requested.order_item_id]
         returnable = max(
@@ -2418,13 +2437,17 @@ def create_order_return(
                 409,
                 f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
             )
-        # restock 语义对所有 resolution 一致：勾选回库就生成退货入库（退款或换货皆可）。
-        # 回库成本用该订单行最近一次有效 ORIGINAL SALE_OUT 的快照，而不是全局最近出库。
+        refund_price = _order_item_refund_unit_price(db, line)
+        return_cost = _order_item_return_unit_cost(db, line)
+        line_snapshots[requested.order_item_id] = (refund_price, return_cost)
+    restock_changes = []
+    for requested in payload.items:
+        line = line_by_id[requested.order_item_id]
         if requested.restock:
             restock_changes.append((
                 line.product,
                 requested.quantity,
-                _order_item_sale_return_unit_cost(db, line),
+                line_snapshots[requested.order_item_id][1],
             ))
     transaction = None
     if restock_changes:
@@ -2443,6 +2466,7 @@ def create_order_return(
         line.returned_quantity = int(line.returned_quantity or 0) + requested.quantity
         if payload.resolution == "REPLACE":
             line.replacement_pending_quantity = int(line.replacement_pending_quantity or 0) + requested.quantity
+        refund_price, return_cost = line_snapshots[requested.order_item_id]
         row = OrderReturn(
             return_no=return_no,
             order_id=order.id,
@@ -2454,6 +2478,8 @@ def create_order_return(
             transaction_id=transaction.id if requested.restock and transaction else None,
             notes=payload.notes.strip(),
             occurred_at=occurred_at,
+            refund_unit_price_snapshot=round(refund_price, 2),
+            return_unit_cost_snapshot=round(return_cost, 2),
         )
         db.add(row)
         created.append(row)
@@ -2466,11 +2492,10 @@ def create_order_return(
         # FULFILLED 不在预留状态集合里，不重开的话补发会被出库状态检查永久拒绝。
         order.status = "PARTIALLY_SHIPPED"
     if payload.resolution == "REFUND":
-        # 5E：REFUND 财务语义。退款的金额按实际出库成交价（OrderShipmentAllocation
-        # 的加权均价）计算，而不是订单模板 unit_price；REPLACE 不产生任何应收或贷项。
+        # 5E+5.7：退款金额用本次锁定的 refund_unit_price_snapshot，
+        # 而非 lifetime weighted average；REPLACE 不产生任何应收或贷项。
         refund_amount = round(sum(
-            _order_item_weighted_sale_price(db, line_by_id[requested.order_item_id])
-            * requested.quantity
+            line_snapshots[requested.order_item_id][0] * requested.quantity
             for requested in payload.items
         ), 2)
         if refund_amount > 0:

@@ -144,6 +144,13 @@ class OrderReturn(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # 5.7：退货发生时锁定的单价/成本快照，后续出库不能改写历史退货价值。
+    refund_unit_price_snapshot: Mapped[float | None] = mapped_column(
+        Numeric(18, 2, asdecimal=False), nullable=True, server_default=None
+    )
+    return_unit_cost_snapshot: Mapped[float | None] = mapped_column(
+        Numeric(18, 2, asdecimal=False), nullable=True, server_default=None
+    )
 
     order: Mapped[SalesOrder] = relationship()
     order_item: Mapped[SalesOrderItem] = relationship()
