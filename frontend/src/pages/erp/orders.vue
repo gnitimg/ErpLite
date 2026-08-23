@@ -2,11 +2,14 @@
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { useRouter } from "vue-router"
+import { useUserStore } from "@/pinia/stores/user"
 import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
 const router = useRouter()
+const userStore = useUserStore()
+const isAdmin = computed(() => userStore.roles.includes("ADMIN"))
 
 const loading = ref(false)
 const saving = ref(false)
@@ -751,6 +754,19 @@ useLiveRefresh(async () => {
                 </el-table-column>
                 <el-table-column label="库存处理" width="120">
                   <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>
+                </el-table-column>
+                <el-table-column label="退款/换货" min-width="180">
+                  <template #default="{ row }">
+                    <span v-if="row.resolution === 'REPLACE'">换货补发</span>
+                    <span v-else-if="row.refund_unit_price_snapshot == null">—</span>
+                    <span v-else>{{ money(row.refund_unit_price_snapshot) }} / 件，合计 {{ money(row.refund_total) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column v-if="isAdmin" label="退货成本" min-width="180">
+                  <template #default="{ row }">
+                    <span v-if="row.return_unit_cost_snapshot == null">—</span>
+                    <span v-else>{{ money(row.return_unit_cost_snapshot) }} / 件，合计 {{ money(row.return_cost_total) }}</span>
+                  </template>
                 </el-table-column>
                 <el-table-column label="日期" width="120">
                   <template #default="{ row }">{{ formatDate(row.occurred_at) }}</template>

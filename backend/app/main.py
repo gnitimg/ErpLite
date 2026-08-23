@@ -266,16 +266,22 @@ async def broadcast_successful_writes(request: Request, call_next):
         status_code = response.status_code if response else 500
         try:
             with SessionLocal() as audit_db:
+                action = operation_action(request.url.path, request.method)
+                target = str(getattr(request.state, "audit_target", request.url.path))[:255]
                 audit_db.add(OperationLog(
                     username=authenticated_username(request),
-                    action=operation_action(request.url.path, request.method),
-                    target=str(getattr(request.state, "audit_target", request.url.path))[:255],
+                    action=action,
+                    target=target,
                     method=request.method,
                     path=request.url.path[:255],
                     ip_address=client_ip(request)[:64],
                     status="SUCCESS" if status_code < 400 else "FAILED",
                     detail=str(getattr(request.state, "audit_detail", f"HTTP {status_code}")),
-                    business_summary=str(getattr(request.state, "audit_summary", ""))[:500],
+                    business_summary=str(getattr(
+                        request.state,
+                        "audit_summary",
+                        f"{action}：{target}",
+                    ))[:500],
                 ))
                 audit_db.commit()
         except Exception as audit_error:
@@ -331,6 +337,10 @@ def operation_action(path: str, method: str) -> str:
     if path.startswith("/api/production/plan"):
         return "重算生产计划"
     if path.startswith("/api/production/runs"):
+        if path.endswith("/complete"):
+            return "生产完工"
+        if path.endswith("/status"):
+            return "生产开工/终止"
         if path.endswith("/schedule"):
             return "调整订单排产"
         return "更新生产批次"
@@ -340,8 +350,14 @@ def operation_action(path: str, method: str) -> str:
         return "修改打印设置"
     if path.startswith("/api/finance"):
         if path.endswith("/allocate"):
-            return "核销付款"
-        return "登记付款"
+            return "应收核销"
+        if path.endswith("/settle"):
+            return "客户退款登记"
+        if "/payments" in path:
+            return "收款创建"
+        return "财务操作"
+    if path.startswith("/api/stock/transactions") and path.endswith("/reverse"):
+        return "库存流水冲销"
     if path.startswith("/api/users"):
         return {"POST": "新建用户", "PUT": "编辑用户", "DELETE": "停用用户"}.get(method, "用户管理")
     if path.startswith("/api/backups"):
@@ -2188,6 +2204,16 @@ def order_availability(order_id: int, db: Session = Depends(get_db)):
 
 
 def order_return_dict(row: OrderReturn) -> dict:
+    refund_unit_price = (
+        float(row.refund_unit_price_snapshot)
+        if row.refund_unit_price_snapshot is not None
+        else None
+    )
+    return_unit_cost = (
+        float(row.return_unit_cost_snapshot)
+        if row.return_unit_cost_snapshot is not None
+        else None
+    )
     return {
         "id": row.id,
         "return_no": row.return_no,
@@ -2200,6 +2226,18 @@ def order_return_dict(row: OrderReturn) -> dict:
         "quantity": row.quantity,
         "restocked": row.restocked,
         "resolution": row.resolution or "REFUND",
+        "refund_unit_price_snapshot": refund_unit_price,
+        "refund_total": (
+            round(refund_unit_price * int(row.quantity), 2)
+            if refund_unit_price is not None
+            else None
+        ),
+        "return_unit_cost_snapshot": return_unit_cost,
+        "return_cost_total": (
+            round(return_unit_cost * int(row.quantity), 2)
+            if return_unit_cost is not None
+            else None
+        ),
         "transaction_id": row.transaction_id,
         "notes": row.notes,
         "occurred_at": row.occurred_at.isoformat(),
@@ -2840,7 +2878,11 @@ def _sale_out_reversal_deltas(db: Session, original: StockTransaction) -> dict[i
 
 
 @app.post("/api/stock/transactions/{transaction_id}/reverse", status_code=201)
-def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)):
+def reverse_stock_transaction(
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
     original = db.scalar(
         select(StockTransaction)
         .where(StockTransaction.id == transaction_id)
@@ -2971,6 +3013,13 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
         rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
+    state = getattr(request, "state", None) if request is not None else None
+    if state is not None:
+        state.audit_target = original.transaction_no
+        state.audit_summary = (
+            f"{original.transaction_type} 流水 {original.transaction_no} 已冲销，"
+            f"冲销流水 {reversal_tx.transaction_no}"
+        )
     return transaction_dict(reversal_tx)
 
 

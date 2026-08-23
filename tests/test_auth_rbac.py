@@ -222,6 +222,30 @@ def test_operator_write_allowed_and_audited_with_jwt_username(db):
         assert {log.username for log in logs} == {"op1"}
 
 
+def test_failed_write_is_audited_without_sensitive_request_data(db):
+    add_user(db, "viewer1", "VIEWER", password="viewer-secret-password")
+    token = login_token("viewer1", "viewer-secret-password")
+
+    response = client.post(
+        "/api/parts",
+        headers=auth(token),
+        json={"sku": "DENIED", "name": "不应创建", "password": "body-secret"},
+    )
+
+    assert response.status_code == 403
+    with db() as session:
+        log = session.scalar(select(OperationLog).where(
+            OperationLog.path == "/api/parts",
+            OperationLog.status == "FAILED",
+        ))
+        assert log is not None
+        assert log.username == "viewer1"
+        logged_text = f"{log.detail} {log.business_summary} {log.target}"
+        assert "viewer-secret-password" not in logged_text
+        assert "body-secret" not in logged_text
+        assert token not in logged_text
+
+
 def test_backup_endpoints_admin_only(db):
     add_user(db, "viewer1", "VIEWER")
     add_user(db, "op1", "OPERATOR")
