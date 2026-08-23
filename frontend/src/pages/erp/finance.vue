@@ -29,22 +29,46 @@ interface Payment {
   created_at: string
 }
 
+interface CustomerCredit {
+  id: number
+  credit_no: string
+  order_id: number | null
+  order_return_id: number | null
+  receivable_id: number | null
+  customer_name: string
+  amount: number
+  settled_amount: number
+  remaining_amount: number
+  kind: string
+  status: string
+  notes: string
+  created_at: string
+}
+
 const loading = ref(false)
 const tab = ref("receivables")
 const keyword = ref("")
 const receivableRows = ref<Receivable[]>([])
 const paymentRows = ref<Payment[]>([])
+const creditRows = ref<CustomerCredit[]>([])
 const paymentDialog = ref(false)
 const allocateDialog = ref(false)
+const settleDialog = ref(false)
 const paymentForm = reactive({ customer_name: "", amount: 0, payment_date: "", method: "TRANSFER", notes: "" })
 const allocateForm = reactive({ payment_id: 0, receivable_id: 0, amount: 0 })
+const settleForm = reactive({ credit_id: 0, settled_amount: 0, notes: "" })
 const availableReceivables = ref<Receivable[]>([])
 
 const statusLabels: Record<string, string> = { OPEN: "待核销", PARTIAL: "部分核销", SETTLED: "已结清", CANCELLED: "已取消" }
 const statusTypes: Record<string, string> = { OPEN: "primary", PARTIAL: "warning", SETTLED: "success", CANCELLED: "info" }
 const methodLabels: Record<string, string> = { TRANSFER: "银行转账", CASH: "现金", OTHER: "其他" }
+const kindLabels: Record<string, string> = { OFFSET_RECEIVABLE: "冲减应收", REFUND_DUE: "应退现金" }
 
-const rows = computed<(Receivable | Payment)[]>(() => (tab.value === "receivables" ? receivableRows.value : paymentRows.value))
+const rows = computed<(Receivable | Payment | CustomerCredit)[]>(() => {
+  if (tab.value === "receivables") return receivableRows.value
+  if (tab.value === "credits") return creditRows.value
+  return paymentRows.value
+})
 
 const filteredRows = computed(() => {
   const token = keyword.value.trim().toLowerCase()
@@ -54,6 +78,10 @@ const filteredRows = computed(() => {
       const r = row as Receivable
       return `${r.receivable_no} ${r.order_no} ${r.customer_name}`.toLowerCase().includes(token)
     }
+    if (tab.value === "credits") {
+      const c = row as CustomerCredit
+      return `${c.credit_no} ${c.customer_name}`.toLowerCase().includes(token)
+    }
     const p = row as Payment
     return `${p.payment_no} ${p.customer_name}`.toLowerCase().includes(token)
   })
@@ -62,16 +90,19 @@ const filteredRows = computed(() => {
 const openReceivables = computed(() => receivableRows.value.filter(r => r.status !== "CANCELLED"))
 const totalReceivable = computed(() => openReceivables.value.reduce((s, r) => s + (r.amount - (r.settled_amount || 0)), 0))
 const totalSettled = computed(() => openReceivables.value.reduce((s, r) => s + (r.settled_amount || 0), 0))
+const totalCreditDue = computed(() => creditRows.value.filter(c => c.status === "OPEN").reduce((s, c) => s + (c.amount - (c.settled_amount || 0)), 0))
 
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    const [receivables, payments] = await Promise.all([
+    const [receivables, payments, credits] = await Promise.all([
       api<Receivable[]>("/api/finance/receivables"),
-      api<Payment[]>("/api/finance/payments")
+      api<Payment[]>("/api/finance/payments"),
+      api<CustomerCredit[]>("/api/finance/credits")
     ])
     receivableRows.value = receivables
     paymentRows.value = payments
+    creditRows.value = credits
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
@@ -116,13 +147,34 @@ async function allocatePayment() {
   }
 }
 
+async function openSettleDialog(credit: CustomerCredit) {
+  settleForm.credit_id = credit.id
+  settleForm.settled_amount = credit.amount - (credit.settled_amount || 0)
+  settleForm.notes = ""
+  settleDialog.value = true
+}
+
+async function settleCredit() {
+  try {
+    await api(`/api/finance/credits/${settleForm.credit_id}/settle`, {
+      method: "POST",
+      body: JSON.stringify({ settled_amount: settleForm.settled_amount, notes: settleForm.notes })
+    })
+    ElMessage.success("退款登记完成")
+    settleDialog.value = false
+    await load()
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  }
+}
+
 onMounted(load)
 useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page">
-    <div class="metric-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+    <div class="metric-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
       <div class="metric-card">
         <div>
           <div class="metric-label">应收余额</div>
@@ -139,14 +191,23 @@ useLiveRefresh(() => load(true))
         </div>
         <div class="metric-icon"><el-icon><Wallet /></el-icon></div>
       </div>
+      <div class="metric-card">
+        <div>
+          <div class="metric-label">应退客户</div>
+          <div class="metric-value">{{ totalCreditDue.toFixed(2) }}</div>
+          <div class="metric-note">未结清客户贷项</div>
+        </div>
+        <div class="metric-icon"><el-icon><RefreshLeft /></el-icon></div>
+      </div>
     </div>
 
     <el-tabs v-model="tab" @tab-change="() => load()">
       <el-tab-pane label="应收账款" name="receivables" />
       <el-tab-pane label="收款记录" name="payments" />
+      <el-tab-pane label="客户贷项" name="credits" />
     </el-tabs>
 
-    <ListToolbar v-model="keyword" :placeholder="tab === 'receivables' ? '搜索应收编号、订单、客户' : '搜索收款编号、客户'" :loading="loading" @refresh="load">
+    <ListToolbar v-model="keyword" :placeholder="tab === 'receivables' ? '搜索应收编号、订单、客户' : tab === 'credits' ? '搜索贷项编号、客户' : '搜索收款编号、客户'" :loading="loading" @refresh="load">
       <el-button v-if="tab === 'payments'" type="primary" @click="paymentDialog = true">
         <el-icon><Plus /></el-icon>新建收款
       </el-button>
@@ -167,6 +228,28 @@ useLiveRefresh(() => load(true))
           </el-table-column>
           <el-table-column label="创建时间" width="170">
             <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+        </template>
+        <template v-else-if="tab === 'credits'">
+          <el-table-column label="贷项编号" prop="credit_no" width="160" />
+          <el-table-column label="客户" prop="customer_name" min-width="120" />
+          <el-table-column label="类型" width="100">
+            <template #default="{ row }">{{ kindLabels[row.kind] || row.kind }}</template>
+          </el-table-column>
+          <el-table-column label="金额" prop="amount" width="120" align="right" />
+          <el-table-column label="已处理" prop="settled_amount" width="120" align="right" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="(statusTypes[row.status] as any) || 'info'" size="small">{{ statusLabels[row.status] || row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{ row }">
+              <el-button v-if="row.status === 'OPEN'" link type="primary" @click="openSettleDialog(row as any)">登记退款</el-button>
+            </template>
           </el-table-column>
         </template>
         <template v-else>
@@ -219,6 +302,17 @@ useLiveRefresh(() => load(true))
       <template #footer>
         <el-button @click="allocateDialog = false">取消</el-button>
         <el-button type="primary" @click="allocatePayment">确认核销</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="settleDialog" title="登记客户退款" width="480px">
+      <el-form label-position="top">
+        <el-form-item label="退款金额"><el-input-number v-model="settleForm.settled_amount" :min="0" :precision="2" style="width:100%" /></el-form-item>
+        <el-form-item label="备注"><el-input v-model="settleForm.notes" type="textarea" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="settleDialog = false">取消</el-button>
+        <el-button type="primary" @click="settleCredit">确认登记</el-button>
       </template>
     </el-dialog>
   </div>

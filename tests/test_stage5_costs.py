@@ -23,6 +23,7 @@ from app.main import (
 from app.models import (
     ExternalProcessingBatch,
     InventoryItem,
+    Payment,
     ProductBomItem,
     ProductionRun,
     ProductionSetting,
@@ -357,3 +358,193 @@ def test_sale_return_uses_historical_outbound_cost():
         assert float(product.stock_qty) == 20
         # 20 件价值 = 10×9 + 10×5 = 140 → 均价 7
         assert float(part.cost_price if False else product.cost_price) == 7
+
+
+# ───────────────── 5D：财务核销完整性 ─────────────────
+
+def add_receivable(db, customer="客户甲", amount=1000, settled=0, status="OPEN"):
+    receivable = Receivable(
+        receivable_no="AR-1", order_id=None, customer_name=customer,
+        amount=amount, settled_amount=settled, status=status, notes="",
+    )
+    db.add(receivable)
+    db.flush()
+    return receivable
+
+
+def test_cancelled_receivable_cannot_be_allocated():
+    with database() as db:
+        payment = create_payment(PaymentPayload(customer_name="客户甲", amount=500, payment_date=date(2026, 8, 25)), db)
+        receivable = add_receivable(db, "客户甲", 1000)
+        receivable.status = "CANCELLED"
+        db.commit()
+        try:
+            allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=100), db)
+            raise AssertionError("CANCELLED 应收必须拒绝核销")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "取消" in error.detail
+
+
+def test_payment_customer_mismatch_rejected():
+    with database() as db:
+        payment = create_payment(PaymentPayload(customer_name="客户甲", amount=500, payment_date=date(2026, 8, 25)), db)
+        receivable = add_receivable(db, "客户乙", 1000)
+        try:
+            allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=100), db)
+            raise AssertionError("客户不匹配必须拒绝核销")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "不一致" in error.detail
+
+
+def test_partial_and_full_allocation_statuses():
+    with database() as db:
+        payment = create_payment(PaymentPayload(customer_name="客户甲", amount=1000, payment_date=date(2026, 8, 25)), db)
+        receivable = add_receivable(db, "客户甲", 1000)
+        allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=400), db)
+        db.refresh(receivable)
+        assert float(receivable.settled_amount) == 400
+        assert receivable.status == "PARTIAL"
+        allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=600), db)
+        db.refresh(receivable)
+        assert float(receivable.settled_amount) == 1000
+        assert receivable.status == "SETTLED"
+        payment_row = db.get(Payment, payment["id"])
+        assert float(payment_row.allocated_amount) == 1000
+
+
+# ───────────────── 5E：REFUND 的财务语义 ─────────────────
+
+def make_shipped_order(db, product, quantity=10, unit_price=10):
+    """出库一个订单，返回 (order, receivable)。"""
+    order = SalesOrder(
+        order_no="SO-RET", customer_name="客户", status="CONFIRMED",
+        order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+        total_amount=quantity * unit_price,
+    )
+    order.items = [SalesOrderItem(
+        product_id=product.id, quantity=quantity,
+        reference_price=unit_price, unit_price=unit_price,
+        line_total=quantity * unit_price,
+    )]
+    db.add(order)
+    db.flush()
+    rebalance_product_reservations(db, {product.id})
+    db.commit()
+    _ship_order(db, order.id, None)
+    receivable = db.scalar(
+        select(Receivable).where(Receivable.order_id == order.id)
+    )
+    return order, receivable
+
+
+def test_refund_before_payment_reduces_net_receivable():
+    """场景1：应收未收齐，退款冲减应收，原 amount 不变，留下贷项记录。"""
+    from app.main import create_order_return
+    from app.schemas import OrderReturnLinePayload, OrderReturnPayload
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        assert float(receivable.amount) == 100
+        assert float(receivable.settled_amount) == 0
+
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=2, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        db.refresh(receivable)
+        # 原 amount 不被篡改
+        assert float(receivable.amount) == 100
+        # settled_amount 只记实际收款，仍为 0
+        assert float(receivable.settled_amount) == 0
+        # 状态反映贷项冲减
+        assert receivable.status == "PARTIAL"
+
+        from app.models import CustomerCredit
+        credit = db.scalar(select(CustomerCredit).where(CustomerCredit.order_id == order.id))
+        assert credit is not None
+        assert credit.kind == "OFFSET_RECEIVABLE"
+        assert credit.status == "SETTLED"
+        assert float(credit.amount) == 20
+        assert float(credit.settled_amount) == 20
+        assert credit.receivable_id == receivable.id
+
+
+def test_refund_after_payment_creates_customer_credit():
+    """场景2：应收已收齐，退款形成 OPEN 客户贷项（应退现金）。"""
+    from app.main import create_order_return
+    from app.schemas import OrderReturnLinePayload, OrderReturnPayload
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        # 客户已付全款
+        payment = create_payment(
+            PaymentPayload(customer_name="客户", amount=100, payment_date=date(2026, 8, 24)),
+            db,
+        )
+        allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=100), db)
+        db.refresh(receivable)
+        assert receivable.status == "SETTLED"
+
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=2, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        from app.models import CustomerCredit
+        credit = db.scalar(select(CustomerCredit).where(CustomerCredit.order_id == order.id))
+        assert credit is not None
+        assert credit.kind == "REFUND_DUE"
+        assert credit.status == "OPEN"
+        assert float(credit.amount) == 20
+        assert float(credit.settled_amount) == 0
+        # 原应收不被篡改
+        db.refresh(receivable)
+        assert float(receivable.amount) == 100
+        assert float(receivable.settled_amount) == 100
+
+
+def test_replace_does_not_create_receivable_or_credit():
+    """REPLACE 不产生新应收，也不产生客户贷项。"""
+    from app.main import create_order_return
+    from app.schemas import OrderReturnLinePayload, OrderReturnPayload
+    from app.models import CustomerCredit
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        original_receivable_count = db.query(Receivable).count()
+
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=3, restock=True)],
+                resolution="REPLACE",
+            ),
+            db,
+        )
+        # 没有新应收
+        assert db.query(Receivable).count() == original_receivable_count
+        # 没有客户贷项
+        assert db.query(CustomerCredit).count() == 0
+        # 原应收不被篡改
+        db.refresh(receivable)
+        assert float(receivable.amount) == 100
+        assert float(receivable.settled_amount) == 0
+        assert receivable.status == "OPEN"

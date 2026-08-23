@@ -578,6 +578,49 @@ class PaymentAllocation(Base):
     )
 
 
+class CustomerCredit(Base):
+    """客户贷项 / 应退款。
+
+    退款退货（REFUND）产生：
+    - OFFSET_RECEIVABLE：应收尚未收齐，贷项直接冲减应收余额，status=SETTLED。
+    - REFUND_DUE：应收已收齐（或冲减后仍有剩余），剩余部分形成客户应退现金，
+      status=OPEN；管理员登记退款完成后置为 SETTLED。
+
+    换货退货（REPLACE）不产生任何贷项。
+    原应收 amount 永不修改，历史完整保留。
+    """
+
+    __tablename__ = "customer_credits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    credit_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sales_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    order_return_id: Mapped[int | None] = mapped_column(
+        ForeignKey("order_returns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    receivable_id: Mapped[int | None] = mapped_column(
+        ForeignKey("receivables.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    customer_name: Mapped[str] = mapped_column(String(120), index=True)
+    amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    settled_amount: Mapped[float] = mapped_column(Numeric(18, 2, asdecimal=False), default=0)
+    kind: Mapped[str] = mapped_column(
+        String(20), default="REFUND_DUE", server_default="REFUND_DUE", index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    order: Mapped[SalesOrder | None] = relationship()
+    order_return: Mapped[OrderReturn | None] = relationship()
+    receivable: Mapped[Receivable | None] = relationship()
+
+    __table_args__ = (Index("ix_credits_status_created", "status", "created_at"),)
+
+
 class User(Base):
     """系统用户，支持角色权限和密码验证。"""
 

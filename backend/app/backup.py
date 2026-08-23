@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .database import PROJECT_ROOT
 from .models import (
+    CustomerCredit,
     ExternalProcessingBatch,
     InventoryItem,
     Mold,
@@ -40,7 +41,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 20
+BACKUP_SCHEMA_VERSION = 21
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -65,10 +66,12 @@ BACKUP_TABLES = (
     Receivable.__table__,
     Payment.__table__,
     PaymentAllocation.__table__,
+    CustomerCredit.__table__,
     User.__table__,
     OperationLog.__table__,
 )
 DELETE_TABLES = (
+    CustomerCredit.__table__,
     PaymentAllocation.__table__,
     Payment.__table__,
     Receivable.__table__,
@@ -329,6 +332,9 @@ def _load_archive(path: Path) -> dict[str, Any]:
     if schema_version <= 19:
         for row in tables.get("external_processing_batches", []):
             row.setdefault("processing_cost", 0)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 20:
+        tables.setdefault("customer_credits", [])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

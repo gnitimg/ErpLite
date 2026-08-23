@@ -26,7 +26,7 @@ const products = ref<any[]>([])
 const keyword = ref("")
 const filters = reactive({ status: "", dateRange: [] as string[] })
 const today = () => new Date().toISOString().slice(0, 10)
-const returnForm = reactive({ occurred_date: today(), notes: "", items: [] as any[] })
+const returnForm = reactive({ occurred_date: today(), notes: "", resolution: "REFUND", items: [] as any[] })
 function emptyOrderForm() {
   return {
     customer_name: "",
@@ -135,6 +135,7 @@ async function openWorkflow(row: any) {
     returnHistory.value = history
     returnForm.occurred_date = today()
     returnForm.notes = ""
+    returnForm.resolution = "REFUND"
     returnForm.items = row.items.map((line: any) => ({
       order_item_id: line.id,
       product_name: line.product_name,
@@ -165,9 +166,9 @@ async function submitReturn() {
   try {
     await api(`/api/orders/${activeOrder.value.id}/returns`, {
       method: "POST",
-      body: JSON.stringify({ items, occurred_date: returnForm.occurred_date, notes: returnForm.notes })
+      body: JSON.stringify({ items, occurred_date: returnForm.occurred_date, resolution: returnForm.resolution, notes: returnForm.notes })
     })
-    ElMessage.success("退货已登记；勾选入库的产品已生成退货入库单")
+    ElMessage.success(returnForm.resolution === "REFUND" ? "退款退货已登记" : "换货退货已登记")
     await load(true)
     const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
     if (refreshed) await openWorkflow(refreshed)
@@ -726,6 +727,10 @@ useLiveRefresh(async () => {
                 </el-table-column>
               </el-table>
               <div class="return-form-footer">
+                <el-select v-model="returnForm.resolution" style="width: 120px">
+                  <el-option label="退款退货" value="REFUND" />
+                  <el-option label="换货退货" value="REPLACE" />
+                </el-select>
                 <el-date-picker v-model="returnForm.occurred_date" type="date" value-format="YYYY-MM-DD" placeholder="退货日期" />
                 <el-input v-model="returnForm.notes" placeholder="退货原因或备注" clearable />
                 <el-button type="primary" :loading="returnSaving" @click="submitReturn">登记退货</el-button>
@@ -740,6 +745,9 @@ useLiveRefresh(async () => {
                 </el-table-column>
                 <el-table-column label="数量" width="110" align="right">
                   <template #default="{ row }">{{ productQty(row.quantity) }} {{ row.unit }}</template>
+                </el-table-column>
+                <el-table-column label="类型" width="100">
+                  <template #default="{ row }"><el-tag :type="row.resolution === 'REFUND' ? 'warning' : 'primary'" size="small">{{ row.resolution === 'REFUND' ? '退款' : '换货' }}</el-tag></template>
                 </el-table-column>
                 <el-table-column label="库存处理" width="120">
                   <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>

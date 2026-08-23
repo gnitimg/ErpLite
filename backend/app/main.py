@@ -24,6 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .backup import BackupError, create_backup_archive, list_backup_archives, resolve_backup_file, restore_backup_archive
 from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
+    CustomerCredit,
     ExternalProcessingBatch,
     InventoryItem,
     OperationLog,
@@ -49,6 +50,7 @@ from .models import (
 from .schemas import (
     BackupRestorePayload,
     CalendarExceptionPayload,
+    CreditSettlementPayload,
     ExternalProcessingReturnPayload,
     ExternalProcessingSendPayload,
     LoginPayload,
@@ -2200,6 +2202,81 @@ def order_returns(order_id: int, db: Session = Depends(get_db)):
     return [order_return_dict(row) for row in rows]
 
 
+def _receivable_credit_offset(db: Session, receivable_id: int) -> float:
+    """某应收已发生的退款贷项冲减总额（不含实际收款）。"""
+    rows = db.scalars(
+        select(CustomerCredit.amount, CustomerCredit.settled_amount).where(
+            CustomerCredit.receivable_id == receivable_id,
+            CustomerCredit.kind == "OFFSET_RECEIVABLE",
+        )
+    ).all()
+    return round(sum(float(amt) for amt, _ in rows), 2)
+
+
+def _receivable_net_remaining(receivable: Receivable, credit_offset: float) -> float:
+    return float(receivable.amount) - float(receivable.settled_amount or 0) - credit_offset
+
+
+def _receivable_status_from_net(receivable: Receivable, credit_offset: float) -> str:
+    net = _receivable_net_remaining(receivable, credit_offset)
+    if net <= 1e-9:
+        return "SETTLED"
+    if float(receivable.settled_amount or 0) > 0 or credit_offset > 0:
+        return "PARTIAL"
+    return "OPEN"
+
+
+def _apply_refund_credit(
+    db: Session,
+    order: SalesOrder,
+    order_return: OrderReturn,
+    refund_amount: float,
+    notes: str = "",
+) -> CustomerCredit:
+    """5E：REFUND 退款的财务语义。
+
+    settled_amount 只记实际收款，退款冲减单独存 CustomerCredit。
+    场景1（应收未收齐）：贷项冲减应收余额，原应收 amount 不变，
+    credit.kind=OFFSET_RECEIVABLE, status=SETTLED。
+    场景2（应收已收齐）：冲减后剩余部分形成客户应退现金，
+    credit.kind=REFUND_DUE, status=OPEN，管理员登记退款后置 SETTLED。
+    """
+    receivable = db.scalar(
+        select(Receivable)
+        .where(
+            Receivable.order_id == order.id,
+            Receivable.status != "CANCELLED",
+        )
+        .order_by(Receivable.id.desc())
+    )
+    offset = 0.0
+    if receivable:
+        existing_offset = _receivable_credit_offset(db, receivable.id)
+        receivable_remaining = _receivable_net_remaining(receivable, existing_offset)
+        offset = min(max(receivable_remaining, 0.0), refund_amount)
+        if offset > 0:
+            receivable.status = _receivable_status_from_net(
+                receivable, existing_offset + offset
+            )
+    refund_due = round(refund_amount - offset, 2)
+    kind = "REFUND_DUE" if refund_due > 1e-9 else "OFFSET_RECEIVABLE"
+    status = "OPEN" if refund_due > 1e-9 else "SETTLED"
+    credit = CustomerCredit(
+        credit_no=serial("CR"),
+        order_id=order.id,
+        order_return_id=order_return.id,
+        receivable_id=receivable.id if receivable and offset > 0 else None,
+        customer_name=order.customer_name,
+        amount=refund_amount,
+        settled_amount=round(offset, 2),
+        kind=kind,
+        status=status,
+        notes=notes,
+    )
+    db.add(credit)
+    return credit
+
+
 @app.post("/api/orders/{order_id}/returns", status_code=201)
 def create_order_return(
     order_id: int,
@@ -2273,6 +2350,22 @@ def create_order_return(
         # 已完结订单出现待补换货 → 重开为部分出库，让预留/排产重新接管；
         # FULFILLED 不在预留状态集合里，不重开的话补发会被出库状态检查永久拒绝。
         order.status = "PARTIALLY_SHIPPED"
+    if payload.resolution == "REFUND":
+        # 5E：REFUND 财务语义。退款的金额按订单行 unit_price 计算；
+        # REPLACE 不产生任何应收或贷项。
+        refund_amount = round(sum(
+            line_by_id[requested.order_item_id].unit_price * requested.quantity
+            for requested in payload.items
+        ), 2)
+        if refund_amount > 0:
+            db.flush()
+            _apply_refund_credit(
+                db,
+                order=order,
+                order_return=created[0],
+                refund_amount=refund_amount,
+                notes=payload.notes.strip(),
+            )
     if affected_products:
         rebalance_product_reservations(db, affected_products)
         recalculate_production_plan(db)
@@ -2801,7 +2894,14 @@ def list_receivables(
             Receivable.customer_name.ilike(token),
         ))
     rows = db.scalars(query.order_by(Receivable.created_at.desc())).all()
-    return [receivable_dict(row) for row in rows]
+    result = []
+    for row in rows:
+        offset = _receivable_credit_offset(db, row.id)
+        item = receivable_dict(row)
+        item["credit_offset_amount"] = offset
+        item["remaining_amount"] = round(float(row.amount) - float(row.settled_amount or 0) - offset, 2)
+        result.append(item)
+    return result
 
 
 def payment_dict(row: Payment) -> dict:
@@ -2874,41 +2974,126 @@ def allocate_payment(
     payload: PaymentAllocationPayload,
     db: Session = Depends(get_db),
 ):
-    payment = db.scalar(
+    # 固定顺序加行锁（MySQL；SQLite 忽略）：先 Payment 后 Receivable，
+    # 防止两个并发请求同时看到同一份余额而双双核销成功。
+    payment_query = (
         select(Payment)
         .where(Payment.id == payment_id)
         .options(selectinload(Payment.allocations))
     )
-    if not payment:
-        raise HTTPException(404, "付款记录不存在")
-    receivable = db.scalar(
+    receivable_query = (
         select(Receivable)
         .where(Receivable.id == payload.receivable_id)
         .options(selectinload(Receivable.allocations))
     )
+    if db.bind and db.bind.dialect.name != "sqlite":
+        payment_query = payment_query.with_for_update()
+        receivable_query = receivable_query.with_for_update()
+    payment = db.scalar(payment_query)
+    if not payment:
+        raise HTTPException(404, "付款记录不存在")
+    receivable = db.scalar(receivable_query)
     if not receivable:
         raise HTTPException(404, "应收记录不存在")
+    if receivable.status == "CANCELLED":
+        raise HTTPException(409, "已取消的应收不能核销")
+    if (payment.customer_name or "").strip() != (receivable.customer_name or "").strip():
+        raise HTTPException(
+            409,
+            f"收款客户 {payment.customer_name} 与应收客户 {receivable.customer_name} 不一致，不能核销",
+        )
     payment_remaining = float(payment.amount) - float(payment.allocated_amount or 0)
-    receivable_remaining = float(receivable.amount) - float(receivable.settled_amount or 0)
+    credit_offset = _receivable_credit_offset(db, receivable.id)
+    receivable_remaining = _receivable_net_remaining(receivable, credit_offset)
     if payload.amount > payment_remaining + 1e-9:
         raise HTTPException(409, f"付款剩余可分配 {payment_remaining:.2f}，不足以分配 {payload.amount:.2f}")
     if payload.amount > receivable_remaining + 1e-9:
         raise HTTPException(409, f"应收剩余可核销 {receivable_remaining:.2f}，不足以核销 {payload.amount:.2f}")
-    allocation = PaymentAllocation(
-        payment_id=payment.id,
-        receivable_id=receivable.id,
-        amount=round(payload.amount, 2),
+    # 同一 (payment, receivable) 只保留一行分配：多次核销累加到现有行，
+    # 否则撞唯一约束且审计口径破碎。
+    allocation = db.scalar(
+        select(PaymentAllocation).where(
+            PaymentAllocation.payment_id == payment.id,
+            PaymentAllocation.receivable_id == receivable.id,
+        )
     )
-    db.add(allocation)
+    if allocation is None:
+        allocation = PaymentAllocation(
+            payment_id=payment.id,
+            receivable_id=receivable.id,
+            amount=round(payload.amount, 2),
+        )
+        db.add(allocation)
+    else:
+        allocation.amount = round(float(allocation.amount) + float(payload.amount), 2)
     payment.allocated_amount = round(float(payment.allocated_amount or 0) + payload.amount, 2)
     receivable.settled_amount = round(float(receivable.settled_amount or 0) + payload.amount, 2)
-    if float(receivable.settled_amount) >= float(receivable.amount) - 1e-9:
-        receivable.status = "SETTLED"
-    elif float(receivable.settled_amount) > 0:
-        receivable.status = "PARTIAL"
+    receivable.status = _receivable_status_from_net(receivable, credit_offset)
     db.commit()
     db.refresh(payment)
     return payment_dict(payment)
+
+
+def customer_credit_dict(row: CustomerCredit) -> dict:
+    return {
+        "id": row.id,
+        "credit_no": row.credit_no,
+        "order_id": row.order_id,
+        "order_return_id": row.order_return_id,
+        "receivable_id": row.receivable_id,
+        "customer_name": row.customer_name,
+        "amount": float(row.amount),
+        "settled_amount": float(row.settled_amount or 0),
+        "remaining_amount": float(row.amount) - float(row.settled_amount or 0),
+        "kind": row.kind,
+        "status": row.status,
+        "notes": row.notes,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/finance/credits")
+def list_customer_credits(
+    status: str | None = None,
+    keyword: str = "",
+    db: Session = Depends(get_db),
+):
+    query = select(CustomerCredit)
+    if status and status.strip():
+        query = query.where(CustomerCredit.status == status.strip().upper())
+    if keyword.strip():
+        token = f"%{keyword.strip()}%"
+        query = query.where(or_(
+            CustomerCredit.credit_no.ilike(token),
+            CustomerCredit.customer_name.ilike(token),
+        ))
+    rows = db.scalars(query.order_by(CustomerCredit.created_at.desc())).all()
+    return [customer_credit_dict(row) for row in rows]
+
+
+@app.post("/api/finance/credits/{credit_id}/settle", status_code=200)
+def settle_customer_credit(
+    credit_id: int,
+    payload: CreditSettlementPayload,
+    db: Session = Depends(get_db),
+):
+    credit = db.scalar(select(CustomerCredit).where(CustomerCredit.id == credit_id))
+    if not credit:
+        raise HTTPException(404, "客户贷项不存在")
+    if credit.status == "SETTLED":
+        raise HTTPException(409, "该贷项已结清")
+    remaining = float(credit.amount) - float(credit.settled_amount or 0)
+    if payload.settled_amount > remaining + 1e-9:
+        raise HTTPException(409, f"贷项剩余 {remaining:.2f}，不足以登记 {payload.settled_amount:.2f}")
+    credit.settled_amount = round(float(credit.settled_amount or 0) + payload.settled_amount, 2)
+    if float(credit.settled_amount) >= float(credit.amount) - 1e-9:
+        credit.status = "SETTLED"
+    if payload.notes.strip():
+        credit.notes = (credit.notes + "\n" if credit.notes else "") + payload.notes.strip()
+    db.commit()
+    db.refresh(credit)
+    return customer_credit_dict(credit)
 
 
 @app.get("/api/users")

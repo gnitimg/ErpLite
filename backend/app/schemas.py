@@ -302,6 +302,11 @@ class PaymentAllocationPayload(BaseModel):
     amount: float = Field(gt=0)
 
 
+class CreditSettlementPayload(BaseModel):
+    settled_amount: float = Field(gt=0)
+    notes: str = Field(default="", max_length=500)
+
+
 class UserPayload(BaseModel):
     username: str = Field(min_length=1, max_length=60)
     password: str = Field(min_length=1, max_length=120)
