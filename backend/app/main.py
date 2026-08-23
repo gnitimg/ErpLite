@@ -82,6 +82,7 @@ from .schemas import (
     StockDocumentPayload,
     StockPayload,
     StockReconciliationPayload,
+    StocktakePayload,
     UserPayload,
     UserUpdatePayload,
 )
@@ -293,8 +294,8 @@ def operation_action(path: str, method: str) -> str:
         return "物料入库"
     if path == "/api/stock/outbound":
         return "物料出库"
-    if path == "/api/stock/reconcile":
-        return "库存对账"
+    if path in {"/api/stock/reconcile", "/api/stock/stocktake"}:
+        return "库存盘点"
     if path == "/api/stock/documents":
         return "出入库开单"
     if path.startswith("/api/orders"):
@@ -2973,11 +2974,7 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
     return transaction_dict(reversal_tx)
 
 
-@app.post("/api/stock/reconcile", status_code=201)
-def reconcile_stock(
-    payload: StockReconciliationPayload,
-    db: Session = Depends(get_db),
-):
+def _apply_stocktake(payload: StocktakePayload, db: Session) -> dict:
     item_ids = [line.item_id for line in payload.items]
     items = {
         item.id: item
@@ -2991,9 +2988,10 @@ def reconcile_stock(
         ).all()
     }
     if len(items) != len(item_ids):
-        raise HTTPException(404, "对账中有物料不存在或已停用")
+        raise HTTPException(404, "盘点中有物料不存在或已停用")
     discrepancies = []
-    adjustment_changes: list[tuple[InventoryItem, float, float]] = []
+    inbound_changes: list[tuple[InventoryItem, float, float]] = []
+    outbound_changes: list[tuple[InventoryItem, float, float]] = []
     for requested in payload.items:
         item = items[requested.item_id]
         system_qty = float(item.stock_qty)
@@ -3009,28 +3007,108 @@ def reconcile_stock(
                 "physical_quantity": physical_qty,
                 "difference": diff,
             })
-            adjustment_changes.append((item, diff, item.cost_price))
-    transaction = None
-    if adjustment_changes:
-        transaction = create_transaction(
+            target = inbound_changes if diff > 0 else outbound_changes
+            target.append((item, diff, item.cost_price))
+    transactions: list[StockTransaction] = []
+    if inbound_changes:
+        transactions.append(create_transaction(
             db,
             "MANUAL_IN",
-            adjustment_changes,
-            payload.notes or "库存对账调整",
+            inbound_changes,
+            payload.notes or "库存盘点盘盈调整",
             occurred_at=datetime.now(),
-        )
+        ))
+    if outbound_changes:
+        transactions.append(create_transaction(
+            db,
+            "MANUAL_OUT",
+            outbound_changes,
+            payload.notes or "库存盘点盘亏调整",
+            occurred_at=datetime.now(),
+        ))
     affected_products = {item_id for item_id in item_ids if items[item_id].kind == "PRODUCT"}
     if affected_products:
         rebalance_product_reservations(db, affected_products)
     recalculate_production_plan(db)
     db.commit()
+    transaction_rows = [
+        {
+            "id": transaction.id,
+            "transaction_no": transaction.transaction_no,
+            "transaction_type": transaction.transaction_type,
+        }
+        for transaction in transactions
+    ]
     return {
+        "stocktake_count": len(payload.items),
         "reconciled_count": len(payload.items),
         "discrepancy_count": len(discrepancies),
         "discrepancies": discrepancies,
-        "transaction_id": transaction.id if transaction else None,
-        "transaction_no": transaction.transaction_no if transaction else None,
+        "transactions": transaction_rows,
+        # 兼容旧客户端：混合盘盈盘亏时仅指向第一张调整单。
+        "transaction_id": transactions[0].id if transactions else None,
+        "transaction_no": transactions[0].transaction_no if transactions else None,
     }
+
+
+@app.post("/api/stock/stocktake", status_code=201)
+def stocktake(payload: StocktakePayload, db: Session = Depends(get_db)):
+    return _apply_stocktake(payload, db)
+
+
+@app.post("/api/stock/reconcile", status_code=201, deprecated=True)
+def reconcile_stock(payload: StockReconciliationPayload, db: Session = Depends(get_db)):
+    """Deprecated compatibility endpoint; use /api/stock/stocktake."""
+    return _apply_stocktake(payload, db)
+
+
+@app.get("/api/stock/audit")
+def audit_primary_stock(db: Session = Depends(get_db)):
+    """Compare stored primary stock with the immutable historical ledger."""
+    items = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.active.is_(True),
+            InventoryItem.kind.in_(("PART", "PRODUCT")),
+        )
+        .order_by(InventoryItem.sku, InventoryItem.id)
+    ).all()
+    ledger_rows = db.execute(
+        select(
+            StockTransactionItem.item_id,
+            func.coalesce(func.sum(StockTransactionItem.quantity_change), 0),
+            func.count(StockTransactionItem.id),
+        )
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .where(
+            StockTransactionItem.affects_primary_stock.is_(True),
+            # Historical-sum rule: a REVERSED original and its POSTED REVERSAL
+            # both participate, so their deltas cancel exactly once.
+            StockTransaction.status.in_(("POSTED", "REVERSED")),
+        )
+        .group_by(StockTransactionItem.item_id)
+    ).all()
+    ledger_by_item = {
+        item_id: (float(quantity or 0), int(line_count or 0))
+        for item_id, quantity, line_count in ledger_rows
+    }
+    result = []
+    for item in items:
+        stored_stock = float(item.stock_qty or 0)
+        ledger_stock, line_count = ledger_by_item.get(item.id, (stored_stock, 0))
+        difference = round(stored_stock - ledger_stock, 6)
+        result.append({
+            "item_id": item.id,
+            "sku": item.sku,
+            "name": item.name,
+            "kind": item.kind,
+            "stored_stock": stored_stock,
+            "ledger_stock": round(ledger_stock, 6),
+            "difference": difference,
+            "ok": abs(difference) <= 1e-9,
+            "audit_note": "无历史流水，使用当前库存作为基准" if line_count == 0 else None,
+        })
+    return result
 
 
 @app.get("/api/backups")

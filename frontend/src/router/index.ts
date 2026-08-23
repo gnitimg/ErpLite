@@ -140,7 +140,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "reconciliation",
         component: () => import("@/pages/erp/stock-reconciliation.vue"),
         name: "StockReconciliation",
-        meta: { title: "库存对账", elIcon: "Histogram", keepAlive: true }
+        meta: { title: "库存盘点与对账", elIcon: "Histogram", keepAlive: true }
       },
       {
         path: "inventory",

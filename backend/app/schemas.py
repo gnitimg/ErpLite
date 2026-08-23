@@ -329,19 +329,24 @@ class UserUpdatePayload(BaseModel):
     password: str | None = Field(default=None, min_length=1, max_length=120)
 
 
-class StockReconciliationLinePayload(BaseModel):
+class StocktakeLinePayload(BaseModel):
     item_id: int
     physical_count: float = Field(ge=0)
 
 
-class StockReconciliationPayload(BaseModel):
-    items: list[StockReconciliationLinePayload] = Field(min_length=1)
+class StocktakePayload(BaseModel):
+    items: list[StocktakeLinePayload] = Field(min_length=1)
     notes: str = Field(default="", max_length=500)
 
     @field_validator("items")
     @classmethod
-    def unique_reconciliation_items(cls, value: list[StockReconciliationLinePayload]):
+    def unique_stocktake_items(cls, value: list[StocktakeLinePayload]):
         ids = [line.item_id for line in value]
         if len(ids) != len(set(ids)):
-            raise ValueError("对账中不能重复选择同一物料")
+            raise ValueError("盘点中不能重复选择同一物料")
         return value
+
+
+# 旧接口和已有集成继续可用；新代码应使用 Stocktake* 命名。
+StockReconciliationLinePayload = StocktakeLinePayload
+StockReconciliationPayload = StocktakePayload
