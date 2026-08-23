@@ -424,6 +424,23 @@ def find_item(db: Session, item_id: int, kind: str | None = None) -> InventoryIt
     return item
 
 
+def lock_active_item(db: Session, item_id: int, kind: str | None = None) -> InventoryItem:
+    """读取 InventoryItem 并在 MySQL 下加 FOR UPDATE 行锁，保证与 delete_part/delete_product 互斥。
+
+    所有会改变"能否停用"所依赖事实的写端（样品库存、采购预计、生产计划、BOM 依赖）
+    都应通过此函数获取物料，而非 find_item / db.get。
+    """
+    query = select(InventoryItem).where(InventoryItem.id == item_id)
+    if kind:
+        query = query.where(InventoryItem.kind == kind)
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    item = db.scalar(query)
+    if not item or not item.active or (kind and item.kind != kind):
+        raise HTTPException(404, "物料不存在")
+    return item
+
+
 def list_items(
     db: Session,
     kind: str,
@@ -659,12 +676,7 @@ def update_part(item_id: int, payload: PartPayload, db: Session = Depends(get_db
 
 @app.delete("/api/parts/{item_id}")
 def delete_part(item_id: int, db: Session = Depends(get_db)):
-    item_query = select(InventoryItem).where(InventoryItem.id == item_id, InventoryItem.kind == "PART")
-    if db.bind and db.bind.dialect.name != "sqlite":
-        item_query = item_query.with_for_update()
-    item = db.scalar(item_query)
-    if not item or not item.active:
-        raise HTTPException(404, "物料不存在")
+    item = lock_active_item(db, item_id, "PART")
     if db.scalar(select(ProductBomItem.id).where(ProductBomItem.part_id == item_id).limit(1)):
         raise HTTPException(409, "该零件已用于产品 BOM，不能停用")
     if float(item.stock_qty or 0) != 0:
@@ -707,7 +719,7 @@ def update_sample(
     payload: SamplePayload,
     db: Session = Depends(get_db),
 ):
-    product = find_item(db, item_id, "PRODUCT")
+    product = lock_active_item(db, item_id, "PRODUCT")
     stock_delta = payload.stock_qty - int(product.sample_stock_qty or 0)
     product.sample_stock_qty = payload.stock_qty
     if stock_delta:
@@ -753,15 +765,20 @@ def save_product(db: Session, payload: ProductPayload, product: InventoryItem | 
     part_ids = [line.part_id for line in payload.components]
     if product and product.id in part_ids:
         raise HTTPException(400, "BOM 中不能包含产品自身作为零件")
+    part_query = (
+        select(InventoryItem)
+        .where(
+            InventoryItem.id.in_(part_ids),
+            InventoryItem.kind == "PART",
+            InventoryItem.active.is_(True),
+        )
+        .order_by(InventoryItem.id)
+    )
+    if part_ids and db.bind and db.bind.dialect.name != "sqlite":
+        part_query = part_query.with_for_update()
     parts = {
         part.id: part
-        for part in db.scalars(
-            select(InventoryItem).where(
-                InventoryItem.id.in_(part_ids),
-                InventoryItem.kind == "PART",
-                InventoryItem.active.is_(True),
-            )
-        ).all()
+        for part in db.scalars(part_query).all()
     } if part_ids else {}
     if len(parts) != len(part_ids):
         raise HTTPException(400, "BOM 中包含无效零件")
@@ -814,12 +831,7 @@ def update_product(item_id: int, payload: ProductPayload, db: Session = Depends(
 
 @app.delete("/api/products/{item_id}")
 def delete_product(item_id: int, db: Session = Depends(get_db)):
-    product_query = select(InventoryItem).where(InventoryItem.id == item_id, InventoryItem.kind == "PRODUCT")
-    if db.bind and db.bind.dialect.name != "sqlite":
-        product_query = product_query.with_for_update()
-    product = db.scalar(product_query)
-    if not product or not product.active:
-        raise HTTPException(404, "物料不存在")
+    product = lock_active_item(db, item_id, "PRODUCT")
     if db.scalar(select(SalesOrderItem.id).where(SalesOrderItem.product_id == item_id).limit(1)):
         raise HTTPException(409, "该产品已有客单记录，不能停用")
     stock_fields = {
@@ -1003,9 +1015,7 @@ def create_manual_production_run(
     db: Session = Depends(get_db),
 ):
     """创建独立于客单缺口的补库存生产计划。"""
-    product = db.get(InventoryItem, payload.product_id)
-    if not product or product.kind != "PRODUCT" or not product.active:
-        raise HTTPException(404, "产品不存在")
+    product = lock_active_item(db, payload.product_id, "PRODUCT")
     daily_capacity = int(product.daily_capacity or 0)
     if daily_capacity <= 0:
         raise HTTPException(409, "该产品未配置单机日产能，请先在产品目录中设置")
@@ -1310,7 +1320,7 @@ def create_purchase_commitment(
     payload: PurchaseCommitmentPayload,
     db: Session = Depends(get_db),
 ):
-    part = find_item(db, payload.part_id, "PART")
+    part = lock_active_item(db, payload.part_id, "PART")
     commitment = PurchaseCommitment(
         part_id=part.id,
         quantity=payload.quantity,

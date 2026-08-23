@@ -1,5 +1,5 @@
 """停用守卫与对账并发安全测试。"""
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 import sys
 
@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
-from app.main import delete_part, delete_product, reconcile_stock, audit_primary_stock
+from app.main import (
+    delete_part, delete_product, reconcile_stock, audit_primary_stock,
+    update_sample, create_purchase_commitment, create_manual_production_run,
+    save_product,
+)
 from app.models import (
     ExternalProcessingBatch,
     InventoryItem,
@@ -21,7 +25,14 @@ from app.models import (
     StockTransaction,
     StockTransactionItem,
 )
-from app.schemas import StockReconciliationPayload
+from app.schemas import (
+    StockReconciliationPayload,
+    SamplePayload,
+    PurchaseCommitmentPayload,
+    ManualProductionRunPayload,
+    ProductPayload,
+    BomLinePayload,
+)
 from app.services import create_transaction
 
 
@@ -218,3 +229,71 @@ def test_create_transaction_rejects_inactive_item():
             create_transaction(db, "MANUAL_IN", [(part, 10, 5)], "测试停用物料入库")
         assert exc.value.status_code == 409
         assert "停用" in exc.value.detail
+
+
+# ───────────────── 写端统一锁：停用物料拒绝操作 ─────────────────
+
+def test_update_sample_rejects_inactive_product():
+    """停用产品的样品库存不能修改。"""
+    with database() as db:
+        product = make_product(db, "P01", stock=0)
+        product.sample_stock_qty = 0
+        product.active = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            update_sample(product.id, SamplePayload(stock_qty=10), db)
+        assert exc.value.status_code == 404
+
+
+def test_create_purchase_commitment_rejects_inactive_part():
+    """停用零件不能创建采购预计。"""
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        part.active = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            create_purchase_commitment(
+                PurchaseCommitmentPayload(
+                    part_id=part.id, quantity=50,
+                    expected_arrival_date=date(2026, 9, 1),
+                ),
+                db,
+            )
+        assert exc.value.status_code == 404
+
+
+def test_create_manual_production_run_rejects_inactive_product():
+    """停用产品不能创建手工生产计划。"""
+    with database() as db:
+        product = make_product(db, "P01", stock=0)
+        product.sample_stock_qty = 0
+        product.active = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            create_manual_production_run(
+                ManualProductionRunPayload(
+                    product_id=product.id, planned_quantity=100,
+                ),
+                db,
+            )
+        assert exc.value.status_code == 404
+
+
+def test_save_product_rejects_inactive_bom_part():
+    """BOM 中包含停用零件时不能保存产品。"""
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        part.active = False
+        product = make_product(db, "P01", stock=0)
+        product.sample_stock_qty = 0
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            save_product(
+                db,
+                ProductPayload(
+                    sku="P01", name="P01", daily_capacity=100,
+                    components=[BomLinePayload(part_id=part.id, quantity=1)],
+                ),
+                product,
+            )
+        assert exc.value.status_code == 400
