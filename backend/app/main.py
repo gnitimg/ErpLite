@@ -1481,10 +1481,12 @@ def send_external_processing(
     if not product.requires_external_processing or not product.external_process_name:
         raise HTTPException(409, "该产品未配置外协工序")
     occurred_at = datetime.combine(payload.occurred_date, time.min)
+    # 快照本批次送出时的半成品单位材料成本，回厂时直接使用，不受后续生产影响。
+    semi_unit_snapshot = latest_semi_finished_unit_cost(db, product.id, product.cost_price)
     outbound_tx = create_transaction(
         db,
         "PROCESS_OUT",
-        [(product, -payload.quantity, product.cost_price)],
+        [(product, -payload.quantity, semi_unit_snapshot)],
         payload.notes or f"{product.external_process_name}外协送出",
         occurred_at=occurred_at,
         counterparty_name=payload.supplier,
@@ -1544,8 +1546,14 @@ def return_external_processing(
     if payload.quantity > remaining:
         raise HTTPException(409, f"本批次最多还能回厂 {remaining} {batch.product.unit}")
     occurred_at = datetime.combine(payload.occurred_date, time.min)
-    # 回厂成品成本 = 半成品材料成本快照 + 本批次外协费用按比例分摊。
-    semi_unit_cost = latest_semi_finished_unit_cost(db, batch.product_id, batch.product.cost_price)
+    # 回厂成品成本 = 本批次送出时的半成品材料成本快照 + 本批次外协费用按比例分摊。
+    # 使用批次自己的 PROCESS_OUT line.unit_cost，而不是全局最近半成品入库成本。
+    outbound_line = db.scalar(
+        select(StockTransactionItem)
+        .where(StockTransactionItem.transaction_id == batch.outbound_transaction_id)
+        .limit(1)
+    )
+    semi_unit_cost = float(outbound_line.unit_cost) if outbound_line and outbound_line.unit_cost is not None else float(batch.product.cost_price)
     per_unit_processing = float(batch.processing_cost or 0) / max(int(batch.quantity), 1)
     return_unit_cost = round(semi_unit_cost + per_unit_processing, 2)
     inbound_tx = create_transaction(
@@ -2204,13 +2212,68 @@ def order_returns(order_id: int, db: Session = Depends(get_db)):
 
 def _receivable_credit_offset(db: Session, receivable_id: int) -> float:
     """某应收已发生的退款贷项冲减总额（不含实际收款）。"""
-    rows = db.scalars(
-        select(CustomerCredit.amount, CustomerCredit.settled_amount).where(
+    total = db.execute(
+        select(func.coalesce(func.sum(CustomerCredit.amount), 0)).where(
             CustomerCredit.receivable_id == receivable_id,
             CustomerCredit.kind == "OFFSET_RECEIVABLE",
         )
+    ).scalar()
+    return round(float(total or 0), 2)
+
+
+def _order_item_weighted_sale_price(db: Session, order_item: SalesOrderItem) -> float:
+    """退款计价：对该订单行所有未冲销 ORIGINAL 出库分配的实际成交价做加权平均。
+
+    不使用订单模板 unit_price（可能被 price_overrides 覆盖），也不使用全局最近出库。
+    没有任何出库分配时退回订单行 unit_price。
+    """
+    rows = db.execute(
+        select(
+            OrderShipmentAllocation.quantity,
+            OrderShipmentAllocation.unit_price_snapshot,
+        )
+        .join(StockTransaction, StockTransaction.id == OrderShipmentAllocation.stock_transaction_id)
+        .where(
+            OrderShipmentAllocation.order_item_id == order_item.id,
+            OrderShipmentAllocation.fulfillment_type == "ORIGINAL",
+            StockTransaction.status != "REVERSED",
+        )
     ).all()
-    return round(sum(float(amt) for amt, _ in rows), 2)
+    total_qty = 0
+    total_value = 0.0
+    for qty, price in rows:
+        if qty and price is not None:
+            total_qty += qty
+            total_value += float(qty) * float(price)
+    if total_qty > 0:
+        return round(total_value / total_qty, 2)
+    return float(order_item.unit_price)
+
+
+def _order_item_sale_return_unit_cost(db: Session, order_item: SalesOrderItem) -> float:
+    """退货回库成本：该订单行最近一次未冲销 ORIGINAL SALE_OUT 的库存成本快照。
+
+    不使用全局 product 最近一次出库（可能属于其他客户/订单）。
+    没有匹配的出库时退回当前 product.cost_price。
+    """
+    row = db.execute(
+        select(StockTransactionItem.unit_cost)
+        .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+        .join(
+            OrderShipmentAllocation,
+            OrderShipmentAllocation.stock_transaction_id == StockTransaction.id,
+        )
+        .where(
+            OrderShipmentAllocation.order_item_id == order_item.id,
+            OrderShipmentAllocation.fulfillment_type == "ORIGINAL",
+            StockTransaction.transaction_type == "SALE_OUT",
+            StockTransaction.status != "REVERSED",
+            StockTransactionItem.item_id == order_item.product_id,
+        )
+        .order_by(StockTransaction.id.desc())
+        .limit(1)
+    ).first()
+    return float(row[0]) if row and row[0] is not None else float(order_item.product.cost_price)
 
 
 def _receivable_net_remaining(receivable: Receivable, credit_offset: float) -> float:
@@ -2229,52 +2292,75 @@ def _receivable_status_from_net(receivable: Receivable, credit_offset: float) ->
 def _apply_refund_credit(
     db: Session,
     order: SalesOrder,
-    order_return: OrderReturn,
+    order_returns: list[OrderReturn],
     refund_amount: float,
     notes: str = "",
-) -> CustomerCredit:
+) -> list[CustomerCredit]:
     """5E：REFUND 退款的财务语义。
 
     settled_amount 只记实际收款，退款冲减单独存 CustomerCredit。
-    场景1（应收未收齐）：贷项冲减应收余额，原应收 amount 不变，
-    credit.kind=OFFSET_RECEIVABLE, status=SETTLED。
-    场景2（应收已收齐）：冲减后剩余部分形成客户应退现金，
-    credit.kind=REFUND_DUE, status=OPEN，管理员登记退款后置 SETTLED。
+    按订单所有非 CANCELLED 应收（id 升序）逐张冲减尚未收取的净余额；
+    每张被冲减的应收产生独立的 OFFSET_RECEIVABLE 贷项（status=SETTLED）。
+    全部应收冲完后仍有剩余 → 产生一条 REFUND_DUE 贷项（status=OPEN），
+    管理员登记退款后置 SETTLED。REPLACE 不产生任何贷项。
+    原应收 amount 永不修改。
     """
-    receivable = db.scalar(
+    receivable_query = (
         select(Receivable)
         .where(
             Receivable.order_id == order.id,
             Receivable.status != "CANCELLED",
         )
-        .order_by(Receivable.id.desc())
+        .order_by(Receivable.id.asc())
     )
-    offset = 0.0
-    if receivable:
+    if db.bind and db.bind.dialect.name != "sqlite":
+        receivable_query = receivable_query.with_for_update()
+    receivables = db.scalars(receivable_query).all()
+    credits: list[CustomerCredit] = []
+    remaining_refund = round(refund_amount, 2)
+    first_return_id = order_returns[0].id if order_returns else None
+    for receivable in receivables:
+        if remaining_refund <= 1e-9:
+            break
         existing_offset = _receivable_credit_offset(db, receivable.id)
-        receivable_remaining = _receivable_net_remaining(receivable, existing_offset)
-        offset = min(max(receivable_remaining, 0.0), refund_amount)
-        if offset > 0:
-            receivable.status = _receivable_status_from_net(
-                receivable, existing_offset + offset
-            )
-    refund_due = round(refund_amount - offset, 2)
-    kind = "REFUND_DUE" if refund_due > 1e-9 else "OFFSET_RECEIVABLE"
-    status = "OPEN" if refund_due > 1e-9 else "SETTLED"
-    credit = CustomerCredit(
-        credit_no=serial("CR"),
-        order_id=order.id,
-        order_return_id=order_return.id,
-        receivable_id=receivable.id if receivable and offset > 0 else None,
-        customer_name=order.customer_name,
-        amount=refund_amount,
-        settled_amount=round(offset, 2),
-        kind=kind,
-        status=status,
-        notes=notes,
-    )
-    db.add(credit)
-    return credit
+        net_remaining = _receivable_net_remaining(receivable, existing_offset)
+        if net_remaining <= 1e-9:
+            continue
+        offset = round(min(net_remaining, remaining_refund), 2)
+        if offset <= 0:
+            continue
+        receivable.status = _receivable_status_from_net(
+            receivable, existing_offset + offset
+        )
+        credits.append(CustomerCredit(
+            credit_no=serial("CR"),
+            order_id=order.id,
+            order_return_id=first_return_id,
+            receivable_id=receivable.id,
+            customer_name=order.customer_name,
+            amount=offset,
+            settled_amount=offset,
+            kind="OFFSET_RECEIVABLE",
+            status="SETTLED",
+            notes=notes,
+        ))
+        remaining_refund = round(remaining_refund - offset, 2)
+    if remaining_refund > 1e-9:
+        credits.append(CustomerCredit(
+            credit_no=serial("CR"),
+            order_id=order.id,
+            order_return_id=first_return_id,
+            receivable_id=None,
+            customer_name=order.customer_name,
+            amount=remaining_refund,
+            settled_amount=0,
+            kind="REFUND_DUE",
+            status="OPEN",
+            notes=notes,
+        ))
+    for credit in credits:
+        db.add(credit)
+    return credits
 
 
 @app.post("/api/orders/{order_id}/returns", status_code=201)
@@ -2304,12 +2390,12 @@ def create_order_return(
                 f"{line.product.name} 最多可退 {returnable} {line.product.unit}",
             )
         # restock 语义对所有 resolution 一致：勾选回库就生成退货入库（退款或换货皆可）。
-        # 回库成本用最近一次有效销售出库的快照，而不是退货时点的移动平均。
+        # 回库成本用该订单行最近一次有效 ORIGINAL SALE_OUT 的快照，而不是全局最近出库。
         if requested.restock:
             restock_changes.append((
                 line.product,
                 requested.quantity,
-                latest_sale_out_unit_cost(db, line.product_id, line.product.cost_price),
+                _order_item_sale_return_unit_cost(db, line),
             ))
     transaction = None
     if restock_changes:
@@ -2351,10 +2437,11 @@ def create_order_return(
         # FULFILLED 不在预留状态集合里，不重开的话补发会被出库状态检查永久拒绝。
         order.status = "PARTIALLY_SHIPPED"
     if payload.resolution == "REFUND":
-        # 5E：REFUND 财务语义。退款的金额按订单行 unit_price 计算；
-        # REPLACE 不产生任何应收或贷项。
+        # 5E：REFUND 财务语义。退款的金额按实际出库成交价（OrderShipmentAllocation
+        # 的加权均价）计算，而不是订单模板 unit_price；REPLACE 不产生任何应收或贷项。
         refund_amount = round(sum(
-            line_by_id[requested.order_item_id].unit_price * requested.quantity
+            _order_item_weighted_sale_price(db, line_by_id[requested.order_item_id])
+            * requested.quantity
             for requested in payload.items
         ), 2)
         if refund_amount > 0:
@@ -2362,7 +2449,7 @@ def create_order_return(
             _apply_refund_credit(
                 db,
                 order=order,
-                order_return=created[0],
+                order_returns=created,
                 refund_amount=refund_amount,
                 notes=payload.notes.strip(),
             )
@@ -2720,20 +2807,6 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
                     f"{line.sku_snapshot or line.item.sku} 该批入库库存已被后续业务消耗，不能直接冲销。",
                 )
     if original.transaction_type == "SALE_OUT":
-        receivable = db.scalar(
-            select(Receivable)
-            .where(Receivable.related_stock_transaction_id == original.id)
-        )
-        if receivable:
-            allocated = float(receivable.settled_amount or 0)
-            if allocated > 1e-9:
-                raise HTTPException(
-                    409,
-                    f"该出库已关联应收 {receivable.receivable_no}，已核销 {allocated:.2f}；"
-                    "请先处理财务核销再冲销库存",
-                )
-            receivable.status = "CANCELLED"
-            receivable.notes = (receivable.notes or "") + f"；因冲销 {original.transaction_no} 而取消"
         # 冲销守卫：恢复发货数量后，"客户已退数量"不能超过"累计发货"，
         # 否则说明这批货物已经发生退货，直接冲销会让退货账目悬空。
         for order_item_id, delta in _sale_out_reversal_deltas(db, original).items():
@@ -2748,6 +2821,31 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
                     f"{order_item.product.sku} 已发生退货 {int(order_item.returned_quantity or 0)} 件；"
                     "直接冲销会使已退数量超过累计发货，请先处理退货记录",
                 )
+        receivable = db.scalar(
+            select(Receivable)
+            .where(Receivable.related_stock_transaction_id == original.id)
+        )
+        if receivable:
+            allocated = float(receivable.settled_amount or 0)
+            if allocated > 1e-9:
+                raise HTTPException(
+                    409,
+                    f"该出库已关联应收 {receivable.receivable_no}，已核销 {allocated:.2f}；"
+                    "请先处理财务核销再冲销库存",
+                )
+            credit_count = db.scalar(
+                select(func.count(CustomerCredit.id)).where(
+                    CustomerCredit.receivable_id == receivable.id,
+                )
+            )
+            if credit_count and credit_count > 0:
+                raise HTTPException(
+                    409,
+                    f"该出库的应收 {receivable.receivable_no} 已关联客户贷项，"
+                    "请先处理退款贷项再冲销库存",
+                )
+            receivable.status = "CANCELLED"
+            receivable.notes = (receivable.notes or "") + f"；因冲销 {original.transaction_no} 而取消"
     changes = []
     for line in original.lines:
         changes.append((line.item, -line.quantity_change, line.unit_cost))
@@ -3076,9 +3174,14 @@ def list_customer_credits(
 def settle_customer_credit(
     credit_id: int,
     payload: CreditSettlementPayload,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    credit = db.scalar(select(CustomerCredit).where(CustomerCredit.id == credit_id))
+    require_admin(request)
+    credit_query = select(CustomerCredit).where(CustomerCredit.id == credit_id)
+    if db.bind and db.bind.dialect.name != "sqlite":
+        credit_query = credit_query.with_for_update()
+    credit = db.scalar(credit_query)
     if not credit:
         raise HTTPException(404, "客户贷项不存在")
     if credit.status == "SETTLED":

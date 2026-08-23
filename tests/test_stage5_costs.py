@@ -15,6 +15,7 @@ from app.main import (
     _ship_order,
     allocate_payment,
     complete_production_run,
+    create_order_return,
     create_payment,
     reverse_stock_transaction,
     send_external_processing,
@@ -35,6 +36,8 @@ from app.models import (
 )
 from app.schemas import (
     ExternalProcessingSendPayload,
+    OrderReturnLinePayload,
+    OrderReturnPayload,
     PaymentAllocationPayload,
     PaymentPayload,
     ProductionCompletionPayload,
@@ -74,12 +77,13 @@ def make_bom(db, product, part, quantity=1):
     db.flush()
 
 
-def make_run(db, product, quantity):
+def make_run(db, product, quantity, run_no="PR-TEST"):
     from app.models import ProductionMaterialReservation
-    db.add(ProductionSetting(id=1, line_count=1))
-    db.flush()
+    if not db.get(ProductionSetting, 1):
+        db.add(ProductionSetting(id=1, line_count=1))
+        db.flush()
     run = ProductionRun(
-        run_no="PR-TEST", product_id=product.id,
+        run_no=run_no, product_id=product.id,
         planned_quantity=quantity, produced_quantity=0,
         planned_start_at=NOW, planned_end_at=NOW,
         effective_daily_capacity=product.daily_capacity,
@@ -548,3 +552,300 @@ def test_replace_does_not_create_receivable_or_credit():
         assert float(receivable.amount) == 100
         assert float(receivable.settled_amount) == 0
         assert receivable.status == "OPEN"
+
+
+# ───────────────── 审计回归 ─────────────────
+
+def test_credit_offset_helper_does_not_crash():
+    """P0: _receivable_credit_offset 用 SUM 而非 scalars(tuple) 拆解。"""
+    from app.main import _receivable_credit_offset, list_receivables
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=2, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        # 直接调用 helper 不异常
+        offset = _receivable_credit_offset(db, receivable.id)
+        assert offset == 20
+        # list_receivables 端点也不异常
+        result = list_receivables(None, "", db)
+        assert len(result) == 1
+        assert result[0]["credit_offset_amount"] == 20
+        assert result[0]["remaining_amount"] == 80
+
+
+def test_partial_payment_plus_large_refund_splits_credits():
+    """P1: 已付40 + 退款80 → OFFSET 60 + REFUND_DUE 20，两条独立贷项。"""
+    from app.models import CustomerCredit
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        payment = create_payment(
+            PaymentPayload(customer_name="客户", amount=40, payment_date=date(2026, 8, 24)),
+            db,
+        )
+        allocate_payment(payment["id"], PaymentAllocationPayload(receivable_id=receivable.id, amount=40), db)
+        db.refresh(receivable)
+        assert float(receivable.settled_amount) == 40
+
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=8, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        credits = db.scalars(
+            select(CustomerCredit).where(CustomerCredit.order_id == order.id).order_by(CustomerCredit.id)
+        ).all()
+        assert len(credits) == 2
+        # 第一条：冲减剩余应收 60
+        assert credits[0].kind == "OFFSET_RECEIVABLE"
+        assert float(credits[0].amount) == 60
+        assert credits[0].status == "SETTLED"
+        assert credits[0].receivable_id == receivable.id
+        # 第二条：应退现金 20
+        assert credits[1].kind == "REFUND_DUE"
+        assert float(credits[1].amount) == 20
+        assert credits[1].status == "OPEN"
+        # 应收净余额 = 100 - 40 - 60 = 0
+        db.refresh(receivable)
+        from app.main import _receivable_credit_offset, _receivable_net_remaining
+        offset = _receivable_credit_offset(db, receivable.id)
+        net = _receivable_net_remaining(receivable, offset)
+        assert net == 0
+
+
+def test_multi_receivable_refund_processes_in_order():
+    """P1: 部分出库产生多张应收，退款按 id 升序逐张冲减。"""
+    from app.models import CustomerCredit
+    from app.main import _receivable_credit_offset, _receivable_net_remaining
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 100
+        product.cost_price = 5
+        db.flush()
+        # 第一次出库 40
+        order = SalesOrder(
+            order_no="SO-MULTI", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=1000,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=100,
+            reference_price=10, unit_price=10, line_total=1000,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 40})
+        _ship_order(db, order.id, {order.items[0].id: 60})
+        receivables = db.scalars(
+            select(Receivable).where(Receivable.order_id == order.id).order_by(Receivable.id)
+        ).all()
+        assert len(receivables) == 2
+        ar1, ar2 = receivables
+        assert float(ar1.amount) == 400
+        assert float(ar2.amount) == 600
+        # 退款 50 件 = 500 元，先冲 AR1 的 400，再冲 AR2 的 100
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=50, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        credits = db.scalars(
+            select(CustomerCredit).where(CustomerCredit.order_id == order.id).order_by(CustomerCredit.id)
+        ).all()
+        # AR1 全冲 400, AR2 冲 100
+        offset_credits = [c for c in credits if c.kind == "OFFSET_RECEIVABLE"]
+        assert len(offset_credits) == 2
+        assert float(offset_credits[0].amount) == 400
+        assert offset_credits[0].receivable_id == ar1.id
+        assert float(offset_credits[1].amount) == 100
+        assert offset_credits[1].receivable_id == ar2.id
+        # AR2 净余额 = 600 - 0 - 100 = 500
+        db.refresh(ar2)
+        offset2 = _receivable_credit_offset(db, ar2.id)
+        assert _receivable_net_remaining(ar2, offset2) == 500
+
+
+def test_refund_uses_shipment_allocation_price():
+    """P1: 退款金额用实际出库成交价（price_overrides），不是订单模板价。"""
+    from app.models import CustomerCredit
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order = SalesOrder(
+            order_no="SO-PVR", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=1000,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=100, unit_price=100, line_total=1000,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        # 出库时临时成交价 80
+        _ship_order(db, order.id, None, price_overrides={order.items[0].id: 80})
+        receivable = db.scalar(select(Receivable).where(Receivable.order_id == order.id))
+        assert float(receivable.amount) == 800  # 10 × 80
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=1, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        credit = db.scalar(select(CustomerCredit).where(CustomerCredit.order_id == order.id))
+        # 退款金额 = 1 × 80（实际成交价），不是 1 × 100（模板价）
+        assert float(credit.amount) == 80
+
+
+def test_sale_out_reversal_blocked_when_credit_exists():
+    """P1: 有 CustomerCredit 的 SALE_OUT 不能冲销，贷项不会悬空。"""
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order, receivable = make_shipped_order(db, product, quantity=10, unit_price=10)
+        # 退款 2 件不回库，产生 OFFSET 贷项
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=2, restock=False)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        shipment_tx_id = receivable.related_stock_transaction_id
+        try:
+            reverse_stock_transaction(shipment_tx_id, db)
+            raise AssertionError("有贷项的出库不应被冲销")
+        except HTTPException as error:
+            assert error.status_code == 409
+
+
+def test_external_cost_uses_batch_own_snapshot():
+    """P1: 外协回厂用批次送出时的半成品成本快照，不受后续生产影响。"""
+    with database() as db:
+        part = make_part(db, "X", stock=200, cost=5)
+        product = make_product(db)
+        product.requires_external_processing = True
+        product.external_process_name = "喷漆"
+        db.flush()
+        make_bom(db, product, part, quantity=1)
+        # 批次 A：50 件，单位材料成本 5
+        run_a = make_run(db, product, 50)
+        start_run(db, run_a)
+        complete_run(db, run_a, qualified=50)
+        batch_a = send_external_processing(
+            ExternalProcessingSendPayload(
+                product_id=product.id, quantity=50,
+                supplier="加工商", processing_cost=100,
+            ),
+            db,
+        )
+        # 之后生产批次 B：50 件，原料涨价到 8
+        inbound(db, part, 100, 8)
+        run_b = make_run(db, product, 50, run_no="PR-TEST-B")
+        start_run(db, run_b)
+        complete_run(db, run_b, qualified=50)
+        db.refresh(product)
+        # 批次 A 回厂：应按自己的快照 5，不是最新半成品 8
+        from app.main import return_external_processing
+        from app.schemas import ExternalProcessingReturnPayload
+        result = return_external_processing(
+            batch_a["id"],
+            ExternalProcessingReturnPayload(quantity=25),
+            db,
+        )
+        tx = db.get(StockTransaction, result["transaction_id"])
+        # 5 + 100/50 = 7，不是 8 + 2 = 10
+        assert float(tx.lines[0].unit_cost) == 7
+
+
+def test_sale_return_cost_scoped_to_order_item():
+    """P1: 退货回库成本按该订单行的出库快照，不是全局 product 最近出库。"""
+    from app.main import create_order_return
+    from app.schemas import OrderReturnLinePayload, OrderReturnPayload
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 20
+        product.cost_price = 5
+        db.flush()
+        # 客户 A 出库 10 件，成本 5
+        order_a = SalesOrder(
+            order_no="SO-A", customer_name="客户A", status="CONFIRMED",
+            order_date=date(2026, 8, 1), required_date=date(2026, 8, 5),
+            total_amount=100,
+        )
+        order_a.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order_a)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order_a.id, None)
+        db.refresh(product)
+        assert float(product.stock_qty) == 10
+        # 采购补库 10 件 @9，均价变高
+        inbound(db, product, 10, 9)
+        db.refresh(product)
+        # 客户 B 出库 10 件，成本 9
+        order_b = SalesOrder(
+            order_no="SO-B", customer_name="客户B", status="CONFIRMED",
+            order_date=date(2026, 8, 20), required_date=date(2026, 8, 25),
+            total_amount=100,
+        )
+        order_b.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order_b)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order_b.id, None)
+        db.refresh(product)
+        assert float(product.stock_qty) == 10
+        # 客户 A 退货 10 件：应按 A 出库时的成本 5，不是 B 的均价 7
+        create_order_return(
+            order_a.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order_a.items[0].id, quantity=10, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        return_line = db.scalar(
+            select(StockTransactionItem)
+            .join(StockTransaction, StockTransaction.id == StockTransactionItem.transaction_id)
+            .where(StockTransaction.transaction_type == "SALE_RETURN_IN")
+        )
+        assert float(return_line.unit_cost) == 5

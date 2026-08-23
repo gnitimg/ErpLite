@@ -12,6 +12,8 @@ interface Receivable {
   customer_name: string
   amount: number
   settled_amount: number
+  remaining_amount: number
+  credit_offset_amount: number
   status: string
   created_at: string
   related_stock_transaction_id: number | null
@@ -88,7 +90,7 @@ const filteredRows = computed(() => {
 })
 
 const openReceivables = computed(() => receivableRows.value.filter(r => r.status !== "CANCELLED"))
-const totalReceivable = computed(() => openReceivables.value.reduce((s, r) => s + (r.amount - (r.settled_amount || 0)), 0))
+const totalReceivable = computed(() => openReceivables.value.reduce((s, r) => s + (r.remaining_amount ?? (r.amount - (r.settled_amount || 0))), 0))
 const totalSettled = computed(() => openReceivables.value.reduce((s, r) => s + (r.settled_amount || 0), 0))
 const totalCreditDue = computed(() => creditRows.value.filter(c => c.status === "OPEN").reduce((s, c) => s + (c.amount - (c.settled_amount || 0)), 0))
 
@@ -130,7 +132,6 @@ async function openAllocateDialog(payment: Payment) {
   allocateForm.payment_id = payment.id
   allocateForm.receivable_id = 0
   allocateForm.amount = payment.amount - payment.allocated_amount
-  allocateDialog.value = true
 }
 
 async function allocatePayment() {
@@ -221,6 +222,12 @@ useLiveRefresh(() => load(true))
           <el-table-column label="客户" prop="customer_name" min-width="120" />
           <el-table-column label="应收金额" prop="amount" width="120" align="right" />
           <el-table-column label="已核销" prop="settled_amount" width="120" align="right" />
+          <el-table-column label="贷项冲减" width="120" align="right">
+            <template #default="{ row }">{{ (row.credit_offset_amount || 0).toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column label="剩余" width="120" align="right">
+            <template #default="{ row }">{{ (row.remaining_amount ?? (row.amount - row.settled_amount)).toFixed(2) }}</template>
+          </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="(statusTypes[row.status] as any) || 'info'" size="small">{{ statusLabels[row.status] || row.status }}</el-tag>
@@ -294,7 +301,7 @@ useLiveRefresh(() => load(true))
       <el-form label-position="top">
         <el-form-item label="选择应收">
           <el-select v-model="allocateForm.receivable_id" style="width:100%" placeholder="选择待核销应收">
-            <el-option v-for="r in availableReceivables" :key="r.id" :label="`${r.receivable_no} - ${r.customer_name} (余${(r.amount - r.settled_amount).toFixed(2)})`" :value="r.id" />
+            <el-option v-for="r in availableReceivables" :key="r.id" :label="`${r.receivable_no} - ${r.customer_name} (余${(r.remaining_amount ?? (r.amount - r.settled_amount)).toFixed(2)})`" :value="r.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="核销金额"><el-input-number v-model="allocateForm.amount" :min="0" :precision="2" style="width:100%" /></el-form-item>
