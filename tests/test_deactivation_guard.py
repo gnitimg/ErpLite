@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.database import Base
-from app.main import delete_part, delete_product, reconcile_stock
+from app.main import delete_part, delete_product, reconcile_stock, audit_primary_stock
 from app.models import (
     ExternalProcessingBatch,
     InventoryItem,
@@ -171,21 +171,50 @@ def test_product_deactivate_all_zero_ok():
         assert product.active is False
 
 
-# ───────────────── 对账含停用物料 ─────────────────
+# ───────────────── 盘点拒绝停用物料 ─────────────────
 
-def test_reconcile_inactive_item_allowed():
-    """停用物料仍可参与对账，不再被 active 过滤排除。"""
+def test_stocktake_inactive_item_rejected():
+    """停用物料不能参与盘点，防止主动制造幽灵库存。"""
     with database() as db:
         part = make_part(db, "X", stock=100)
         part.active = False
         db.commit()
-        result = reconcile_stock(
-            StockReconciliationPayload(
-                items=[{"item_id": part.id, "physical_count": 90}],
-                notes="测试停用物料对账",
-            ),
-            db,
-        )
-        assert result["reconciled_count"] == 1
-        assert result["discrepancy_count"] == 1
-        assert result["discrepancies"][0]["difference"] == -10
+        with pytest.raises(HTTPException) as exc:
+            reconcile_stock(
+                StockReconciliationPayload(
+                    items=[{"item_id": part.id, "physical_count": 90}],
+                    notes="测试停用物料盘点",
+                ),
+                db,
+            )
+        assert exc.value.status_code == 409
+        assert "停用" in exc.value.detail
+
+
+# ───────────────── audit 覆盖停用物料 ─────────────────
+
+def test_audit_returns_inactive_item():
+    """系统库存对账必须返回停用物料，用于发现历史幽灵库存。"""
+    with database() as db:
+        part = make_part(db, "X", stock=100)
+        part.active = False
+        db.commit()
+        result = audit_primary_stock(db)
+        matching = [row for row in result if row["item_id"] == part.id]
+        assert len(matching) == 1
+        assert matching[0]["active"] is False
+        assert matching[0]["stored_stock"] == 100.0
+
+
+# ───────────────── create_transaction 拒绝停用物料 ─────────────────
+
+def test_create_transaction_rejects_inactive_item():
+    """停用物料的库存操作必须被拒绝，防止并发竞态产生幽灵库存。"""
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        part.active = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            create_transaction(db, "MANUAL_IN", [(part, 10, 5)], "测试停用物料入库")
+        assert exc.value.status_code == 409
+        assert "停用" in exc.value.detail

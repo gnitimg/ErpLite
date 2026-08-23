@@ -17,3 +17,4 @@ backups/
 .DS_Store
 .codeartsdoer/
 .pytest_cache/
+.pytest_tmp/

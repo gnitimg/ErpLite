@@ -659,7 +659,12 @@ def update_part(item_id: int, payload: PartPayload, db: Session = Depends(get_db
 
 @app.delete("/api/parts/{item_id}")
 def delete_part(item_id: int, db: Session = Depends(get_db)):
-    item = find_item(db, item_id, "PART")
+    item_query = select(InventoryItem).where(InventoryItem.id == item_id, InventoryItem.kind == "PART")
+    if db.bind and db.bind.dialect.name != "sqlite":
+        item_query = item_query.with_for_update()
+    item = db.scalar(item_query)
+    if not item or not item.active:
+        raise HTTPException(404, "物料不存在")
     if db.scalar(select(ProductBomItem.id).where(ProductBomItem.part_id == item_id).limit(1)):
         raise HTTPException(409, "该零件已用于产品 BOM，不能停用")
     if float(item.stock_qty or 0) != 0:
@@ -809,7 +814,12 @@ def update_product(item_id: int, payload: ProductPayload, db: Session = Depends(
 
 @app.delete("/api/products/{item_id}")
 def delete_product(item_id: int, db: Session = Depends(get_db)):
-    product = find_item(db, item_id, "PRODUCT")
+    product_query = select(InventoryItem).where(InventoryItem.id == item_id, InventoryItem.kind == "PRODUCT")
+    if db.bind and db.bind.dialect.name != "sqlite":
+        product_query = product_query.with_for_update()
+    product = db.scalar(product_query)
+    if not product or not product.active:
+        raise HTTPException(404, "物料不存在")
     if db.scalar(select(SalesOrderItem.id).where(SalesOrderItem.product_id == item_id).limit(1)):
         raise HTTPException(409, "该产品已有客单记录，不能停用")
     stock_fields = {
@@ -3080,6 +3090,9 @@ def _apply_stocktake(payload: StocktakePayload, db: Session) -> dict:
     }
     if len(items) != len(item_ids):
         raise HTTPException(404, "盘点中有物料不存在")
+    inactive = [item for item in items.values() if not item.active]
+    if inactive:
+        raise HTTPException(409, f"{inactive[0].sku} 已停用，不能盘点；请先在系统库存对账中处理或重新启用")
     discrepancies = []
     inbound_changes: list[tuple[InventoryItem, float, float]] = []
     outbound_changes: list[tuple[InventoryItem, float, float]] = []
@@ -3159,7 +3172,6 @@ def audit_primary_stock(db: Session = Depends(get_db)):
     items = db.scalars(
         select(InventoryItem)
         .where(
-            InventoryItem.active.is_(True),
             InventoryItem.kind.in_(("PART", "PRODUCT")),
         )
         .order_by(InventoryItem.sku, InventoryItem.id)
@@ -3194,6 +3206,7 @@ def audit_primary_stock(db: Session = Depends(get_db)):
             "sku": item.sku,
             "name": item.name,
             "kind": item.kind,
+            "active": bool(item.active),
             "stored_stock": stored_stock,
             "ledger_stock": round(ledger_stock, 6),
             "difference": difference,

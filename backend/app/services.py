@@ -327,6 +327,8 @@ def create_transaction(
         for item_id, entry in sorted(change_map.items())
     ]
     for item, delta, _unit_cost in normalized_changes:
+        if apply_inventory and not item.active:
+            raise HTTPException(409, f"{item.sku} 已停用，不能进行库存操作")
         if apply_inventory and item.stock_qty + delta < -1e-9:
             raise HTTPException(409, f"{item.name} 库存不足，当前 {item.stock_qty:g} {item.unit}")
 

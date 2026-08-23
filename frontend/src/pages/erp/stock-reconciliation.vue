@@ -20,6 +20,7 @@ interface AuditRow {
   sku: string
   name: string
   kind: "PART" | "PRODUCT"
+  active: boolean
   stored_stock: number
   ledger_stock: number
   difference: number
@@ -39,7 +40,7 @@ const onlyDifferences = ref(false)
 
 const token = computed(() => keyword.value.trim().toLowerCase())
 const filteredRows = computed(() => rows.value.filter(row =>
-  !token.value || `${row.sku} ${row.name} ${row.spec}`.toLowerCase().includes(token.value)
+  row.active && (!token.value || `${row.sku} ${row.name} ${row.spec}`.toLowerCase().includes(token.value))
 ))
 const filteredAuditRows = computed(() => auditRows.value.filter(row =>
   (!onlyDifferences.value || !row.ok)
@@ -171,6 +172,12 @@ useLiveRefresh(() => load(true))
           <el-table-column label="名称" prop="name" min-width="140" />
           <el-table-column label="类型" width="90">
             <template #default="{ row }">{{ row.kind === "PART" ? "零件" : "产品" }}</template>
+          </el-table-column>
+          <el-table-column label="启用" width="70" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="!row.active" type="info" size="small">停用</el-tag>
+              <span v-else>—</span>
+            </template>
           </el-table-column>
           <el-table-column label="系统库存" prop="stored_stock" width="110" align="right" />
           <el-table-column label="流水库存" prop="ledger_stock" width="110" align="right" />
