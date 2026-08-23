@@ -15,7 +15,28 @@ from app.database import Base
 from app.main import (
     delete_part, delete_product, reconcile_stock, audit_primary_stock,
     update_sample, create_purchase_commitment, create_manual_production_run,
-    save_product,
+    save_product, create_order, update_order, update_purchase_commitment_status,
+)
+from app.models import (
+    ExternalProcessingBatch,
+    InventoryItem,
+    ProductionRun,
+    PurchaseCommitment,
+    SalesOrder,
+    SalesOrderItem,
+    StockTransaction,
+    StockTransactionItem,
+)
+from app.schemas import (
+    StockReconciliationPayload,
+    SamplePayload,
+    PurchaseCommitmentPayload,
+    PurchaseCommitmentStatusPayload,
+    ManualProductionRunPayload,
+    ProductPayload,
+    BomLinePayload,
+    OrderPayload,
+    OrderLinePayload,
 )
 from app.models import (
     ExternalProcessingBatch,
@@ -297,3 +318,139 @@ def test_save_product_rejects_inactive_bom_part():
                 product,
             )
         assert exc.value.status_code == 400
+
+
+# ───────────────── 订单创建/编辑 × 产品停用 ─────────────────
+
+def test_create_order_rejects_inactive_product():
+    """停用产品不能出现在新订单中。"""
+    with database() as db:
+        product = make_product(db, "P01", stock=0)
+        product.sample_stock_qty = 0
+        product.active = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            create_order(
+                OrderPayload(
+                    customer_name="客户",
+                    items=[OrderLinePayload(product_id=product.id, quantity=10, unit_price=10)],
+                ),
+                db,
+            )
+        assert exc.value.status_code in (400, 404)
+
+
+def test_update_order_rejects_inactive_product():
+    """草稿订单换成停用产品应被拒绝。"""
+    with database() as db:
+        product = make_product(db, "P01", stock=0)
+        product.sample_stock_qty = 0
+        product.active = False
+        db.commit()
+        order = SalesOrder(
+            order_no="SO-1", customer_name="客户", status="DRAFT",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=0,
+        )
+        db.add(order)
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            update_order(
+                order.id,
+                OrderPayload(
+                    customer_name="客户",
+                    items=[OrderLinePayload(product_id=product.id, quantity=10, unit_price=10)],
+                ),
+                db,
+            )
+        assert exc.value.status_code in (400, 404)
+
+
+# ───────────────── PurchaseCommitment 状态机 ─────────────────
+
+def test_commitment_planned_to_arrived_ok():
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        db.commit()
+        commit = create_purchase_commitment(
+            PurchaseCommitmentPayload(
+                part_id=part.id, quantity=50,
+                expected_arrival_date=date(2026, 9, 1),
+            ),
+            db,
+        )
+        result = update_purchase_commitment_status(
+            commit["id"],
+            PurchaseCommitmentStatusPayload(status="ARRIVED"),
+            db,
+        )
+        assert result["status"] == "ARRIVED"
+
+
+def test_commitment_arrived_to_planned_rejected():
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        db.commit()
+        commit = create_purchase_commitment(
+            PurchaseCommitmentPayload(
+                part_id=part.id, quantity=50,
+                expected_arrival_date=date(2026, 9, 1),
+            ),
+            db,
+        )
+        update_purchase_commitment_status(
+            commit["id"],
+            PurchaseCommitmentStatusPayload(status="ARRIVED"),
+            db,
+        )
+        with pytest.raises(HTTPException) as exc:
+            update_purchase_commitment_status(
+                commit["id"],
+                PurchaseCommitmentStatusPayload(status="PLANNED"),
+                db,
+            )
+        assert exc.value.status_code == 409
+
+
+def test_commitment_planned_to_cancelled_ok():
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        db.commit()
+        commit = create_purchase_commitment(
+            PurchaseCommitmentPayload(
+                part_id=part.id, quantity=50,
+                expected_arrival_date=date(2026, 9, 1),
+            ),
+            db,
+        )
+        result = update_purchase_commitment_status(
+            commit["id"],
+            PurchaseCommitmentStatusPayload(status="CANCELLED"),
+            db,
+        )
+        assert result["status"] == "CANCELLED"
+
+
+def test_commitment_cancelled_to_planned_rejected():
+    with database() as db:
+        part = make_part(db, "X", stock=0)
+        db.commit()
+        commit = create_purchase_commitment(
+            PurchaseCommitmentPayload(
+                part_id=part.id, quantity=50,
+                expected_arrival_date=date(2026, 9, 1),
+            ),
+            db,
+        )
+        update_purchase_commitment_status(
+            commit["id"],
+            PurchaseCommitmentStatusPayload(status="CANCELLED"),
+            db,
+        )
+        with pytest.raises(HTTPException) as exc:
+            update_purchase_commitment_status(
+                commit["id"],
+                PurchaseCommitmentStatusPayload(status="PLANNED"),
+                db,
+            )
+        assert exc.value.status_code == 409

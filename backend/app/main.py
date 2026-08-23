@@ -441,6 +441,28 @@ def lock_active_item(db: Session, item_id: int, kind: str | None = None) -> Inve
     return item
 
 
+def lock_active_items(db: Session, item_ids: list[int], kind: str | None = None) -> dict[int, InventoryItem]:
+    """批量读取 InventoryItem 并在 MySQL 下按 id 排序加 FOR UPDATE，避免多请求并发死锁。
+
+    用于 create_order / update_order / save_product BOM 等需要同时锁多个物料的场景。
+    """
+    unique_ids = sorted(set(item_ids))
+    if not unique_ids:
+        return {}
+    query = select(InventoryItem).where(InventoryItem.id.in_(unique_ids))
+    if kind:
+        query = query.where(InventoryItem.kind == kind)
+    query = query.order_by(InventoryItem.id)
+    if db.bind and db.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    items = {item.id: item for item in db.scalars(query).all()}
+    if len(items) != len(unique_ids):
+        raise HTTPException(400, "物料不存在或已停用")
+    if any(not item.active for item in items.values()):
+        raise HTTPException(400, "物料不存在或已停用")
+    return items
+
+
 def list_items(
     db: Session,
     kind: str,
@@ -1351,8 +1373,16 @@ def update_purchase_commitment_status(
     )
     if not commitment:
         raise HTTPException(404, "采购到货记录不存在")
-    if commitment.status == "CANCELLED":
-        raise HTTPException(409, "已取消的记录不能再次修改")
+    VALID_TRANSITIONS = {
+        "PLANNED": {"ARRIVED", "CANCELLED"},
+    }
+    allowed = VALID_TRANSITIONS.get(commitment.status, set())
+    if payload.status not in allowed:
+        raise HTTPException(
+            409,
+            f"采购记录当前状态为 {commitment.status}，不能变更为 {payload.status}；"
+            "ARRIVED 和 CANCELLED 为终态",
+        )
     commitment.status = payload.status
     db.flush()
     recalculate_production_plan(db)
@@ -2167,18 +2197,7 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 @app.post("/api/orders", status_code=201)
 def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
     ids = [line.product_id for line in payload.items]
-    products = {
-        item.id: item
-        for item in db.scalars(
-            select(InventoryItem).where(
-                InventoryItem.id.in_(ids),
-                InventoryItem.kind == "PRODUCT",
-                InventoryItem.active.is_(True),
-            )
-        ).all()
-    }
-    if len(products) != len(ids):
-        raise HTTPException(400, "客单中包含无效产品")
+    products = lock_active_items(db, ids, "PRODUCT")
     order = SalesOrder(
         order_no=serial("SO"), customer_name=payload.customer_name, customer_phone=payload.customer_phone,
         customer_address=payload.customer_address, order_date=payload.order_date,
@@ -2208,16 +2227,7 @@ def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿订单可以编辑")
     product_ids = [line.product_id for line in payload.items]
-    products = {
-        item.id: item
-        for item in db.scalars(select(InventoryItem).where(
-            InventoryItem.id.in_(product_ids),
-            InventoryItem.kind == "PRODUCT",
-            InventoryItem.active.is_(True),
-        )).all()
-    }
-    if len(products) != len(product_ids):
-        raise HTTPException(400, "客单中包含无效产品")
+    products = lock_active_items(db, product_ids, "PRODUCT")
     order.customer_name = payload.customer_name
     order.customer_phone = payload.customer_phone
     order.customer_address = payload.customer_address
