@@ -2861,9 +2861,27 @@ def reverse_stock_transaction(transaction_id: int, db: Session = Depends(get_db)
                     f"{line.sku_snapshot or line.item.sku} 该批入库库存已被后续业务消耗，不能直接冲销。",
                 )
     if original.transaction_type == "SALE_OUT":
-        # 冲销守卫：恢复发货数量后，"客户已退数量"不能超过"累计发货"，
+        # 5.7 守卫：该 SALE_OUT 涉及的订单行只要发生过任何退货，
+        # 退货快照（退款单价 / 回库成本）已锁定，冲销历史出库会破坏价值守恒。
+        # Full V1 采用最安全策略：有退货 → 一律禁止冲销该订单行的出库。
+        deltas = _sale_out_reversal_deltas(db, original)
+        for order_item_id in deltas:
+            has_return = db.scalar(
+                select(func.count(OrderReturn.id)).where(
+                    OrderReturn.order_item_id == order_item_id,
+                )
+            )
+            if has_return and has_return > 0:
+                order_item = db.get(SalesOrderItem, order_item_id)
+                raise HTTPException(
+                    409,
+                    f"{order_item.product.sku if order_item else '该产品'}"
+                    "该订单行已发生退货并锁定退款/成本快照，"
+                    "不能直接冲销历史销售出库。",
+                )
+        # 数量守卫：恢复发货数量后，"客户已退数量"不能超过"累计发货"，
         # 否则说明这批货物已经发生退货，直接冲销会让退货账目悬空。
-        for order_item_id, delta in _sale_out_reversal_deltas(db, original).items():
+        for order_item_id, delta in deltas.items():
             order_item = db.get(SalesOrderItem, order_item_id)
             if not order_item:
                 continue

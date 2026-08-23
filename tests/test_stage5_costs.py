@@ -3,6 +3,7 @@ from datetime import date, datetime
 from pathlib import Path
 import sys
 
+import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -1089,3 +1090,77 @@ def test_case4_restock_false_still_consumes_cost_pool():
         # 总成本 = 5×5 + 5×5 = 50 = 原出库 10×5
         total = sum(r.quantity * float(r.return_unit_cost_snapshot) for r in returns)
         assert total == 50
+
+
+# ───────────────── 5.7：SALE_OUT 冲销守卫 ─────────────────
+
+def test_reversal_blocked_after_return():
+    """订单行发生退货后，冲销该订单行的 SALE_OUT 应返回 409。"""
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order = SalesOrder(
+            order_no="SO-RV", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=100,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 10})
+        create_order_return(
+            order.id,
+            OrderReturnPayload(
+                items=[OrderReturnLinePayload(order_item_id=order.items[0].id, quantity=3, restock=True)],
+                resolution="REFUND",
+            ),
+            db,
+        )
+        sale_out = db.scalar(
+            select(StockTransaction).where(
+                StockTransaction.transaction_type == "SALE_OUT",
+                StockTransaction.related_order_id == order.id,
+            )
+        )
+        with pytest.raises(HTTPException) as exc:
+            reverse_stock_transaction(sale_out.id, db)
+        assert exc.value.status_code == 409
+        assert "退货" in exc.value.detail
+
+
+def test_reversal_allowed_without_return():
+    """没有退货时，SALE_OUT 冲销仍正常工作。"""
+    with database() as db:
+        product = make_product(db)
+        product.stock_qty = 10
+        product.cost_price = 5
+        db.flush()
+        order = SalesOrder(
+            order_no="SO-OK", customer_name="客户", status="CONFIRMED",
+            order_date=date(2026, 8, 22), required_date=date(2026, 8, 25),
+            total_amount=100,
+        )
+        order.items = [SalesOrderItem(
+            product_id=product.id, quantity=10,
+            reference_price=10, unit_price=10, line_total=100,
+        )]
+        db.add(order)
+        db.flush()
+        rebalance_product_reservations(db, {product.id})
+        db.commit()
+        _ship_order(db, order.id, {order.items[0].id: 10})
+        sale_out = db.scalar(
+            select(StockTransaction).where(
+                StockTransaction.transaction_type == "SALE_OUT",
+                StockTransaction.related_order_id == order.id,
+            )
+        )
+        result = reverse_stock_transaction(sale_out.id, db)
+        assert result["transaction_type"] == "REVERSAL"

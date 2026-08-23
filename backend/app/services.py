@@ -472,10 +472,11 @@ def latest_semi_finished_unit_cost(db: Session, product_id: int, fallback: float
 
 
 def latest_sale_out_unit_cost(db: Session, product_id: int, fallback: float) -> float:
-    """退货回库计价：最近一次有效销售出库的成本快照（发出时的库存成本）。
+    """[已弃用] 退货回库计价：最近一次有效销售出库的成本快照。
 
-    规则（第一版，明确可解释）：不指定出库批次时按最近一次未冲销 SALE_OUT
-    的行快照计价；没有历史出库时退回当前成本。禁止偷偷使用退货时点的移动平均。
+    被 main.py._order_item_return_unit_cost 取代：剩余物理出库价值池 ÷ 剩余数量，
+    含 ORIGINAL + REPLACEMENT，通过 OrderReturn.return_unit_cost_snapshot 锁定。
+    保留仅供历史参考。
     """
     row = db.execute(
         select(StockTransactionItem.unit_cost)

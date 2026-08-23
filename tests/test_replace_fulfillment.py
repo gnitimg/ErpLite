@@ -142,7 +142,7 @@ def test_replacement_end_to_end_closure():
 
 
 def test_reversal_of_replacement_shipment_restores_pending():
-    """冲销换货补发出库：恢复 replacement_pending，不动 shipped_quantity。"""
+    """冲销换货补发出库：订单行已退货，5.7 守卫禁止冲销。"""
     with database() as db:
         product = make_product(db, stock=100)
         order = make_order(db, product, 100)
@@ -163,17 +163,12 @@ def test_reversal_of_replacement_shipment_restores_pending():
         db.refresh(line)
         assert int(line.replacement_pending_quantity) == 0
 
-        reverse_stock_transaction(replacement["transaction_id"], db)
-        db.refresh(line); db.refresh(order)
-        assert int(line.replacement_pending_quantity) == 10
-        assert int(line.replacement_shipped_quantity) == 0
-        assert int(line.shipped_quantity) == 100
-        assert order.status == "PARTIALLY_SHIPPED"
-        # 库存随之恢复 10
-        assert float(product.stock_qty) == 10
-        # 换货出库没有应收，冲销不应触碰应收
-        receivables = db.scalars(select(Receivable).where(Receivable.order_id == order.id)).all()
-        assert len(receivables) == 1 and receivables[0].status == "OPEN"
+        try:
+            reverse_stock_transaction(replacement["transaction_id"], db)
+            raise AssertionError("已退货的订单行应禁止冲销出库")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "退货" in error.detail
 
 
 def test_reversal_of_original_shipment_restores_shipped():
@@ -346,7 +341,7 @@ def test_sale_out_reversal_blocked_when_returns_exist():
 
 
 def test_sale_out_reversal_allowed_when_returns_still_covered():
-    """多张出库单场景：冲销后累计发货仍不低于已退数量时允许。"""
+    """多张出库单场景：5.7 守卫下，订单行已退货 → 一律禁止冲销。"""
     with database() as db:
         product = make_product(db, stock=100)
         order = make_order(db, product, 100)
@@ -363,11 +358,12 @@ def test_sale_out_reversal_allowed_when_returns_still_covered():
             ),
             db,
         )
-        reverse_stock_transaction(second["transaction_id"], db)
-        db.refresh(line)
-        assert int(line.shipped_quantity) == 60
-        assert int(line.returned_quantity) == 10
-        assert float(product.stock_qty) == 40
+        try:
+            reverse_stock_transaction(second["transaction_id"], db)
+            raise AssertionError("已退货的订单行应禁止冲销出库")
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert "退货" in error.detail
 
 
 def test_shipment_snapshot_amount_counts_original_only():

@@ -2,6 +2,12 @@
 
 Revision ID: 20260822_20
 Revises: 20260822_19
+
+NOTE: 退货价值快照（refund_unit_price_snapshot / return_unit_cost_snapshot）
+对于本迁移之前已存在的 OrderReturn 记录，字段值为 NULL。
+剩余池算法在计算时跳过 snapshot 为 NULL 的历史退货，不会扣除其消费的价值。
+因此：升级前产生的开发期退货记录不保证 remaining-pool 历史价值重建，
+正式上线前应使用干净业务库（从 migration head 全新建库）。
 """
 
 from alembic import op
