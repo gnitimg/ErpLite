@@ -686,6 +686,9 @@ def _recalculate_plan_impl(
             (allocation.sequence for allocation in run.allocations),
             default=0,
         ) + 1
+        allocations_by_item = {
+            allocation.order_item_id: allocation for allocation in run.allocations
+        }
         for line in prioritized_lines:
             if line.product_id != run.product_id or remaining_supply <= 0:
                 continue
@@ -697,17 +700,23 @@ def _recalculate_plan_impl(
             quantity = min(needed, remaining_supply)
             if quantity <= 0:
                 continue
-            allocation = ProductionAllocation(
-                production_run=run,
-                order_item_id=line.id,
-                quantity=quantity,
-                sequence=sequence,
-                estimated_completion_at=run.planned_end_at,
-            )
-            db.add(allocation)
+            allocation = allocations_by_item.get(line.id)
+            if allocation is None:
+                allocation = ProductionAllocation(
+                    production_run=run,
+                    order_item_id=line.id,
+                    quantity=quantity,
+                    sequence=sequence,
+                    estimated_completion_at=run.planned_end_at,
+                )
+                db.add(allocation)
+                allocations_by_item[line.id] = allocation
+                sequence += 1
+            else:
+                allocation.quantity = int(allocation.quantity) + quantity
+                allocation.estimated_completion_at = run.planned_end_at
             allocated_by_line[line.id] += quantity
             remaining_supply -= quantity
-            sequence += 1
     db.flush()
 
     running_allocated: dict[int, float] = defaultdict(float)

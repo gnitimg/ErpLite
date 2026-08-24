@@ -167,6 +167,32 @@ def test_running_run_free_supply_covers_new_demand():
         assert order_b.items[0].eta_reliable
 
 
+def test_fixed_run_reuses_existing_allocation_for_replacement_demand():
+    """同一固定批次和订单行已有分配时，新增换货需求必须累加而非插入重复键。"""
+    with database() as db:
+        add_setting(db, line_count=1)
+        product = make_product(db, "P-REPLACE")
+        order = add_order(db, "SO-REPLACE", [(product, 90)])
+        line = order.items[0]
+        line.shipped_quantity = 40
+        line.replacement_pending_quantity = 30
+        run = add_running_run(db, product, 100)
+        run.schedule_locked = True
+        allocate(db, run, order, 50)
+
+        recalculate_production_plan(db, NOW)
+        db.expire_all()
+
+        allocations = db.scalars(
+            select(ProductionAllocation).where(
+                ProductionAllocation.production_run_id == run.id,
+                ProductionAllocation.order_item_id == line.id,
+            )
+        ).all()
+        assert len(allocations) == 1
+        assert int(allocations[0].quantity) == 80
+
+
 def test_running_free_supply_partial_then_new_run_for_remainder():
     """CASE 3：RUNNING 空余 200，新需求 500 → 200 来自 RUNNING，只新排 300。"""
     with database() as db:
