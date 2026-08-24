@@ -368,10 +368,10 @@ class StockTransaction(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="POSTED", server_default="POSTED", index=True)
     reversal_of_transaction_id: Mapped[int | None] = mapped_column(
-        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True
     )
     reversed_by_transaction_id: Mapped[int | None] = mapped_column(
-        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("stock_transactions.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -386,6 +386,10 @@ class StockTransaction(Base):
         UniqueConstraint(
             "reversal_of_transaction_id",
             name="uq_stock_transactions_reversal_of",
+        ),
+        Index(
+            "ix_stock_transactions_reversed_by",
+            "reversed_by_transaction_id",
         ),
     )
 
