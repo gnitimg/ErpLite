@@ -53,7 +53,10 @@ def upgrade() -> None:
             sa.Column("customer_name", sa.String(length=120), nullable=False),
             sa.Column("amount", sa.Numeric(18, 2, asdecimal=False), nullable=False, server_default="0"),
             sa.Column("allocated_amount", sa.Numeric(18, 2, asdecimal=False), nullable=False, server_default="0"),
-            sa.Column("payment_date", sa.Date(), nullable=False, server_default=sa.func.current_date()),
+            # MySQL 8.4 rejects ``DEFAULT CURRENT_DATE`` for DATE on some
+            # existing-instance SQL modes, while the parenthesized expression
+            # is accepted consistently by MySQL and SQLite.
+            sa.Column("payment_date", sa.Date(), nullable=False, server_default=sa.text("(CURRENT_DATE)")),
             sa.Column("method", sa.String(length=20), nullable=False, server_default="TRANSFER"),
             sa.Column("notes", sa.Text(), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
