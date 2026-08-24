@@ -16,7 +16,15 @@ MYSQL_HOST = os.getenv("ERP_MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("ERP_MYSQL_PORT", "3306")
 MYSQL_DATABASE = os.getenv("ERP_MYSQL_DATABASE", "lite_erp")
 MYSQL_USER = quote_plus(os.getenv("ERP_MYSQL_USER", "lite_erp"))
-MYSQL_PASSWORD = quote_plus(os.getenv("ERP_MYSQL_PASSWORD", "LiteErp@2026!"))
+DEFAULT_MYSQL_PASSWORD = "LiteErp@2026!"
+MYSQL_PASSWORD_RAW = os.getenv("ERP_MYSQL_PASSWORD")
+if os.getenv("ERP_ENV", "dev").strip().lower() == "production" and (
+    not MYSQL_PASSWORD_RAW or MYSQL_PASSWORD_RAW == DEFAULT_MYSQL_PASSWORD
+):
+    raise RuntimeError(
+        "生产环境必须显式设置非默认值 ERP_MYSQL_PASSWORD"
+    )
+MYSQL_PASSWORD = quote_plus(MYSQL_PASSWORD_RAW or DEFAULT_MYSQL_PASSWORD)
 DATABASE_URL = os.getenv(
     "ERP_DATABASE_URL",
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4",

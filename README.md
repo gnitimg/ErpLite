@@ -69,7 +69,7 @@
 - 产品模具数、单机日产量、生产批次、生产分配和成品预留数量均使用整数；ETA 时间计算保留小数精度。
 - 数据结构升级改由 Alembic 执行；启动时自动升级到当前版本，`Base.metadata.create_all()` 不再承担已有数据库的字段变更。
 - 当前数据量面向单仓、小团队，列表默认采用受限查询；当物料或流水达到数十万行时，应再增加分页、组合索引与归档策略。
-- 当前金额字段沿用 `FLOAT`，适合现阶段报价和库存成本展示，但不是财务总账精度。若未来加入应收、发票或会计核算，应通过正式迁移改为 `DECIMAL(18, 2)`，不能宣称为财务级数据库。
+- 核心金额字段使用 `DECIMAL(18, 2)`（SQLAlchemy `Numeric(18, 2)`）。当前财务能力仍仅覆盖轻量应收、收款核销和客户贷项，不包含会计科目、凭证、总账、税务或完整财务结账，因此不能宣称为财务总账系统。
 
 ## 技术栈
 
@@ -80,7 +80,7 @@
 ## 运行与安全模式
 
 - 开发环境可使用 `ERP_ENV=dev`。未配置 `ERP_JWT_SECRET` 时后端会生成仅当前进程有效的随机密钥，进程重启后现有令牌全部失效。
-- 生产环境必须设置 `ERP_ENV=production` 和高强度随机 `ERP_JWT_SECRET`；缺少密钥时服务拒绝启动。生产数据库使用 MySQL。
+- 生产环境必须设置 `ERP_ENV=production`、高强度随机 `ERP_JWT_SECRET`，并显式设置非默认值 `ERP_MYSQL_PASSWORD`；缺少这些凭据或仍使用开发默认数据库密码时服务拒绝启动。生产数据库使用 MySQL。
 - Break-glass emergency admin 默认关闭。仅在明确设置 `ERP_ENABLE_EMERGENCY_ADMIN=1` 及应急凭据时启用；建立正常 ADMIN 后应立即关闭，应急账号不能替代系统至少一个启用的正常管理员。
 - 部署或升级数据库使用 `alembic upgrade head`。正式发布前还应阅读 [Full V1 已知技术边界](docs/FULL_VERSION_KNOWN_LIMITATIONS.md) 与 [Stage 7 独立发布审计](docs/STAGE7_RELEASE_AUDIT.md)。
 
