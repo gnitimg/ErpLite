@@ -80,7 +80,8 @@
 ## 运行与安全模式
 
 - 开发环境可使用 `ERP_ENV=dev`。未配置 `ERP_JWT_SECRET` 时后端会生成仅当前进程有效的随机密钥，进程重启后现有令牌全部失效。
-- 生产环境必须设置 `ERP_ENV=production`、高强度随机 `ERP_JWT_SECRET`，并显式设置非默认值 `ERP_MYSQL_PASSWORD`；缺少这些凭据或仍使用开发默认数据库密码时服务拒绝启动。生产数据库使用 MySQL。
+- 外部生产环境必须设置 `ERP_ENV=production`、高强度随机 `ERP_JWT_SECRET`，并通过非默认 `ERP_MYSQL_PASSWORD` 或包含强密码的 `ERP_DATABASE_URL` 提供数据库凭据；缺失密码或外部数据库仍使用公开默认密码时服务拒绝启动。
+- `python run.py` 管理的 bundled MySQL 只监听 `127.0.0.1:3307`，其默认密码仅作为单机内部凭据使用；启动器会显式标记该环回模式。该密码不得用于远程 MySQL，bundled 标志也不会放行非本机地址。
 - Break-glass emergency admin 默认关闭。仅在明确设置 `ERP_ENABLE_EMERGENCY_ADMIN=1` 及应急凭据时启用；建立正常 ADMIN 后应立即关闭，应急账号不能替代系统至少一个启用的正常管理员。
 - 部署或升级数据库使用 `alembic upgrade head`。正式发布前还应阅读 [Full V1 已知技术边界](docs/FULL_VERSION_KNOWN_LIMITATIONS.md) 与 [Stage 7 独立发布审计](docs/STAGE7_RELEASE_AUDIT.md)。
 

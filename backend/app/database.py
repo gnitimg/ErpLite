@@ -6,29 +6,56 @@ from dotenv import load_dotenv
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
-MYSQL_HOST = os.getenv("ERP_MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("ERP_MYSQL_PORT", "3306")
-MYSQL_DATABASE = os.getenv("ERP_MYSQL_DATABASE", "lite_erp")
-MYSQL_USER = quote_plus(os.getenv("ERP_MYSQL_USER", "lite_erp"))
 DEFAULT_MYSQL_PASSWORD = "LiteErp@2026!"
-MYSQL_PASSWORD_RAW = os.getenv("ERP_MYSQL_PASSWORD")
-if os.getenv("ERP_ENV", "dev").strip().lower() == "production" and (
-    not MYSQL_PASSWORD_RAW or MYSQL_PASSWORD_RAW == DEFAULT_MYSQL_PASSWORD
-):
-    raise RuntimeError(
-        "生产环境必须显式设置非默认值 ERP_MYSQL_PASSWORD"
-    )
-MYSQL_PASSWORD = quote_plus(MYSQL_PASSWORD_RAW or DEFAULT_MYSQL_PASSWORD)
-DATABASE_URL = os.getenv(
-    "ERP_DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4",
-)
+
+
+def _enabled(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_loopback(host: str | None) -> bool:
+    return (host or "").strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_database_url() -> str:
+    """解析数据库配置，并在 production 对外部凭据执行 fail-close。"""
+    production = os.getenv("ERP_ENV", "dev").strip().lower() == "production"
+    bundled_local = _enabled("ERP_BUNDLED_LOCAL_MYSQL")
+    configured_url = os.getenv("ERP_DATABASE_URL")
+
+    if configured_url:
+        parsed = make_url(configured_url)
+        if production:
+            if not parsed.password:
+                raise RuntimeError("生产环境 ERP_DATABASE_URL 必须包含数据库密码")
+            default_is_allowed = bundled_local and _is_loopback(parsed.host)
+            if parsed.password == DEFAULT_MYSQL_PASSWORD and not default_is_allowed:
+                raise RuntimeError("生产环境 ERP_DATABASE_URL 不能使用公开默认数据库密码")
+        return configured_url
+
+    host = os.getenv("ERP_MYSQL_HOST", "127.0.0.1")
+    port = os.getenv("ERP_MYSQL_PORT", "3306")
+    database = os.getenv("ERP_MYSQL_DATABASE", "lite_erp")
+    user = quote_plus(os.getenv("ERP_MYSQL_USER", "lite_erp"))
+    password_raw = os.getenv("ERP_MYSQL_PASSWORD")
+    if production:
+        default_is_allowed = bundled_local and _is_loopback(host)
+        if not password_raw:
+            raise RuntimeError("生产环境必须显式设置 ERP_MYSQL_PASSWORD")
+        if password_raw == DEFAULT_MYSQL_PASSWORD and not default_is_allowed:
+            raise RuntimeError("外部生产数据库不能使用公开默认数据库密码")
+    password = quote_plus(password_raw or DEFAULT_MYSQL_PASSWORD)
+    return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
+
+
+DATABASE_URL = resolve_database_url()
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True, pool_pre_ping=True, pool_recycle=1800)

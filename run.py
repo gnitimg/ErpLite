@@ -418,13 +418,28 @@ def _stream(prefix: str, stream) -> None:
         pass
 
 
-def start_backend(dev: bool) -> ProcessGroup:
-    py = ensure_venv()
+def backend_environment(dev: bool) -> dict[str, str]:
+    """构造后端子进程环境，并只为 bundled 环回 MySQL 标记内部凭据模式。"""
     env = os.environ.copy()
     env.setdefault("ERP_MYSQL_HOST", MYSQL_HOST)
     env.setdefault("ERP_MYSQL_PORT", str(MYSQL_PORT))
     # run.py 知道运行模式：生产模式启动时后端会强制要求 ERP_JWT_SECRET 等鉴权配置。
     env.setdefault("ERP_ENV", "dev" if dev else "production")
+    # 仅 run.py 管理的环回 MySQL 可使用随仓库提供的单机内部凭据；显式完整 URL
+    # 或远程主机不带此标志，仍执行 production 外部凭据 fail-close。
+    if (
+        not env.get("ERP_DATABASE_URL")
+        and env.get("ERP_MYSQL_HOST", MYSQL_HOST).strip().lower() in {"127.0.0.1", "localhost", "::1"}
+        and env.get("ERP_MYSQL_PORT", str(MYSQL_PORT)) == str(MYSQL_PORT)
+    ):
+        env.setdefault("ERP_BUNDLED_LOCAL_MYSQL", "1")
+        env.setdefault("ERP_MYSQL_PASSWORD", "LiteErp@2026!")
+    return env
+
+
+def start_backend(dev: bool) -> ProcessGroup:
+    py = ensure_venv()
+    env = backend_environment(dev)
 
     info(f"启动后端 (http://{BACKEND_HOST}:{BACKEND_PORT}) ...")
     creationflags = 0
