@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -44,11 +45,11 @@ FRONTEND_DIR = ROOT / "frontend"
 VENV_DIR = ROOT / ".venv"
 VENV_PY = VENV_DIR / (Path("Scripts") / "python.exe" if os.name == "nt" else Path("bin") / "python")
 FRONTEND_DIST = FRONTEND_DIR / "dist"
+LOCAL_JWT_SECRET_FILE = ROOT / ".erp-runtime" / "jwt-secret"
 
 MYSQL_PORT = 3307
 MYSQL_HOST = "127.0.0.1"
-MYSQL_DATA_DIR = ROOT / ".mysql-data"
-MYSQL_UNDO_DIR = ROOT / ".mysql-undo"
+MYSQL_DATA_DIR = ROOT / "mysql-data"
 MYSQL_INITIALIZED_FLAG = ROOT / ".mysql-initialized"
 MYSQL_CONFIG = ROOT / ".mysql-local.ini"
 MYSQL_INIT_CONFIG = ROOT / ".mysql-init.ini"
@@ -116,6 +117,53 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def load_project_environment() -> None:
+    """Load simple KEY=VALUE entries from .env without overriding process env."""
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return
+    for raw_line in env_file.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def uses_bundled_mysql(environment: dict[str, str] | None = None) -> bool:
+    """Return whether run.py should own the loopback MySQL on port 3307."""
+    env = environment or os.environ
+    if env.get("ERP_DATABASE_URL", "").strip():
+        return False
+    host = env.get("ERP_MYSQL_HOST", MYSQL_HOST).strip().lower()
+    port = env.get("ERP_MYSQL_PORT", str(MYSQL_PORT)).strip()
+    return host in {"127.0.0.1", "localhost", "::1"} and port == str(MYSQL_PORT)
+
+
+def persistent_local_jwt_secret(path: Path | None = None) -> str:
+    """Read or atomically create the private signing secret for bundled installs."""
+    path = path or LOCAL_JWT_SECRET_FILE
+    try:
+        existing = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        existing = ""
+    if len(existing) >= 64:
+        return existing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_hex(32)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    temporary.write_text(value, encoding="ascii")
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    os.replace(temporary, path)
+    return value
+
+
 def ensure_venv() -> Path:
     """确保项目虚拟环境与后端依赖就绪，返回解释器路径。"""
     if not VENV_PY.exists():
@@ -174,6 +222,33 @@ def _wait_mysql(timeout: float = 40.0) -> None:
     raise RuntimeError(f"本地 MySQL 未在 {int(timeout)}s 内就绪，请检查日志：{MYSQL_ERROR_LOG}")
 
 
+def _migrate_legacy_mysql_datadir() -> None:
+    """Atomically move the old hidden datadir to the MySQL-safe path.
+
+    MySQL 8.4 on Windows skips dot-prefixed directories during InnoDB tablespace
+    discovery. A same-volume rename preserves every file and is atomic; ambiguous
+    or failed migrations stop without deleting either directory.
+    """
+    expected_datadir = ROOT / "mysql-data"
+    if MYSQL_DATA_DIR != expected_datadir:
+        return
+    legacy_datadir = ROOT / ".mysql-data"
+    if not legacy_datadir.exists():
+        return
+    if MYSQL_DATA_DIR.exists():
+        raise RuntimeError(
+            f"同时发现旧数据目录 {legacy_datadir} 和新数据目录 {MYSQL_DATA_DIR}；"
+            "为保护业务数据，未自动合并或删除，请先人工核对并备份。"
+        )
+    info(f"将旧 MySQL 数据目录安全迁移到 {MYSQL_DATA_DIR.name} ...")
+    try:
+        os.replace(legacy_datadir, MYSQL_DATA_DIR)
+    except OSError as error:
+        raise RuntimeError(
+            f"MySQL 数据目录迁移失败；未删除任何文件。请先备份 {legacy_datadir} 后人工处理。"
+        ) from error
+
+
 def find_mysql_binaries() -> tuple[str, str, str]:
     mysqld = which("mysqld")
     mysql = which("mysql")
@@ -196,21 +271,25 @@ def start_mysql() -> bool:
         ok(f"端口 {MYSQL_PORT} 上已有 MySQL 服务，本次启动将复用它。")
         return False
 
+    _migrate_legacy_mysql_datadir()
     MYSQL_DATA_DIR.mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
 
     base_dir = str(Path(mysqld).resolve().parents[1]).replace("\\", "/")
-    # 注：不使用独立的 innodb-undo-directory，让 undo 表空间落在数据目录内，
-    # 避免重启时出现 "Can't create UNDO tablespace ... already exists" 冲突。
+    # 保留初始化生成的默认 undo 表空间供后续启动和崩溃恢复直接复用。
+    # 该 Windows MySQL 8.4 构建的自动 undo truncate 会在首次正常启动时
+    # 错误地尝试重建已存在的 undo_001；关闭自动 truncate 可避免任何删除或
+    # 重建路径。run.py 绝不删除 InnoDB 核心文件。
     MYSQL_CONFIG.write_text(
         "\n".join([
             "[mysqld]",
             f"basedir={base_dir}",
             f"datadir={str(MYSQL_DATA_DIR).replace(chr(92), '/')}",
+            f"innodb-undo-directory={str(MYSQL_DATA_DIR).replace(chr(92), '/')}",
+            "innodb-undo-log-truncate=OFF",
             f"port={MYSQL_PORT}",
             "bind-address=127.0.0.1",
             "mysqlx=0",
-            "innodb_undo_log_truncate=OFF",
             "character-set-server=utf8mb4",
             "collation-server=utf8mb4_0900_ai_ci",
             f"pid-file={str(MYSQL_PID_FILE).replace(chr(92), '/')}",
@@ -223,7 +302,8 @@ def start_mysql() -> bool:
             "[mysqld]",
             f"basedir={base_dir}",
             f"datadir={str(MYSQL_DATA_DIR).replace(chr(92), '/')}",
-            "innodb_undo_log_truncate=OFF",
+            f"innodb-undo-directory={str(MYSQL_DATA_DIR).replace(chr(92), '/')}",
+            "innodb-undo-log-truncate=OFF",
         ]) + "\n",
         encoding="ascii",
     )
@@ -232,23 +312,8 @@ def start_mysql() -> bool:
     if os.name == "nt":
         creationflags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
 
-    def _heal_undo_files() -> None:
-        """清理数据目录内的 undo 文件，规避 MySQL 8.4 在此环境下的启动冲突。
-
-        部分 MySQL 8.4 构建在启动时总是尝试“重新创建”undo 表空间，而非打开
-        现有文件，导致报错 “Can't create UNDO tablespace ... ('.\\undo_001' already exists)”。
-        undo 文件只存放回滚段，不含业务数据（业务数据在 *.ibd / mysql.ibd），
-        因此在每次启动前删除它们、让 InnoDB 重新创建，可同时修复首次启动与后续重启。
-        """
-        for p in MYSQL_DATA_DIR.glob("undo_*"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
-
     def _launch() -> subprocess.Popen:
         info("启动本地 MySQL ...")
-        _heal_undo_files()
         return subprocess.Popen(
             [mysqld, f"--defaults-file={MYSQL_CONFIG}"],
             cwd=str(ROOT),
@@ -257,34 +322,42 @@ def start_mysql() -> bool:
             creationflags=creationflags,
         )
 
-    def _ensure_initialized() -> None:
+    def _ensure_initialized() -> bool:
         if not (MYSQL_DATA_DIR / "mysql").exists():
             info("初始化 MySQL 数据目录（仅首次） ...")
             run([mysqld, f"--defaults-file={MYSQL_INIT_CONFIG}", "--initialize-insecure"])
+            return True
+        return False
 
-    _ensure_initialized()
+    initialized_this_run = _ensure_initialized()
     proc = _launch()
     try:
         _wait_mysql()
-    except RuntimeError:
-        # 启动失败：若尚未成功初始化过（无标记文件），多为数据目录状态不一致
-        # （如旧的独立 undo 目录残留），清空后重新初始化再启动一次。
-        proc.wait(timeout=10)
-        if not MYSQL_INITIALIZED_FLAG.exists():
-            warn("MySQL 启动失败，正在重置数据目录并重新初始化 ...")
-            shutil.rmtree(MYSQL_DATA_DIR, ignore_errors=True)
-            shutil.rmtree(MYSQL_UNDO_DIR, ignore_errors=True)
-            MYSQL_DATA_DIR.mkdir(exist_ok=True)
-            _ensure_initialized()
-            proc = _launch()
-            _wait_mysql()
-        else:
-            raise
+    except RuntimeError as error:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        raise RuntimeError(
+            f"MySQL 启动失败；为保护现有业务数据，未执行任何自动重置。"
+            f"请先备份 {MYSQL_DATA_DIR}，检查日志 {MYSQL_ERROR_LOG}，"
+            "必要时使用 ERP 备份恢复。"
+        ) from error
 
     if not MYSQL_INITIALIZED_FLAG.exists():
-        info("导入 ERP 数据库结构（仅首次） ...")
-        sql = INIT_SQL.read_text(encoding="utf-8")
-        run([mysql, "--protocol=TCP", f"--host={MYSQL_HOST}", f"--port={MYSQL_PORT}", "--user=root", "-e", sql])
+        if initialized_this_run:
+            info("导入 ERP 数据库结构（仅首次） ...")
+            sql = INIT_SQL.read_text(encoding="utf-8")
+            run([mysql, "--protocol=TCP", f"--host={MYSQL_HOST}", f"--port={MYSQL_PORT}", "--user=root", "-e", sql])
+        elif not (MYSQL_DATA_DIR / "lite_erp").exists():
+            raise RuntimeError(
+                "MySQL 数据目录已经初始化，但 ERP schema 和初始化标记均不存在；"
+                "为保护可能存在的数据，拒绝自动重置或重新初始化。"
+            )
+        else:
+            warn("初始化标记缺失，但检测到既有 ERP schema；保留数据并重建旁路标记。")
         MYSQL_INITIALIZED_FLAG.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
 
     ok(f"本地 MySQL 已就绪 (PID {proc.pid}, 127.0.0.1:{MYSQL_PORT})。")
@@ -322,17 +395,25 @@ def status_mysql() -> int:
 
 def ensure_frontend_dist() -> bool:
     """生产模式下构建前端 dist。返回是否成功。"""
-    if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").exists():
-        ok("前端 dist 已存在。")
+    dist_index = FRONTEND_DIST / "index.html"
+    inputs = [FRONTEND_DIR / "package.json", FRONTEND_DIR / "pnpm-lock.yaml"]
+    inputs.extend(FRONTEND_DIR.glob("vite.config.*"))
+    inputs.extend(FRONTEND_DIR.glob("tsconfig*.json"))
+    source_dir = FRONTEND_DIR / "src"
+    if source_dir.exists():
+        inputs.extend(path for path in source_dir.rglob("*") if path.is_file())
+    newest_input = max((path.stat().st_mtime for path in inputs if path.exists()), default=0)
+    if dist_index.exists() and dist_index.stat().st_mtime >= newest_input:
+        ok("前端 dist 已是最新版本。")
         return True
-    pnpm = which("pnpm") or which("npx")
+    pnpm = which("pnpm")
     if not pnpm:
-        err("未检测到 pnpm/npx，无法构建前端。请先安装 Node.js 与 pnpm。")
+        err("前端 dist 缺失或已过期，且未检测到 pnpm；生产启动已停止。")
         return False
-    info("构建前端 dist ...")
+    info("前端 dist 缺失或已过期，正在重新构建 ...")
     try:
-        run([pnpm, "install"], cwd=str(FRONTEND_DIR))
-        run([pnpm, "run", "build"], cwd=str(FRONTEND_DIR))
+        run([pnpm, "install", "--frozen-lockfile"], cwd=str(FRONTEND_DIR))
+        run([pnpm, "run", "build:checked"], cwd=str(FRONTEND_DIR))
         ok("前端构建完成。")
         return True
     except RuntimeError:
@@ -389,6 +470,7 @@ def _wait_http(
     url: str,
     timeout: float = 30.0,
     expect_lt_500: bool = True,
+    expect_erp_ready: bool = False,
     process: subprocess.Popen | None = None,
 ) -> None:
     import urllib.error
@@ -399,7 +481,15 @@ def _wait_http(
             raise RuntimeError(f"服务进程已退出（退出码 {process.returncode}）")
         try:
             with urllib.request.urlopen(url, timeout=2) as resp:
-                if not expect_lt_500 or resp.status < 500:
+                if expect_erp_ready:
+                    payload = json.load(resp)
+                    if (
+                        resp.status == 200
+                        and payload.get("service") == "lite-erp"
+                        and payload.get("database") == "ready"
+                    ):
+                        return
+                elif not expect_lt_500 or resp.status < 500:
                     return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -427,13 +517,13 @@ def backend_environment(dev: bool) -> dict[str, str]:
     env.setdefault("ERP_ENV", "dev" if dev else "production")
     # 仅 run.py 管理的环回 MySQL 可使用随仓库提供的单机内部凭据；显式完整 URL
     # 或远程主机不带此标志，仍执行 production 外部凭据 fail-close。
-    if (
-        not env.get("ERP_DATABASE_URL")
-        and env.get("ERP_MYSQL_HOST", MYSQL_HOST).strip().lower() in {"127.0.0.1", "localhost", "::1"}
-        and env.get("ERP_MYSQL_PORT", str(MYSQL_PORT)) == str(MYSQL_PORT)
-    ):
+    if uses_bundled_mysql(env):
         env.setdefault("ERP_BUNDLED_LOCAL_MYSQL", "1")
         env.setdefault("ERP_MYSQL_PASSWORD", "LiteErp@2026!")
+        if not env.get("ERP_JWT_SECRET", "").strip():
+            env["ERP_JWT_SECRET"] = persistent_local_jwt_secret()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -460,10 +550,16 @@ def start_backend(dev: bool) -> ProcessGroup:
     group = ProcessGroup()
     group.add(proc)
     threading.Thread(target=_stream, args=(_c("[api]  ", Color.HEADER), proc.stdout), daemon=True).start()
-    _wait_http(
-        f"http://127.0.0.1:{BACKEND_PORT}/api/health",
-        process=proc,
-    )
+    try:
+        _wait_http(
+            f"http://127.0.0.1:{BACKEND_PORT}/api/health",
+            timeout=180,
+            expect_erp_ready=True,
+            process=proc,
+        )
+    except Exception:
+        group.stop_all()
+        raise
     ok("后端已就绪。")
     return group
 
@@ -519,7 +615,9 @@ def _preflight_ports(dev: bool) -> bool:
     if _port_listening("127.0.0.1", BACKEND_PORT):
         health = _running_erp_health()
         if health and not dev:
-            if health.get("database") != "ready" or not _port_listening(MYSQL_HOST, MYSQL_PORT):
+            if health.get("database") != "ready" or (
+                uses_bundled_mysql() and not _port_listening(MYSQL_HOST, MYSQL_PORT)
+            ):
                 raise RuntimeError(
                     "ERP 后端已在运行，但数据库不可用。请先运行 .\\service.ps1 stop，"
                     "再执行 python run.py。"
@@ -540,14 +638,19 @@ def _preflight_ports(dev: bool) -> bool:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
+    load_project_environment()
     if _preflight_ports(args.dev):
         return 0
 
     if not args.dev:
         if not ensure_frontend_dist():
-            warn("前端 dist 构建失败，将仅以 API 模式启动后端。")
+            raise RuntimeError("前端 dist 构建失败，生产启动已停止。")
 
-    mysql_started = start_mysql()
+    if uses_bundled_mysql():
+        mysql_started = start_mysql()
+    else:
+        mysql_started = False
+        info("检测到外部数据库配置，跳过 bundled MySQL。")
     backend_group = ProcessGroup()
     frontend_group = ProcessGroup()
     try:

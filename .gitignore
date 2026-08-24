@@ -8,7 +8,9 @@ logs/
 /.run.*.log
 backups/
 .erp.pid
+.erp-runtime/
 .mysql-data/
+mysql-data/
 .mysql-undo/
 .mysql-undo-recovery-*/
 .mysql-initialized

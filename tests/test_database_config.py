@@ -75,10 +75,11 @@ def test_bundled_flag_never_allows_remote_default_password(production_env, monke
         resolve_database_url()
 
 
-def test_run_py_marks_only_its_loopback_mysql_as_bundled(monkeypatch):
+def test_run_py_marks_only_its_loopback_mysql_as_bundled(monkeypatch, tmp_path):
     for key in CONFIG_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ERP_ENV", raising=False)
+    monkeypatch.setattr("run.LOCAL_JWT_SECRET_FILE", tmp_path / "jwt-secret")
     env = backend_environment(dev=False)
     assert env["ERP_ENV"] == "production"
     assert env["ERP_BUNDLED_LOCAL_MYSQL"] == "1"

@@ -81,13 +81,13 @@
 
 - 开发环境可使用 `ERP_ENV=dev`。未配置 `ERP_JWT_SECRET` 时后端会生成仅当前进程有效的随机密钥，进程重启后现有令牌全部失效。
 - 外部生产环境必须设置 `ERP_ENV=production`、高强度随机 `ERP_JWT_SECRET`，并通过非默认 `ERP_MYSQL_PASSWORD` 或包含强密码的 `ERP_DATABASE_URL` 提供数据库凭据；缺失密码或外部数据库仍使用公开默认密码时服务拒绝启动。
-- `python run.py` 管理的 bundled MySQL 只监听 `127.0.0.1:3307`，其默认密码仅作为单机内部凭据使用；启动器会显式标记该环回模式。该密码不得用于远程 MySQL，bundled 标志也不会放行非本机地址。
+- `python run.py` 管理的 bundled MySQL 只监听 `127.0.0.1:3307`，其默认密码仅作为单机内部凭据使用；启动器会显式标记该环回模式。首次启动会原子生成 `.erp-runtime/jwt-secret`，后续复用且不会打印或提交。该本地密钥绝不会用于外部数据库模式。
 - Break-glass emergency admin 默认关闭。仅在明确设置 `ERP_ENABLE_EMERGENCY_ADMIN=1` 及应急凭据时启用；建立正常 ADMIN 后应立即关闭，应急账号不能替代系统至少一个启用的正常管理员。
 - 部署或升级数据库使用 `alembic upgrade head`。正式发布前还应阅读 [Full V1 已知技术边界](docs/FULL_VERSION_KNOWN_LIMITATIONS.md) 与 [Stage 7 独立发布审计](docs/STAGE7_RELEASE_AUDIT.md)。
 
 ## 1. 本机 MySQL
 
-默认使用电脑上已安装的 MySQL 8.4 程序，在项目目录创建隔离数据目录并监听 `127.0.0.1:3307`。它不会修改或停止已有的 3306 MySQL 服务。首次启动会自动创建 `lite_erp` 数据库及独立用户。
+默认使用电脑上已安装的 MySQL 8.4 程序，在项目目录的 `mysql-data` 创建隔离数据目录并监听 `127.0.0.1:3307`。它不会修改或停止已有的 3306 MySQL 服务。首次启动会自动创建 `lite_erp` 数据库及独立用户。旧版 `.mysql-data` 会在服务停止时同卷原子重命名到新目录，以便 MySQL 8.4 正确扫描 InnoDB 表空间；启动器不会删除 undo、redo、ibdata、mysql.ibd 或业务 `.ibd` 文件，任何启动失败都保留目录并 fail-closed。
 
 如需单独管理数据库进程：
 
@@ -97,7 +97,7 @@
 .\mysql-local.ps1 stop
 ```
 
-若要改用已有或远程 MySQL，只需修改 `.env` 中的主机、端口、数据库和账号，并自行执行 `database\init_mysql.sql`。
+若要改用已有或远程 MySQL，只需修改 `.env` 中的 `ERP_DATABASE_URL`，或主机、端口、数据库和账号，并自行执行 `database\init_mysql.sql`。`run.py` 会在决定是否启动 bundled MySQL 前读取 `.env`；远程配置不会查找或启动本机 mysqld，且外部 production 仍必须显式提供 `ERP_JWT_SECRET`。
 
 ## 2. 安装与构建
 
@@ -130,6 +130,8 @@ python run.py
 - ERP：http://localhost:8000
 - API 文档：http://localhost:8000/docs
 - 健康检查：http://localhost:8000/api/health
+
+生产启动只有在健康检查返回 HTTP 200、`service=lite-erp` 且 `database=ready` 后才报告后端就绪；迁移失败、连接失败或运行中数据库掉线返回 503。若前端源码或构建配置比 `dist/index.html` 更新，启动器会以冻结 lockfile 重新执行 checked build；缺少 pnpm 或构建失败时拒绝以陈旧/缺失前端继续启动。
 
 前台和后台两种方式不要同时启动。`python run.py` 会在启动数据库前检查
 8000 端口：如果同一个 ERP 已通过 `service.ps1` 运行，会直接提示访问地址；
