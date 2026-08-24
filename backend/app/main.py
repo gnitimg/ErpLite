@@ -2221,16 +2221,7 @@ def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
 
 @app.put("/api/orders/{order_id}")
 def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get_db)):
-    locked_order = db.scalar(
-        select(SalesOrder)
-        .where(SalesOrder.id == order_id)
-        .with_for_update()
-    )
-    if not locked_order:
-        raise HTTPException(404, "客单不存在")
-    # 父行锁建立后重新读取整单与明细，所有状态守卫和替换写入都基于锁后的最新值。
-    db.expire(locked_order)
-    order = load_order(db, order_id)
+    order = load_order_for_update(db, order_id)
     if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
         raise HTTPException(409, "订单已经发生出库，客户、产品、数量和价格已冻结")
     if order.status != "DRAFT":
@@ -2258,9 +2249,23 @@ def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get
     return order_dict(load_order(db, order.id))
 
 
+def load_order_for_update(db: Session, order_id: int) -> SalesOrder:
+    """锁住订单生命周期主行，再基于锁后的最新状态重读订单和明细。"""
+    locked_order = db.scalar(
+        select(SalesOrder)
+        .where(SalesOrder.id == order_id)
+        .with_for_update()
+    )
+    if not locked_order:
+        raise HTTPException(404, "客单不存在")
+    # 父行锁建立后重新读取整单与明细，所有状态守卫和替换写入都基于锁后的最新值。
+    db.expire(locked_order)
+    return load_order(db, order_id)
+
+
 @app.post("/api/orders/{order_id}/confirm")
 def confirm_order(order_id: int, db: Session = Depends(get_db)):
-    order = load_order(db, order_id)
+    order = load_order_for_update(db, order_id)
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿客单可以确认")
     order.status = "CONFIRMED"
@@ -2834,7 +2839,7 @@ def cancel_order(
     payload: OrderCancelPayload | None = None,
     db: Session = Depends(get_db),
 ):
-    order = load_order(db, order_id)
+    order = load_order_for_update(db, order_id)
     if order.status in {"FULFILLED", "CANCELLED"}:
         raise HTTPException(409, "已完结客单不能取消")
     if any(int(line.shipped_quantity or 0) > 0 for line in order.items):

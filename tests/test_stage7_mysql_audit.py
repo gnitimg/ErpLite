@@ -38,6 +38,7 @@ from app.models import (
     ProductionSetting,
     SalesOrder,
     SalesOrderItem,
+    StockReservation,
     StockTransaction,
     User,
 )
@@ -82,6 +83,73 @@ def _admin_headers(session, username: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {create_access_token(user.id, username, 'ADMIN')}"
     }
+
+
+def _http_order_race(
+    order_id: int,
+    headers: dict[str, str],
+    calls: list[tuple[str, str, dict | None]],
+) -> list[int]:
+    """让两个独立 HTTP client 同时在同一 SalesOrder 行锁前竞争。"""
+    barrier = Barrier(len(calls))
+    ready = [Event() for _ in calls]
+    result_lock = Lock()
+    statuses: list[int] = []
+    errors: list[BaseException] = []
+
+    def request_once(index: int, method: str, path: str, body: dict | None) -> None:
+        client = TestClient(main_module.app)
+        try:
+            ready[index].set()
+            barrier.wait()
+            response = client.request(method, path, json=body, headers=headers)
+            with result_lock:
+                statuses.append(response.status_code)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            client.close()
+
+    with SessionLocal() as blocker:
+        blocker.scalar(select(SalesOrder).where(
+            SalesOrder.id == order_id
+        ).with_for_update())
+        threads = [
+            Thread(target=request_once, args=(index, *call))
+            for index, call in enumerate(calls)
+        ]
+        for thread in threads:
+            thread.start()
+        assert all(event.wait(timeout=10) for event in ready)
+        blocker.commit()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+    assert not errors
+    assert len(statuses) == len(calls)
+    assert not [status for status in statuses if status >= 500]
+    return statuses
+
+
+def _draft_order(session, prefix: str, product: InventoryItem, quantity: int = 10) -> SalesOrder:
+    order = SalesOrder(
+        order_no=f"S7-{prefix}-SO",
+        customer_name=prefix,
+        status="DRAFT",
+        order_date=date(2026, 8, 24),
+        required_date=date(2026, 8, 31),
+        total_amount=quantity * 10,
+        items=[SalesOrderItem(
+            product_id=product.id,
+            quantity=quantity,
+            reference_price=10,
+            unit_price=10,
+            line_total=quantity * 10,
+        )],
+    )
+    session.add(order)
+    session.commit()
+    return order
 
 
 def test_fixed_run_replacement_reuses_allocation_mysql():
@@ -304,3 +372,152 @@ def test_draft_order_updates_are_complete_last_write_wins_mysql(round_no: int):
         )
         assert actual in {expected_a, expected_b}
         assert float(order.total_amount) == sum(float(item.line_total) for item in items)
+
+
+@pytest.mark.parametrize("round_no", range(20))
+def test_update_and_confirm_share_lifecycle_lock_mysql(round_no: int):
+    with SessionLocal() as session:
+        product_a = _product(session, f"S7-R-{round_no:02d}-A")
+        product_b = _product(session, f"S7-R-{round_no:02d}-B")
+        order = _draft_order(session, f"R-{round_no:02d}", product_a)
+        order_id = order.id
+        headers = _admin_headers(session, f"s7-r-{round_no:02d}")
+        product_a_id, product_b_id = product_a.id, product_b.id
+
+    update_payload = OrderPayload(
+        customer_name=f"R-{round_no:02d}-updated",
+        order_date=date(2026, 8, 24),
+        required_date=date(2026, 8, 30),
+        items=[OrderLinePayload(product_id=product_b_id, quantity=12, unit_price=11)],
+    )
+    statuses = _http_order_race(order_id, headers, [
+        ("PUT", f"/api/orders/{order_id}", update_payload.model_dump(mode="json")),
+        ("POST", f"/api/orders/{order_id}/confirm", None),
+    ])
+    assert sorted(statuses) in ([200, 200], [200, 409])
+
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        items = session.scalars(select(SalesOrderItem).where(
+            SalesOrderItem.order_id == order_id
+        )).all()
+        assert len(items) == 1
+        final_product_id = items[0].product_id
+        assert final_product_id in {product_a_id, product_b_id}
+        assert order.status in {"CONFIRMED", "WAITING_MATERIALS", "READY_TO_SHIP"}
+        if final_product_id == product_b_id:
+            assert sorted(statuses) == [200, 200]
+        else:
+            assert sorted(statuses) == [200, 409]
+        reservations = session.scalars(
+            select(StockReservation)
+            .join(SalesOrderItem, SalesOrderItem.id == StockReservation.order_item_id)
+            .where(SalesOrderItem.order_id == order_id)
+        ).all()
+        assert all(row.product_id == final_product_id for row in reservations)
+        allocation_products = session.scalars(
+            select(ProductionRun.product_id)
+            .join(ProductionAllocation, ProductionAllocation.production_run_id == ProductionRun.id)
+            .join(SalesOrderItem, SalesOrderItem.id == ProductionAllocation.order_item_id)
+            .where(SalesOrderItem.order_id == order_id)
+        ).all()
+        assert all(product_id == final_product_id for product_id in allocation_products)
+        assert float(order.total_amount) == sum(float(item.line_total) for item in items)
+
+
+@pytest.mark.parametrize("round_no", range(20))
+def test_confirm_and_cancel_never_resurrect_cancelled_order_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7-S-{round_no:02d}")
+        order = _draft_order(session, f"S-{round_no:02d}", product)
+        order_id = order.id
+        headers = _admin_headers(session, f"s7-s-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/confirm", None),
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+    ])
+    assert sorted(statuses) in ([200, 200], [200, 409])
+
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        assert order.status == "CANCELLED"
+        active_run_count = session.scalar(
+            select(func.count(ProductionRun.id))
+            .join(ProductionAllocation, ProductionAllocation.production_run_id == ProductionRun.id)
+            .join(SalesOrderItem, SalesOrderItem.id == ProductionAllocation.order_item_id)
+            .where(
+                SalesOrderItem.order_id == order_id,
+                ProductionRun.status.in_(("PLANNED", "RUNNING")),
+            )
+        )
+        assert active_run_count == 0
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_cancel_and_ship_have_only_serial_outcomes_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7-T-{round_no:02d}", stock=10)
+        order = _draft_order(session, f"T-{round_no:02d}", product)
+        order_id = order.id
+        confirm_order(order_id, session)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id))
+        line_id, product_id = line.id, product.id
+        headers = _admin_headers(session, f"s7-t-{round_no:02d}")
+
+    ship_payload = OrderShipmentPayload(items=[
+        OrderShipmentLinePayload(order_item_id=line_id, quantity=10),
+    ]).model_dump(mode="json")
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+        ("POST", f"/api/orders/{order_id}/ship", ship_payload),
+    ])
+    assert sorted(statuses) in ([200, 409], [201, 409])
+
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.get(SalesOrderItem, line_id)
+        product = session.get(InventoryItem, product_id)
+        sale_out_count = session.scalar(select(func.count(StockTransaction.id)).where(
+            StockTransaction.related_order_id == order_id,
+            StockTransaction.transaction_type == "SALE_OUT",
+        ))
+        if order.status == "CANCELLED":
+            assert int(line.shipped_quantity or 0) == 0
+            assert float(product.stock_qty) == 10
+            assert sale_out_count == 0
+            assert sorted(statuses) == [200, 409]
+        else:
+            assert order.status == "FULFILLED"
+            assert int(line.shipped_quantity or 0) == 10
+            assert float(product.stock_qty) == 0
+            assert sale_out_count == 1
+            assert sorted(statuses) == [201, 409]
+
+
+@pytest.mark.parametrize("round_no", range(20))
+def test_confirm_and_confirm_execute_once_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7-U-{round_no:02d}")
+        order = _draft_order(session, f"U-{round_no:02d}", product)
+        order_id = order.id
+        line_id = order.items[0].id
+        headers = _admin_headers(session, f"s7-u-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/confirm", None),
+        ("POST", f"/api/orders/{order_id}/confirm", None),
+    ])
+    assert sorted(statuses) == [200, 409]
+
+    with SessionLocal() as session:
+        reservation_count = session.scalar(select(func.count(StockReservation.id)).where(
+            StockReservation.order_item_id == line_id
+        ))
+        allocations = session.scalars(select(ProductionAllocation).where(
+            ProductionAllocation.order_item_id == line_id
+        )).all()
+        pairs = {(row.production_run_id, row.order_item_id) for row in allocations}
+        assert reservation_count == 1
+        assert len(allocations) == len(pairs)
+        assert len(allocations) == 1
