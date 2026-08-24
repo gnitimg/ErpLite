@@ -2221,6 +2221,15 @@ def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
 
 @app.put("/api/orders/{order_id}")
 def update_order(order_id: int, payload: OrderPayload, db: Session = Depends(get_db)):
+    locked_order = db.scalar(
+        select(SalesOrder)
+        .where(SalesOrder.id == order_id)
+        .with_for_update()
+    )
+    if not locked_order:
+        raise HTTPException(404, "客单不存在")
+    # 父行锁建立后重新读取整单与明细，所有状态守卫和替换写入都基于锁后的最新值。
+    db.expire(locked_order)
     order = load_order(db, order_id)
     if any(int(line.shipped_quantity or 0) > 0 for line in order.items):
         raise HTTPException(409, "订单已经发生出库，客户、产品、数量和价格已冻结")
