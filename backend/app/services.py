@@ -97,7 +97,10 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def serial(prefix: str) -> str:
-    return f"{prefix}{datetime.now():%Y%m%d%H%M%S}{uuid4().hex[:4].upper()}"
+    # 4 hex chars collide under the Stage 7 concurrency matrix often enough to
+    # surface as unrelated 503s. Eight chars keep the compact human-readable
+    # prefix while making concurrent document/run identifiers operationally unique.
+    return f"{prefix}{datetime.now():%Y%m%d%H%M%S}{uuid4().hex[:8].upper()}"
 
 
 def ensure_sku_available(db: Session, sku: str, exclude_id: int | None = None) -> None:

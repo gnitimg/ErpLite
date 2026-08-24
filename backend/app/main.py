@@ -16,9 +16,10 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .backup import (
@@ -88,6 +89,7 @@ from .schemas import (
 )
 from .planning import (
     _recalculate_plan_impl,
+    acquire_planner_lock,
     calculate_production_end,
     list_production_runs,
     production_demand_summary,
@@ -503,7 +505,20 @@ def list_items(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "lite-erp", "database": "ready" if getattr(app.state, "database_ready", False) else "unavailable"}
+    ready = bool(getattr(app.state, "database_ready", False))
+    if ready:
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            ready = False
+            app.state.database_ready = False
+    payload = {
+        "status": "ok" if ready else "degraded",
+        "service": "lite-erp",
+        "database": "ready" if ready else "unavailable",
+    }
+    return payload if ready else JSONResponse(status_code=503, content=payload)
 
 
 @app.get("/api/events")
@@ -1026,6 +1041,7 @@ def production_runs(status: str | None = None, db: Session = Depends(get_db)):
 @app.post("/api/production/plan/recalculate")
 def recalculate_plan(db: Session = Depends(get_db)):
     """系统维护用；正常业务写入会自动重算。"""
+    acquire_planner_lock(db)
     result = recalculate_production_plan(db)
     db.commit()
     return result
@@ -1409,6 +1425,7 @@ def complete_production_run(
     payload: ProductionCompletionPayload,
     db: Session = Depends(get_db),
 ):
+    acquire_planner_lock(db)
     query = (
         select(ProductionRun)
         .where(ProductionRun.id == run_id)
@@ -1644,6 +1661,7 @@ def return_external_processing(
     payload: ExternalProcessingReturnPayload,
     db: Session = Depends(get_db),
 ):
+    acquire_planner_lock(db)
     query = (
         select(ExternalProcessingBatch)
         .where(ExternalProcessingBatch.id == batch_id)
@@ -2042,6 +2060,7 @@ def outbound_documents(
 
 @app.post("/api/stock/inbound", status_code=201)
 def inbound(payload: StockPayload, db: Session = Depends(get_db)):
+    acquire_planner_lock(db)
     item = find_item(db, payload.item_id)
     if item.kind == "PRODUCT" and not float(payload.quantity).is_integer():
         raise HTTPException(422, "产品入库数量必须为正整数")
@@ -2255,16 +2274,32 @@ def load_order_for_update(db: Session, order_id: int) -> SalesOrder:
         select(SalesOrder)
         .where(SalesOrder.id == order_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if not locked_order:
         raise HTTPException(404, "客单不存在")
-    # 父行锁建立后重新读取整单与明细，所有状态守卫和替换写入都基于锁后的最新值。
-    db.expire(locked_order)
-    return load_order(db, order_id)
+    # MySQL REPEATABLE READ 下，事务若在等待父锁前已经读取过别的行，普通
+    # selectinload 仍可能命中旧一致性快照。子行也使用 locking read，并用
+    # populate_existing 覆盖 identity map，确保所有 guard 基于锁后的最新履约事实。
+    locked_lines = db.scalars(
+        select(SalesOrderItem)
+        .where(SalesOrderItem.order_id == order_id)
+        .order_by(SalesOrderItem.id)
+        .with_for_update()
+        .options(
+            selectinload(SalesOrderItem.product)
+            .selectinload(InventoryItem.bom_components)
+            .selectinload(ProductBomItem.part)
+        )
+        .execution_options(populate_existing=True)
+    ).all()
+    set_committed_value(locked_order, "items", locked_lines)
+    return locked_order
 
 
 @app.post("/api/orders/{order_id}/confirm")
 def confirm_order(order_id: int, db: Session = Depends(get_db)):
+    acquire_planner_lock(db)
     order = load_order_for_update(db, order_id)
     if order.status != "DRAFT":
         raise HTTPException(409, "只有草稿客单可以确认")
@@ -2529,6 +2564,7 @@ def create_order_return(
     payload: OrderReturnPayload,
     db: Session = Depends(get_db),
 ):
+    acquire_planner_lock(db)
     # MySQL 下锁 SalesOrder 行，与 _ship_order 使用同一主锁，
     # 串行化同订单的出库×退货、退货×退货并发。
     order_query = (
@@ -2678,6 +2714,7 @@ def _ship_order(
     counterparty_phone: str | None = None,
     counterparty_address: str | None = None,
 ) -> dict:
+    acquire_planner_lock(db)
     query = (
         select(SalesOrder)
         .where(SalesOrder.id == order_id)
@@ -2839,6 +2876,7 @@ def cancel_order(
     payload: OrderCancelPayload | None = None,
     db: Session = Depends(get_db),
 ):
+    acquire_planner_lock(db)
     order = load_order_for_update(db, order_id)
     if order.status in {"FULFILLED", "CANCELLED"}:
         raise HTTPException(409, "已完结客单不能取消")
@@ -2966,6 +3004,7 @@ def reverse_stock_transaction(
     db: Session = Depends(get_db),
     request: Request = None,
 ):
+    acquire_planner_lock(db)
     original = db.scalar(
         select(StockTransaction)
         .where(StockTransaction.id == transaction_id)
@@ -2984,6 +3023,14 @@ def reverse_stock_transaction(
             409,
             f"{original.transaction_type} 流水不支持通用冲销；生产/外协业务请使用专属逆操作",
         )
+    locked_sale_order: SalesOrder | None = None
+    sale_out_deltas: dict[int, dict[str, int]] = {}
+    if original.transaction_type == "SALE_OUT" and original.related_order_id:
+        # SALE_OUT 冲销会改写订单行履约计数与订单状态，必须加入与
+        # update/confirm/cancel/ship/return 相同的 SalesOrder 生命周期锁域。
+        # 固定顺序：StockTransaction -> SalesOrder -> Receivable。
+        locked_sale_order = load_order_for_update(db, original.related_order_id)
+        sale_out_deltas = _sale_out_reversal_deltas(db, original)
     # 入库类冲销会从库存减回数量：若该批货物已被后续业务消耗，
     # 冲销会把库存打负并产生错误的成本回滚，必须拒绝。
     if original.transaction_type in {"GENERAL_IN", "MANUAL_IN", "PURCHASE_IN"}:
@@ -2999,8 +3046,9 @@ def reverse_stock_transaction(
         # 5.7 守卫：该 SALE_OUT 涉及的订单行只要发生过任何退货，
         # 退货快照（退款单价 / 回库成本）已锁定，冲销历史出库会破坏价值守恒。
         # Full V1 采用最安全策略：有退货 → 一律禁止冲销该订单行的出库。
-        deltas = _sale_out_reversal_deltas(db, original)
-        for order_item_id in deltas:
+        if not sale_out_deltas:
+            sale_out_deltas = _sale_out_reversal_deltas(db, original)
+        for order_item_id in sale_out_deltas:
             has_return = db.scalar(
                 select(func.count(OrderReturn.id)).where(
                     OrderReturn.order_item_id == order_item_id,
@@ -3016,7 +3064,7 @@ def reverse_stock_transaction(
                 )
         # 数量守卫：恢复发货数量后，"客户已退数量"不能超过"累计发货"，
         # 否则说明这批货物已经发生退货，直接冲销会让退货账目悬空。
-        for order_item_id, delta in deltas.items():
+        for order_item_id, delta in sale_out_deltas.items():
             order_item = db.get(SalesOrderItem, order_item_id)
             if not order_item:
                 continue
@@ -3031,6 +3079,7 @@ def reverse_stock_transaction(
         receivable = db.scalar(
             select(Receivable)
             .where(Receivable.related_stock_transaction_id == original.id)
+            .with_for_update()
         )
         if receivable:
             allocated = float(receivable.settled_amount or 0)
@@ -3040,12 +3089,14 @@ def reverse_stock_transaction(
                     f"该出库已关联应收 {receivable.receivable_no}，已核销 {allocated:.2f}；"
                     "请先处理财务核销再冲销库存",
                 )
-            credit_count = db.scalar(
-                select(func.count(CustomerCredit.id)).where(
+            related_credit = db.scalar(
+                select(CustomerCredit).where(
                     CustomerCredit.receivable_id == receivable.id,
                 )
+                .order_by(CustomerCredit.id)
+                .with_for_update()
             )
-            if credit_count and credit_count > 0:
+            if related_credit:
                 raise HTTPException(
                     409,
                     f"该出库的应收 {receivable.receivable_no} 已关联客户贷项，"
@@ -3069,29 +3120,62 @@ def reverse_stock_transaction(
     original.reversed_by_transaction_id = reversal_tx.id
     original.status = "REVERSED"
     if original.transaction_type == "SALE_OUT" and original.related_order_id:
-        order = db.get(SalesOrder, original.related_order_id)
-        for order_item_id, delta in _sale_out_reversal_deltas(db, original).items():
+        order = locked_sale_order or db.get(SalesOrder, original.related_order_id)
+        for order_item_id, delta in sale_out_deltas.items():
             order_item = db.get(SalesOrderItem, order_item_id)
             if not order_item:
                 continue
-            order_item.shipped_quantity = max(
-                int(order_item.shipped_quantity or 0) - delta["original"], 0
+            # Use a current-value SQL write as the final lost-update boundary. Under
+            # MySQL REPEATABLE READ, an ORM object loaded before waiting on the parent
+            # lock may still carry an older child snapshot; arithmetic in SQL always
+            # applies to the latest locked row version.
+            db.execute(
+                update(SalesOrderItem)
+                .where(SalesOrderItem.id == order_item_id)
+                .values(
+                    shipped_quantity=case(
+                        (
+                            SalesOrderItem.shipped_quantity - delta["original"] < 0,
+                            0,
+                        ),
+                        else_=SalesOrderItem.shipped_quantity - delta["original"],
+                    ),
+                    replacement_shipped_quantity=case(
+                        (
+                            SalesOrderItem.replacement_shipped_quantity - delta["replacement"] < 0,
+                            0,
+                        ),
+                        else_=SalesOrderItem.replacement_shipped_quantity - delta["replacement"],
+                    ),
+                    replacement_pending_quantity=(
+                        SalesOrderItem.replacement_pending_quantity + delta["replacement"]
+                    ),
+                )
             )
-            order_item.replacement_shipped_quantity = max(
-                int(order_item.replacement_shipped_quantity or 0) - delta["replacement"], 0
-            )
-            order_item.replacement_pending_quantity = (
-                int(order_item.replacement_pending_quantity or 0) + delta["replacement"]
-            )
+            db.expire(order_item)
+        db.flush()
+        current_order_lines = db.scalars(
+            select(SalesOrderItem)
+            .where(SalesOrderItem.order_id == original.related_order_id)
+            .order_by(SalesOrderItem.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
         # 冲销让需求重新出现时，已完结订单必须重开，否则后续出库会被状态检查拒绝。
-        if order and order.status == "FULFILLED" and any(
+        if order and any(
             int(line.shipped_quantity or 0) < int(line.quantity)
             or int(line.replacement_pending_quantity or 0) > 0
-            for line in db.scalars(
-                select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)
-            ).all()
+            for line in current_order_lines
         ):
-            order.status = "PARTIALLY_SHIPPED"
+            db.execute(
+                update(SalesOrder)
+                .where(
+                    SalesOrder.id == order.id,
+                    SalesOrder.status == "FULFILLED",
+                )
+                .values(status="PARTIALLY_SHIPPED")
+            )
+            db.expire(order)
     affected_products = {line.item_id for line in original.lines if line.item.kind == "PRODUCT"}
     if affected_products:
         rebalance_product_reservations(db, affected_products)

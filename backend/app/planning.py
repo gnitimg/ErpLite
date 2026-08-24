@@ -517,6 +517,19 @@ def _allocate_supply(
         ))
 
 
+def acquire_planner_lock(db: Session) -> ProductionSetting:
+    """Acquire the planner/rebalance mutex before domain-specific row locks."""
+    settings_query = select(ProductionSetting).where(ProductionSetting.id == 1)
+    if db.bind and db.bind.dialect.name != "sqlite":
+        settings_query = settings_query.with_for_update()
+    settings = db.scalar(settings_query)
+    if settings is None:
+        settings = ProductionSetting(id=1, line_count=1)
+        db.add(settings)
+        db.flush()
+    return settings
+
+
 def _recalculate_plan_impl(
     db: Session,
     now: datetime,
@@ -527,15 +540,8 @@ def _recalculate_plan_impl(
     skip_rebuild_auto=True 时跳过删除和重建未锁定 ORDER 批次，
     用于自主计划创建后只需重算 ETA 和物料预留的场景。
     """
+    settings = acquire_planner_lock(db)
     db.flush()
-    settings_query = select(ProductionSetting).where(ProductionSetting.id == 1)
-    if db.bind and db.bind.dialect.name != "sqlite":
-        settings_query = settings_query.with_for_update()
-    settings = db.scalar(settings_query)
-    if settings is None:
-        settings = ProductionSetting(id=1, line_count=1)
-        db.add(settings)
-        db.flush()
     line_count = max(int(settings.line_count or 1), 1)
     calendar = WorkingCalendar(db)
     active_orders = db.scalars(

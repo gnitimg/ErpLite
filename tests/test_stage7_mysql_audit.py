@@ -32,10 +32,16 @@ from app.main import (
     ship_order_lines,
 )
 from app.models import (
+    CustomerCredit,
+    ExternalProcessingBatch,
     InventoryItem,
+    OrderReturn,
+    Payment,
     ProductionAllocation,
+    ProductBomItem,
     ProductionRun,
     ProductionSetting,
+    Receivable,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
@@ -150,6 +156,87 @@ def _draft_order(session, prefix: str, product: InventoryItem, quantity: int = 1
     session.add(order)
     session.commit()
     return order
+
+
+def _shipped_order(
+    session,
+    prefix: str,
+    *,
+    quantity: int = 10,
+    shipped_quantity: int | None = None,
+) -> tuple[int, int, int, int, int]:
+    """Create a confirmed order and one committed SALE_OUT/Receivable fact."""
+    shipped_quantity = shipped_quantity or quantity
+    product = _product(session, f"{prefix}-PRODUCT", stock=quantity)
+    order = _draft_order(session, prefix, product, quantity)
+    confirm_order(order.id, session)
+    line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id))
+    shipment = ship_order_lines(order.id, OrderShipmentPayload(items=[
+        OrderShipmentLinePayload(order_item_id=line.id, quantity=shipped_quantity),
+    ]), session)
+    receivable = session.scalar(select(Receivable).where(
+        Receivable.related_stock_transaction_id == shipment["transaction_id"]
+    ))
+    assert receivable is not None
+    return order.id, line.id, product.id, shipment["transaction_id"], receivable.id
+
+
+def _add_bom_and_running_run(session, product: InventoryItem, prefix: str, quantity: int = 10) -> ProductionRun:
+    part = InventoryItem(
+        sku=f"{prefix}-PART",
+        name=f"{prefix}-PART",
+        kind="PART",
+        stock_qty=quantity * 10,
+        cost_price=1,
+        supply_mode="STOCK",
+    )
+    session.add(part)
+    session.flush()
+    session.add(ProductBomItem(product_id=product.id, part_id=part.id, quantity=1))
+    now = datetime(2026, 8, 24, 8)
+    run = ProductionRun(
+        run_no=f"{prefix}-RUN",
+        product_id=product.id,
+        planned_quantity=quantity,
+        planned_start_at=now,
+        planned_end_at=now + timedelta(hours=1),
+        actual_start_at=now,
+        effective_daily_capacity=100,
+        status="RUNNING",
+        workflow_version=2,
+        source_type="REPLENISHMENT",
+    )
+    session.add(run)
+    session.commit()
+    return run
+
+
+def _external_batch(session, product: InventoryItem, prefix: str, quantity: int = 10) -> ExternalProcessingBatch:
+    product.requires_external_processing = True
+    product.external_process_name = "PAINT"
+    product.processing_qty = quantity
+    outbound = create_transaction(
+        session,
+        "PROCESS_OUT",
+        [(product, -quantity, product.cost_price)],
+        f"{prefix} outbound",
+        apply_inventory=False,
+    )
+    batch = ExternalProcessingBatch(
+        batch_no=f"{prefix}-BATCH",
+        product_id=product.id,
+        process_name_snapshot="PAINT",
+        supplier="stage7",
+        quantity=quantity,
+        returned_quantity=0,
+        status="SENT",
+        outbound_transaction_id=outbound.id,
+        sent_at=datetime(2026, 8, 24, 8),
+        processing_cost=0,
+    )
+    session.add(batch)
+    session.commit()
+    return batch
 
 
 def test_fixed_run_replacement_reuses_allocation_mysql():
@@ -521,3 +608,377 @@ def test_confirm_and_confirm_execute_once_mysql(round_no: int):
         assert reservation_count == 1
         assert len(allocations) == len(pairs)
         assert len(allocations) == 1
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_sale_out_reverse_and_payment_are_serial_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, _line_id, _product_id, tx_id, receivable_id = _shipped_order(
+            session, f"S7I-V-{round_no:02d}"
+        )
+        receivable = session.get(Receivable, receivable_id)
+        payment = Payment(
+            payment_no=f"S7I-V-PAY-{round_no:02d}",
+            customer_name=receivable.customer_name,
+            amount=receivable.amount,
+            payment_date=date(2026, 8, 24),
+            method="BANK",
+        )
+        session.add(payment)
+        session.commit()
+        payment_id = payment.id
+        amount = float(receivable.amount)
+        headers = _admin_headers(session, f"s7i-v-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/stock/transactions/{tx_id}/reverse", None),
+        ("POST", f"/api/finance/payments/{payment_id}/allocate", {
+            "receivable_id": receivable_id,
+            "amount": amount,
+        }),
+    ])
+    assert sorted(statuses) == [201, 409]
+
+    with SessionLocal() as session:
+        receivable = session.get(Receivable, receivable_id)
+        payment = session.get(Payment, payment_id)
+        original = session.get(StockTransaction, tx_id)
+        assert not (
+            receivable.status == "CANCELLED"
+            and float(receivable.settled_amount or 0) > 0
+        )
+        if original.status == "REVERSED":
+            assert receivable.status == "CANCELLED"
+            assert float(receivable.settled_amount or 0) == 0
+            assert float(payment.allocated_amount or 0) == 0
+        else:
+            assert float(receivable.settled_amount or 0) == amount
+            assert float(payment.allocated_amount or 0) == amount
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_sale_out_reverse_and_return_are_serial_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, line_id, _product_id, tx_id, _receivable_id = _shipped_order(
+            session, f"S7I-W-{round_no:02d}"
+        )
+        headers = _admin_headers(session, f"s7i-w-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/stock/transactions/{tx_id}/reverse", None),
+        ("POST", f"/api/orders/{order_id}/returns", {
+            "resolution": "REFUND",
+            "items": [{"order_item_id": line_id, "quantity": 10, "restock": True}],
+        }),
+    ])
+    assert sorted(statuses) == [201, 409]
+
+    with SessionLocal() as session:
+        original = session.get(StockTransaction, tx_id)
+        return_count = session.scalar(select(func.count(OrderReturn.id)).where(
+            OrderReturn.order_item_id == line_id
+        ))
+        assert not (original.status == "REVERSED" and return_count > 0)
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_sale_out_reverse_and_ship_preserve_facts_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, line_id, product_id, tx_id, _receivable_id = _shipped_order(
+            session,
+            f"S7I-X-{round_no:02d}",
+            quantity=20,
+            shipped_quantity=10,
+        )
+        headers = _admin_headers(session, f"s7i-x-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/stock/transactions/{tx_id}/reverse", None),
+        ("POST", f"/api/orders/{order_id}/ship", {
+            "items": [{"order_item_id": line_id, "quantity": 10}],
+        }),
+    ])
+    assert statuses.count(201) == 2
+
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.get(SalesOrderItem, line_id)
+        product = session.get(InventoryItem, product_id)
+        original = session.get(StockTransaction, tx_id)
+        assert original.status == "REVERSED"
+        assert int(line.shipped_quantity or 0) == 10
+        assert float(product.stock_qty) == 10
+        assert order.status == "PARTIALLY_SHIPPED"
+        active_sales = session.scalar(select(func.count(StockTransaction.id)).where(
+            StockTransaction.related_order_id == order_id,
+            StockTransaction.transaction_type == "SALE_OUT",
+            StockTransaction.status != "REVERSED",
+        ))
+        assert active_sales == 1
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_sale_out_reverse_and_cancel_preserve_lifecycle_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, line_id, product_id, tx_id, _receivable_id = _shipped_order(
+            session, f"S7I-Y-{round_no:02d}"
+        )
+        headers = _admin_headers(session, f"s7i-y-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/stock/transactions/{tx_id}/reverse", None),
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+    ])
+    assert 201 in statuses
+    assert sorted(statuses) in ([200, 201], [201, 409])
+
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.get(SalesOrderItem, line_id)
+        product = session.get(InventoryItem, product_id)
+        assert int(line.shipped_quantity or 0) == 0
+        assert float(product.stock_qty) == 10
+        if order.status == "CANCELLED":
+            assert int(line.reserved_quantity or 0) == 0
+
+
+@pytest.mark.parametrize("round_no", range(30))
+def test_payment_and_refund_cannot_double_consume_receivable_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, line_id, _product_id, _tx_id, receivable_id = _shipped_order(
+            session, f"S7I-PAYREF-{round_no:02d}"
+        )
+        receivable = session.get(Receivable, receivable_id)
+        payment = Payment(
+            payment_no=f"S7I-PAYREF-PAY-{round_no:02d}",
+            customer_name=receivable.customer_name,
+            amount=receivable.amount,
+            payment_date=date(2026, 8, 24),
+            method="BANK",
+        )
+        session.add(payment)
+        session.commit()
+        payment_id = payment.id
+        amount = float(receivable.amount)
+        headers = _admin_headers(session, f"s7i-payref-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/finance/payments/{payment_id}/allocate", {
+            "receivable_id": receivable_id,
+            "amount": amount,
+        }),
+        ("POST", f"/api/orders/{order_id}/returns", {
+            "resolution": "REFUND",
+            "items": [{"order_item_id": line_id, "quantity": 10, "restock": True}],
+        }),
+    ])
+    assert not [status for status in statuses if status >= 500]
+
+    with SessionLocal() as session:
+        receivable = session.get(Receivable, receivable_id)
+        offset = session.scalar(select(func.coalesce(func.sum(CustomerCredit.amount), 0)).where(
+            CustomerCredit.receivable_id == receivable_id,
+            CustomerCredit.kind == "OFFSET_RECEIVABLE",
+        ))
+        assert float(receivable.settled_amount or 0) + float(offset or 0) <= float(receivable.amount) + 1e-9
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_rb1_cancel_and_inbound_never_resurrect_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-RB1-{round_no:02d}", stock=0)
+        order = _draft_order(session, f"M-RB1-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        order_id, product_id = order.id, product.id
+        headers = _admin_headers(session, f"s7m-rb1-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+        ("POST", "/api/stock/inbound", {
+            "item_id": product_id, "quantity": 10, "unit_cost": 5,
+        }),
+    ])
+    assert 200 in statuses and 201 in statuses
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id))
+        assert order.status == "CANCELLED"
+        assert int(line.reserved_quantity or 0) == 0
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_rb2_cancel_and_completion_never_resurrect_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-RB2-{round_no:02d}", stock=0)
+        run = _add_bom_and_running_run(session, product, f"S7M-RB2-{round_no:02d}")
+        order = _draft_order(session, f"M-RB2-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        order_id, run_id = order.id, run.id
+        headers = _admin_headers(session, f"s7m-rb2-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+        ("POST", f"/api/production/runs/{run_id}/complete", {
+            "qualified_quantity": 10,
+            "scrap_quantity": 0,
+            "completion_date": "2026-08-24",
+        }),
+    ])
+    assert not [status for status in statuses if status >= 500]
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id))
+        if 200 in statuses:
+            assert order.status == "CANCELLED"
+            assert int(line.reserved_quantity or 0) == 0
+
+
+@pytest.mark.parametrize("round_no", range(30))
+def test_rb3_cancel_and_external_return_never_resurrect_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-RB3-{round_no:02d}", stock=0)
+        batch = _external_batch(session, product, f"S7M-RB3-{round_no:02d}")
+        order = _draft_order(session, f"M-RB3-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        order_id, batch_id = order.id, batch.id
+        headers = _admin_headers(session, f"s7m-rb3-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+        ("POST", f"/api/external-processing/{batch_id}/return", {
+            "quantity": 10, "occurred_date": "2026-08-24",
+        }),
+    ])
+    assert not [status for status in statuses if status >= 500]
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id))
+        if 200 in statuses:
+            assert order.status == "CANCELLED"
+            assert int(line.reserved_quantity or 0) == 0
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_rb4_cancel_and_manual_recalc_never_resurrect_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-RB4-{round_no:02d}", stock=0)
+        order = _draft_order(session, f"M-RB4-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        order_id = order.id
+        headers = _admin_headers(session, f"s7m-rb4-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/cancel", None),
+        ("POST", "/api/production/plan/recalculate", None),
+    ])
+    assert not [status for status in statuses if status >= 500]
+    with SessionLocal() as session:
+        order = session.get(SalesOrder, order_id)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order_id))
+        if 200 in statuses:
+            assert order.status == "CANCELLED"
+            assert int(line.reserved_quantity or 0) == 0
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_d1_ship_and_completion_preserve_stock_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-D1-{round_no:02d}", stock=10)
+        run = _add_bom_and_running_run(session, product, f"S7M-D1-{round_no:02d}")
+        order = _draft_order(session, f"M-D1-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id))
+        order_id, line_id, product_id, run_id = order.id, line.id, product.id, run.id
+        headers = _admin_headers(session, f"s7m-d1-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/ship", {
+            "items": [{"order_item_id": line_id, "quantity": 10}],
+        }),
+        ("POST", f"/api/production/runs/{run_id}/complete", {
+            "qualified_quantity": 10,
+            "scrap_quantity": 0,
+            "completion_date": "2026-08-24",
+        }),
+    ])
+    assert statuses.count(201) == 2
+    with SessionLocal() as session:
+        assert int(session.get(SalesOrderItem, line_id).shipped_quantity or 0) == 10
+        assert float(session.get(InventoryItem, product_id).stock_qty) == 10
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_d2_ship_and_inbound_preserve_stock_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-D2-{round_no:02d}", stock=10)
+        order = _draft_order(session, f"M-D2-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id))
+        order_id, line_id, product_id = order.id, line.id, product.id
+        headers = _admin_headers(session, f"s7m-d2-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/ship", {
+            "items": [{"order_item_id": line_id, "quantity": 10}],
+        }),
+        ("POST", "/api/stock/inbound", {
+            "item_id": product_id, "quantity": 10, "unit_cost": 5,
+        }),
+    ])
+    assert statuses.count(201) == 2
+    with SessionLocal() as session:
+        assert int(session.get(SalesOrderItem, line_id).shipped_quantity or 0) == 10
+        assert float(session.get(InventoryItem, product_id).stock_qty) == 10
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_d5_return_and_completion_preserve_stock_mysql(round_no: int):
+    with SessionLocal() as session:
+        order_id, line_id, product_id, _tx_id, _receivable_id = _shipped_order(
+            session, f"S7M-D5-{round_no:02d}"
+        )
+        product = session.get(InventoryItem, product_id)
+        run = _add_bom_and_running_run(session, product, f"S7M-D5-{round_no:02d}")
+        run_id = run.id
+        headers = _admin_headers(session, f"s7m-d5-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", f"/api/orders/{order_id}/returns", {
+            "resolution": "REFUND",
+            "items": [{"order_item_id": line_id, "quantity": 10, "restock": True}],
+        }),
+        ("POST", f"/api/production/runs/{run_id}/complete", {
+            "qualified_quantity": 10,
+            "scrap_quantity": 0,
+            "completion_date": "2026-08-24",
+        }),
+    ])
+    assert statuses.count(201) == 2
+    with SessionLocal() as session:
+        line = session.get(SalesOrderItem, line_id)
+        assert int(line.returned_quantity or 0) == 10
+        assert float(session.get(InventoryItem, product_id).stock_qty) == 20
+
+
+@pytest.mark.parametrize("round_no", range(50))
+def test_d6_manual_recalc_and_ship_preserve_facts_mysql(round_no: int):
+    with SessionLocal() as session:
+        product = _product(session, f"S7M-D6-{round_no:02d}", stock=10)
+        order = _draft_order(session, f"M-D6-{round_no:02d}", product)
+        confirm_order(order.id, session)
+        line = session.scalar(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id))
+        order_id, line_id, product_id = order.id, line.id, product.id
+        headers = _admin_headers(session, f"s7m-d6-{round_no:02d}")
+
+    statuses = _http_order_race(order_id, headers, [
+        ("POST", "/api/production/plan/recalculate", None),
+        ("POST", f"/api/orders/{order_id}/ship", {
+            "items": [{"order_item_id": line_id, "quantity": 10}],
+        }),
+    ])
+    assert not [status for status in statuses if status >= 500]
+    with SessionLocal() as session:
+        line = session.get(SalesOrderItem, line_id)
+        assert int(line.shipped_quantity or 0) == 10
+        assert float(session.get(InventoryItem, product_id).stock_qty) == 0
+    Receivable,
