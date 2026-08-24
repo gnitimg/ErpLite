@@ -52,14 +52,19 @@ def upgrade() -> None:
             .values(daily_capacity=capacity)
         )
 
-    with op.batch_alter_table("inventory_items") as batch_op:
-        batch_op.alter_column(
-            "daily_capacity",
-            existing_type=sa.Float(),
-            type_=sa.Integer(),
-            existing_nullable=False,
-            existing_server_default=sa.text("0"),
-        )
+    column = next(
+        c for c in sa.inspect(bind).get_columns("inventory_items")
+        if c["name"] == "daily_capacity"
+    )
+    if not isinstance(column["type"], sa.Integer):
+        with op.batch_alter_table("inventory_items") as batch_op:
+            batch_op.alter_column(
+                "daily_capacity",
+                existing_type=column["type"],
+                type_=sa.Integer(),
+                existing_nullable=column["nullable"],
+                existing_server_default=column.get("default"),
+            )
 
 
 def downgrade() -> None:

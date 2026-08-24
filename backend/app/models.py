@@ -296,7 +296,7 @@ class ProductionRun(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="PLANNED", index=True)
     scrap_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    termination_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    termination_reason: Mapped[str] = mapped_column(Text, default="")
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     workflow_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

@@ -15,23 +15,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "production_settings",
-        sa.Column(
-            "print_paper_preset",
-            sa.String(30),
-            nullable=False,
-            server_default="A4_LANDSCAPE",
-        ),
-    )
-    op.add_column(
-        "production_settings",
+    bind = op.get_bind()
+    columns = {c["name"] for c in sa.inspect(bind).get_columns("production_settings")}
+    for column in (
+        sa.Column("print_paper_preset", sa.String(30), nullable=False, server_default="A4_LANDSCAPE"),
         sa.Column("print_width_mm", sa.Float(), nullable=False, server_default="297"),
-    )
-    op.add_column(
-        "production_settings",
         sa.Column("print_height_mm", sa.Float(), nullable=False, server_default="210"),
-    )
+    ):
+        if column.name not in columns:
+            op.add_column("production_settings", column)
 
 
 def downgrade() -> None:

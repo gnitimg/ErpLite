@@ -24,6 +24,14 @@ def _index_names(bind, table_name: str) -> set[str]:
     return {index["name"] for index in sa.inspect(bind).get_indexes(table_name)}
 
 
+def _column(bind, table_name: str, column_name: str) -> dict:
+    return next(
+        column
+        for column in sa.inspect(bind).get_columns(table_name)
+        if column["name"] == column_name
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if "mold_count" not in _column_names(bind, "inventory_items"):
@@ -57,24 +65,28 @@ def upgrade() -> None:
         ") AS kept)"
     ))
 
-    if bind.dialect.name == "sqlite":
+    capability_mold = _column(bind, "production_capabilities", "mold_id")
+    run_mold = _column(bind, "production_runs", "mold_id")
+    if bind.dialect.name == "sqlite" and (
+        not capability_mold["nullable"] or not run_mold["nullable"]
+    ):
         with op.batch_alter_table("production_capabilities") as batch:
-            batch.alter_column("mold_id", existing_type=sa.Integer(), nullable=True)
+            if not capability_mold["nullable"]:
+                batch.alter_column("mold_id", existing_type=sa.Integer(), nullable=True)
         with op.batch_alter_table("production_runs") as batch:
-            batch.alter_column("mold_id", existing_type=sa.Integer(), nullable=True)
+            if not run_mold["nullable"]:
+                batch.alter_column("mold_id", existing_type=sa.Integer(), nullable=True)
     else:
-        op.alter_column(
-            "production_capabilities",
-            "mold_id",
-            existing_type=sa.Integer(),
-            nullable=True,
-        )
-        op.alter_column(
-            "production_runs",
-            "mold_id",
-            existing_type=sa.Integer(),
-            nullable=True,
-        )
+        if not capability_mold["nullable"]:
+            op.alter_column(
+                "production_capabilities", "mold_id",
+                existing_type=capability_mold["type"], nullable=True,
+            )
+        if not run_mold["nullable"]:
+            op.alter_column(
+                "production_runs", "mold_id",
+                existing_type=run_mold["type"], nullable=True,
+            )
     bind.execute(sa.text("UPDATE production_capabilities SET mold_id = NULL"))
     bind.execute(sa.text("UPDATE production_runs SET mold_slot = 1"))
 

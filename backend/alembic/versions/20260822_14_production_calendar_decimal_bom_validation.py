@@ -54,14 +54,21 @@ def upgrade() -> None:
     for table_name, column_name in AMOUNT_COLUMNS:
         columns = {c["name"] for c in inspector.get_columns(table_name)}
         if column_name in columns:
+            column = next(c for c in inspector.get_columns(table_name) if c["name"] == column_name)
             nullable = column_name in ("unit_price_snapshot", "line_total_snapshot")
-            op.alter_column(
-                table_name,
-                column_name,
-                existing_type=sa.Float(),
-                type_=sa.Numeric(18, 2, asdecimal=False),
-                existing_nullable=nullable,
-            )
+            current_type = column["type"]
+            if not (
+                isinstance(current_type, sa.Numeric)
+                and current_type.precision == 18
+                and current_type.scale == 2
+            ):
+                op.alter_column(
+                    table_name,
+                    column_name,
+                    existing_type=current_type,
+                    type_=sa.Numeric(18, 2, asdecimal=False),
+                    existing_nullable=nullable,
+                )
 
 
 def downgrade() -> None:

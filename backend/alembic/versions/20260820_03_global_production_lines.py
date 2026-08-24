@@ -24,6 +24,14 @@ def _index_names(bind, table_name: str) -> set[str]:
     return {index["name"] for index in sa.inspect(bind).get_indexes(table_name)}
 
 
+def _column(bind, table_name: str, column_name: str) -> dict:
+    return next(
+        column
+        for column in sa.inspect(bind).get_columns(table_name)
+        if column["name"] == column_name
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -41,15 +49,33 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
         )
     setting_columns = _column_names(bind, "production_settings")
-    snap_column = ", schedule_auto_snap" if "schedule_auto_snap" in setting_columns else ""
-    snap_value = ", 1" if "schedule_auto_snap" in setting_columns else ""
-    bind.execute(sa.text(
-        "INSERT INTO production_settings "
-        f"(id, line_count, updated_at{snap_column}) "
-        "SELECT 1, CASE WHEN COUNT(*) > 0 THEN COUNT(*) ELSE 1 END, CURRENT_TIMESTAMP "
-        f"{snap_value} FROM production_lines WHERE active = 1 "
-        "AND NOT EXISTS (SELECT 1 FROM production_settings WHERE id = 1)"
-    ))
+    if bind.execute(sa.text(
+        "SELECT 1 FROM production_settings WHERE id = 1"
+    )).first() is None:
+        active_line_count = bind.execute(sa.text(
+            "SELECT COUNT(*) FROM production_lines WHERE active = 1"
+        )).scalar_one()
+        values = {
+            "id": 1,
+            "line_count": max(int(active_line_count or 0), 1),
+            "updated_at": sa.func.now(),
+        }
+        current_schema_defaults = {
+            "schedule_auto_snap": True,
+            "working_weekdays": "1,2,3,4,5",
+            "print_paper_preset": "A4_LANDSCAPE",
+            "print_width_mm": 297,
+            "print_height_mm": 210,
+        }
+        values.update({
+            name: value
+            for name, value in current_schema_defaults.items()
+            if name in setting_columns
+        })
+        settings_table = sa.Table(
+            "production_settings", sa.MetaData(), autoload_with=bind
+        )
+        bind.execute(settings_table.insert().values(**values))
 
     if "line_slot" not in _column_names(bind, "production_runs"):
         op.add_column(
@@ -68,24 +94,28 @@ def upgrade() -> None:
         ") AS kept)"
     ))
 
-    if bind.dialect.name == "sqlite":
+    capability_line = _column(bind, "production_capabilities", "line_id")
+    run_line = _column(bind, "production_runs", "line_id")
+    if bind.dialect.name == "sqlite" and (
+        not capability_line["nullable"] or not run_line["nullable"]
+    ):
         with op.batch_alter_table("production_capabilities") as batch:
-            batch.alter_column("line_id", existing_type=sa.Integer(), nullable=True)
+            if not capability_line["nullable"]:
+                batch.alter_column("line_id", existing_type=sa.Integer(), nullable=True)
         with op.batch_alter_table("production_runs") as batch:
-            batch.alter_column("line_id", existing_type=sa.Integer(), nullable=True)
+            if not run_line["nullable"]:
+                batch.alter_column("line_id", existing_type=sa.Integer(), nullable=True)
     else:
-        op.alter_column(
-            "production_capabilities",
-            "line_id",
-            existing_type=sa.Integer(),
-            nullable=True,
-        )
-        op.alter_column(
-            "production_runs",
-            "line_id",
-            existing_type=sa.Integer(),
-            nullable=True,
-        )
+        if not capability_line["nullable"]:
+            op.alter_column(
+                "production_capabilities", "line_id",
+                existing_type=capability_line["type"], nullable=True,
+            )
+        if not run_line["nullable"]:
+            op.alter_column(
+                "production_runs", "line_id",
+                existing_type=run_line["type"], nullable=True,
+            )
     bind.execute(sa.text("UPDATE production_capabilities SET line_id = NULL"))
     bind.execute(sa.text("UPDATE production_runs SET line_id = NULL"))
 
