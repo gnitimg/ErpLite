@@ -2955,6 +2955,7 @@ def reverse_stock_transaction(
     original = db.scalar(
         select(StockTransaction)
         .where(StockTransaction.id == transaction_id)
+        .with_for_update()
         .options(selectinload(StockTransaction.lines).selectinload(StockTransactionItem.item))
     )
     if not original:

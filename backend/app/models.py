@@ -382,6 +382,13 @@ class StockTransaction(Base):
     related_order: Mapped[SalesOrder | None] = relationship()
     related_production_run: Mapped[ProductionRun | None] = relationship()
 
+    __table_args__ = (
+        UniqueConstraint(
+            "reversal_of_transaction_id",
+            name="uq_stock_transactions_reversal_of",
+        ),
+    )
+
 
 class StockTransactionItem(Base):
     __tablename__ = "stock_transaction_items"
