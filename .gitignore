@@ -18,3 +18,5 @@ backups/
 .codeartsdoer/
 .pytest_cache/
 .pytest_tmp/
+.audit_tmp/
+Thumbs.db
