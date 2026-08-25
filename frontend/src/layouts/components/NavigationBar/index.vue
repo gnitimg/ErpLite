@@ -53,7 +53,7 @@ function toggleSidebar() {
         </div>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item @click="router.push('/settings/theme')">
+            <el-dropdown-item @click="router.push('/appearance/theme')">
               <el-icon><Brush /></el-icon>主题设置
             </el-dropdown-item>
             <el-dropdown-item divided @click="userStore.logout">

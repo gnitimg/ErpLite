@@ -47,7 +47,7 @@ export const constantRoutes: RouteRecordRaw[] = [
     }
   },
   {
-    path: "/settings",
+    path: "/appearance",
     component: Layouts,
     meta: { hidden: true },
     children: [
@@ -69,7 +69,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/dashboard.vue"),
         name: "Dashboard",
         meta: {
-          title: "工作台",
+          title: "总览",
           svgIcon: "dashboard",
           affix: true
         }
@@ -84,7 +84,8 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: {
       title: "物料目录",
       elIcon: "Collection",
-      alwaysShow: true
+      alwaysShow: true,
+      hidden: true
     },
     children: [
       {
@@ -116,7 +117,7 @@ export const constantRoutes: RouteRecordRaw[] = [
     component: Layouts,
     redirect: "/warehouse/parts-inventory",
     name: "Warehouse",
-    meta: { title: "库存管理", elIcon: "House", alwaysShow: true },
+    meta: { title: "库存管理", elIcon: "House", alwaysShow: true, hidden: true },
     children: [
       {
         path: "parts-inventory",
@@ -172,7 +173,8 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: {
       title: "业务处理",
       elIcon: "Tickets",
-      alwaysShow: true
+      alwaysShow: true,
+      hidden: true
     },
     children: [
       {
@@ -233,7 +235,8 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: {
       title: "单据 / 日志",
       elIcon: "Document",
-      alwaysShow: true
+      alwaysShow: true,
+      hidden: true
     },
     children: [
       {
@@ -270,7 +273,8 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: {
       title: "系统管理",
       elIcon: "Setting",
-      alwaysShow: true
+      alwaysShow: true,
+      hidden: true
     },
     children: [
       {
@@ -302,6 +306,186 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/production-calendar.vue"),
         name: "ProductionCalendar",
         meta: { title: "生产日历", elIcon: "Calendar", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-orders",
+    component: Layouts,
+    redirect: "/lite-orders/list",
+    name: "LiteOrdersRoot",
+    meta: { title: "订单", elIcon: "Tickets", alwaysShow: true },
+    children: [
+      {
+        path: "list",
+        component: () => import("@/pages/erp/orders.vue"),
+        name: "LiteOrders",
+        meta: { title: "客户订单", elIcon: "Tickets", keepAlive: true }
+      },
+      {
+        path: "documents",
+        component: () => import("@/pages/erp/documents.vue"),
+        name: "LiteSalesDocuments",
+        meta: { title: "销售出库单", elIcon: "DocumentRemove", documentDirection: "outbound", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-production",
+    component: Layouts,
+    redirect: "/lite-production/schedule",
+    name: "LiteProductionRoot",
+    meta: { title: "生产排期", elIcon: "Calendar", alwaysShow: true },
+    children: [
+      {
+        path: "schedule",
+        component: () => import("@/pages/erp/scheduling.vue"),
+        name: "LiteScheduling",
+        meta: { title: "排产计划", elIcon: "Calendar", keepAlive: true }
+      },
+      {
+        path: "completion",
+        component: () => import("@/pages/erp/production.vue"),
+        name: "LiteProductionCompletion",
+        meta: { title: "完工登记", elIcon: "CircleCheck", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-inventory",
+    component: Layouts,
+    redirect: "/lite-inventory/materials",
+    name: "LiteInventoryRoot",
+    meta: { title: "库存", elIcon: "House", alwaysShow: true },
+    children: [
+      {
+        path: "materials",
+        component: () => import("@/pages/erp/inventory.vue"),
+        name: "LitePartsInventory",
+        meta: { title: "原料库存", elIcon: "Cpu", inventoryKind: "PART", keepAlive: true }
+      },
+      {
+        path: "products",
+        component: () => import("@/pages/erp/inventory.vue"),
+        name: "LiteProductsInventory",
+        meta: { title: "成品库存", elIcon: "Box", inventoryKind: "PRODUCT", keepAlive: true }
+      },
+      {
+        path: "operations",
+        component: () => import("@/pages/erp/stock-document.vue"),
+        name: "LiteStockOperations",
+        meta: { title: "出入库", elIcon: "Sort", keepAlive: true }
+      },
+      {
+        path: "reconciliation",
+        component: () => import("@/pages/erp/stock-reconciliation.vue"),
+        name: "LiteStockReconciliation",
+        meta: { title: "盘点", elIcon: "Histogram", keepAlive: true }
+      },
+      {
+        path: "documents",
+        component: () => import("@/pages/erp/documents.vue"),
+        name: "LiteInboundDocuments",
+        meta: { title: "入库单", elIcon: "DocumentAdd", documentDirection: "inbound", keepAlive: true }
+      },
+      {
+        path: "movements",
+        component: () => import("@/pages/erp/movements.vue"),
+        name: "LiteStockMovements",
+        meta: { title: "库存流水", elIcon: "List", stockView: "history", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-purchase",
+    component: Layouts,
+    redirect: "/lite-purchase/requirements",
+    name: "LitePurchaseRoot",
+    meta: { title: "采购", elIcon: "ShoppingCart", alwaysShow: true },
+    children: [
+      {
+        path: "requirements",
+        component: () => import("@/pages/erp/purchase.vue"),
+        name: "LitePurchaseRequirements",
+        meta: { title: "采购缺口", elIcon: "ShoppingCart", keepAlive: true }
+      },
+      {
+        path: "arrivals",
+        component: () => import("@/pages/erp/purchase-arrival.vue"),
+        name: "LitePurchaseArrival",
+        meta: { title: "采购到货", elIcon: "Goods", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-finance",
+    component: Layouts,
+    redirect: "/lite-finance/receivables",
+    name: "LiteFinanceRoot",
+    meta: { title: "财务", elIcon: "Money", alwaysShow: true },
+    children: [
+      {
+        path: "receivables",
+        component: () => import("@/pages/erp/finance.vue"),
+        name: "LiteFinance",
+        meta: { title: "应收与收款", elIcon: "Money", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-settings",
+    component: Layouts,
+    redirect: "/lite-settings/products",
+    name: "LiteSettingsRoot",
+    meta: { title: "设置", elIcon: "Setting", alwaysShow: true },
+    children: [
+      {
+        path: "products",
+        component: () => import("@/pages/erp/products.vue"),
+        name: "LiteProducts",
+        meta: { title: "产品与 BOM", elIcon: "Box", keepAlive: true }
+      },
+      {
+        path: "materials",
+        component: () => import("@/pages/erp/parts.vue"),
+        name: "LiteParts",
+        meta: { title: "原料目录", elIcon: "Cpu", keepAlive: true }
+      },
+      {
+        path: "production",
+        component: () => import("@/pages/erp/production-settings.vue"),
+        name: "LiteProductionSettings",
+        meta: { title: "生产设置", elIcon: "SetUp", keepAlive: true }
+      },
+      {
+        path: "calendar",
+        component: () => import("@/pages/erp/production-calendar.vue"),
+        name: "LiteProductionCalendar",
+        meta: { title: "生产日历", elIcon: "Calendar", keepAlive: true }
+      },
+      {
+        path: "print",
+        component: () => import("@/pages/erp/print-settings.vue"),
+        name: "LitePrintSettings",
+        meta: { title: "打印设置", elIcon: "Printer", keepAlive: true }
+      },
+      {
+        path: "backups",
+        component: () => import("@/pages/erp/backups.vue"),
+        name: "LiteBackups",
+        meta: { title: "数据备份", elIcon: "RefreshLeft" }
+      },
+      {
+        path: "users",
+        component: () => import("@/pages/erp/users.vue"),
+        name: "LiteUsers",
+        meta: { title: "用户与权限", elIcon: "User", keepAlive: true }
+      },
+      {
+        path: "logs",
+        component: () => import("@/pages/erp/operation-logs.vue"),
+        name: "LiteOperationLogs",
+        meta: { title: "操作日志", elIcon: "Tickets", keepAlive: true }
       }
     ]
   }
