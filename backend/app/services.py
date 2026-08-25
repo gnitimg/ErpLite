@@ -1,6 +1,7 @@
 from datetime import date, datetime
 import hashlib
 import logging
+import os
 import secrets
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from .models import (
     StockReservation,
     StockTransaction,
     StockTransactionItem,
+    User,
 )
 
 
@@ -94,6 +96,36 @@ def verify_password(password: str, stored: str) -> bool:
     salt, expected_hash = stored.split("$", 1)
     hash_value = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000)
     return secrets.compare_digest(hash_value.hex(), expected_hash)
+
+
+def password_strength_ok(password: str) -> bool:
+    """密码强度：长度≥8 且同时包含字母与数字（大小写、符号不限）。
+
+    初始弱口令 12345678 仅含数字 → 不通过；faac0013 含字母+数字且 8 位 → 通过。
+    """
+    return len(password) >= 8 and any(c.isalpha() for c in password) and any(c.isdigit() for c in password)
+
+
+def ensure_default_admin(db: Session) -> None:
+    """幂等种子默认管理员：不存在时创建 admin/12345678（ADMIN，需首次改密）。
+
+    已存在则不覆盖其密码或标志，避免破坏运维已配置的账号。用户名与初始弱口令
+    可由 ERP_BOOTSTRAP_ADMIN_USER / ERP_BOOTSTRAP_ADMIN_PASSWORD 覆盖；覆盖口令
+    满足强度时不再强制改密。
+    """
+    username = os.getenv("ERP_BOOTSTRAP_ADMIN_USER", "admin").strip() or "admin"
+    initial_password = os.getenv("ERP_BOOTSTRAP_ADMIN_PASSWORD", "12345678")
+    existing = db.scalar(select(User).where(User.username == username))
+    if existing:
+        return
+    db.add(User(
+        username=username,
+        password_hash=hash_password(initial_password),
+        display_name="管理员",
+        role="ADMIN",
+        must_change_password=not password_strength_ok(initial_password),
+    ))
+    db.commit()
 
 
 def serial(prefix: str) -> str:

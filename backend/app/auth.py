@@ -27,7 +27,13 @@ EMERGENCY_ADMIN_MIN_PASSWORD_LENGTH = 12
 ROLE_RANK = {"VIEWER": 0, "OPERATOR": 1, "ADMIN": 2}
 
 # 无需登录即可访问的路径：登录本身、健康检查、实时刷新信号（不含业务数据）。
-PUBLIC_API_PATHS = {"/api/v1/auth/login", "/api/health", "/api/events"}
+# 改密接口放行由接口内部 require_user 校验登录态，任意已登录角色均可改自己的密码。
+PUBLIC_API_PATHS = {
+    "/api/v1/auth/login",
+    "/api/v1/auth/change-password",
+    "/api/health",
+    "/api/events",
+}
 
 # 仅 ADMIN 可访问（任意方法）：用户管理、备份全生命周期。
 ADMIN_ONLY_PREFIXES = ("/api/users", "/api/backups")

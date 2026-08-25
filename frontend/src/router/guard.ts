@@ -5,7 +5,7 @@ import { getToken } from "@@/utils/local-storage"
 import NProgress from "nprogress"
 import { usePermissionStore } from "@/pinia/stores/permission"
 import { useUserStore } from "@/pinia/stores/user"
-import { routerConfig } from "@/router/config"
+import { DASHBOARD_PATH, routerConfig } from "@/router/config"
 import { isWhiteList } from "@/router/whitelist"
 
 NProgress.configure({ showSpinner: false })
@@ -30,10 +30,20 @@ export function registerNavigationGuard(router: Router) {
     // 如果已经登录，并准备进入 Login 页面，则重定向到主页
     if (to.path === LOGIN_PATH) return "/"
     // 如果用户已经获得其权限信息
-    if (userStore.isGotUserInfo) return true
+    if (userStore.isGotUserInfo) {
+      // 强制改密期间禁止离开主页（允许返回登录页登出）
+      if (userStore.mustChangePassword && to.path !== DASHBOARD_PATH && to.path !== LOGIN_PATH) {
+        return { path: DASHBOARD_PATH, replace: true }
+      }
+      return true
+    }
     // 否则要重新获取权限信息
     try {
       await userStore.getInfo()
+      // 首次登录强制改密：未改密前禁止导航到主页以外的任何页面，对话框持续拦截。
+      if (userStore.mustChangePassword && to.path !== DASHBOARD_PATH) {
+        return { path: DASHBOARD_PATH, replace: true }
+      }
       // 注意：角色和权限必须是数组！ 例如: ["admin"] 或 ["permission:page-level"]
       const { roles, permissions } = userStore
       // 生成可访问的 Routes

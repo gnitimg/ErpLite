@@ -1,3 +1,4 @@
+import { changePasswordApi } from "@@/apis/auth"
 import { getCurrentUserApi } from "@@/apis/users"
 import { setToken as _setToken, getToken, removeToken } from "@@/utils/local-storage"
 import { pinia } from "@/pinia"
@@ -13,6 +14,9 @@ export const useUserStore = defineStore("user", () => {
   const permissions = ref<string[]>([])
 
   const username = ref<string>("")
+
+  /** 首次登录强制改密标志：为 true 时由布局层弹出不可关闭的改密对话框 */
+  const mustChangePassword = ref<boolean>(false)
 
   const isGotUserInfo = ref<boolean>(false)
 
@@ -32,8 +36,15 @@ export const useUserStore = defineStore("user", () => {
     username.value = data.username
     roles.value = data.roles ?? []
     permissions.value = data.permissions ?? []
+    mustChangePassword.value = Boolean(data.must_change_password)
     // 防止路由守卫逻辑进入无限循环
     isGotUserInfo.value = true
+  }
+
+  // 修改当前用户自己的密码（首次登录强制改密走同一入口）
+  const changePassword = async (oldPassword: string, newPassword: string) => {
+    await changePasswordApi({ old_password: oldPassword, new_password: newPassword })
+    mustChangePassword.value = false
   }
 
   // 模拟用户变化
@@ -60,6 +71,7 @@ export const useUserStore = defineStore("user", () => {
     token.value = ""
     roles.value = []
     permissions.value = []
+    mustChangePassword.value = false
     isGotUserInfo.value = false
   }
 
@@ -71,7 +83,7 @@ export const useUserStore = defineStore("user", () => {
     }
   }
 
-  return { token, roles, permissions, username, isGotUserInfo, setToken, getInfo, changeUser, logout, resetToken }
+  return { token, roles, permissions, username, mustChangePassword, isGotUserInfo, setToken, getInfo, changePassword, changeUser, logout, resetToken }
 })
 
 /**

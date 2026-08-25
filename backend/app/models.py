@@ -650,5 +650,8 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(120), default="")
     role: Mapped[str] = mapped_column(String(20), default="OPERATOR", index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # 首次登录强制改密标志：初始默认 admin 用弱口令 12345678 时为 True，
+    # 改密成功后清除；登录时也会按明文密码强度动态复核。
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

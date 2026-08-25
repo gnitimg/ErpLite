@@ -58,6 +58,7 @@ from .models import (
 from .schemas import (
     BackupRestorePayload,
     CalendarExceptionPayload,
+    ChangePasswordPayload,
     CreditSettlementPayload,
     ExternalProcessingReturnPayload,
     ExternalProcessingSendPayload,
@@ -101,6 +102,7 @@ from .services import (
     create_transaction,
     client_ip,
     effective_line_demand,
+    ensure_default_admin,
     ensure_sku_available,
     hash_password,
     item_dict,
@@ -110,6 +112,7 @@ from .services import (
     operation_log_dict,
     order_dict,
     order_workflow_dict,
+    password_strength_ok,
     production_run_issue_unit_costs,
     production_run_net_material_cost,
     rebalance_product_reservations,
@@ -131,6 +134,7 @@ from .auth import (
     load_user,
     matches_emergency_admin,
     require_admin,
+    require_user,
     required_role_for,
     role_allows,
     validate_auth_config,
@@ -149,6 +153,7 @@ async def lifespan(_app: FastAPI):
     try:
         run_migrations()
         with SessionLocal() as db:
+            ensure_default_admin(db)
             if os.getenv("ERP_SEED_DEMO", "0").strip().lower() in {"1", "true", "yes"}:
                 seed_demo(db)
             # 迁移后的旧订单、预留和自动排期也必须立即回到同一业务事实。
@@ -552,8 +557,13 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
         select(User).where(User.username == payload.username.strip(), User.active.is_(True))
     )
     if user and verify_password(payload.password, user.password_hash):
+        # 密码不满足强度（如初始弱口令 12345678）则标记强制首次改密；允许登录但须立即改密。
+        # 初始态系统仅含默认 admin，故"初始仅管理员可登录"由 ensure_default_admin 保证。
+        if not password_strength_ok(payload.password) and not user.must_change_password:
+            user.must_change_password = True
+            db.commit()
         token = create_access_token(user.id, user.username, user.role, user.display_name or user.username)
-        return {"code": 0, "data": {"token": token, "username": user.username, "display_name": user.display_name or user.username, "role": user.role}, "message": "success"}
+        return {"code": 0, "data": {"token": token, "username": user.username, "display_name": user.display_name or user.username, "role": user.role, "must_change_password": bool(user.must_change_password)}, "message": "success"}
     # Break-glass 应急管理员：默认关闭，仅显式开启且凭据满足强度要求时可用，登录留独立审计记录。
     credentials = emergency_admin_credentials()
     if credentials and matches_emergency_admin(payload.username, payload.password, credentials):
@@ -574,6 +584,32 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
     raise HTTPException(401, "用户名或密码错误")
 
 
+@app.post("/api/v1/auth/change-password")
+def change_password(payload: ChangePasswordPayload, request: Request, db: Session = Depends(get_db)):
+    """已登录用户修改自己的密码；新密码须满足强度要求，改完清除强制改密标志。"""
+    token_payload = require_user(request)
+    user_id = int(token_payload.get("sub", "0") or 0)
+    if user_id <= 0:
+        raise HTTPException(403, "应急管理员请通过环境变量配置凭据，不支持在线改密")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(401, "登录状态无效，请重新登录")
+    if not verify_password(payload.old_password, user.password_hash):
+        raise HTTPException(400, "原密码错误")
+    if not password_strength_ok(payload.new_password):
+        raise HTTPException(400, "新密码强度不足：需 8 位以上且同时包含字母与数字")
+    if payload.old_password == payload.new_password:
+        raise HTTPException(400, "新密码不能与原密码相同")
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    db.commit()
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.audit_target = user.username
+        state.audit_summary = "用户修改自身登录密码"
+    return {"code": 0, "data": {"ok": True}, "message": "success"}
+
+
 @app.get("/api/v1/users/me")
 def current_user(request: Request, db: Session = Depends(get_db)):
     token = extract_token(request)
@@ -587,11 +623,11 @@ def current_user(request: Request, db: Session = Depends(get_db)):
     if user_id > 0:
         user = load_user(db, user_id)
         if user:
-            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": []}, "message": "success"}
+            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": [], "must_change_password": bool(user.must_change_password)}, "message": "success"}
         raise HTTPException(401, "登录状态无效，请重新登录")
     if payload.get("role") == "ADMIN" and emergency_token_still_valid(payload):
         # 应急管理员令牌（sub=0）：开关关闭或用户名已轮换时立即失效。
-        return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": []}, "message": "success"}
+        return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": [], "must_change_password": False}, "message": "success"}
     raise HTTPException(401, "登录状态无效，请重新登录")
 
 

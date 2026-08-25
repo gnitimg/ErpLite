@@ -4,6 +4,7 @@ import { useLayoutMode } from "@@/composables/useLayoutMode"
 import { getCssVar, setCssVar } from "@@/utils/css"
 import { useSettingsStore } from "@/pinia/stores/settings"
 import { useResize } from "./composables/useResize"
+import ChangePasswordDialog from "./components/ChangePasswordDialog/index.vue"
 import LeftMode from "./modes/LeftMode.vue"
 import LeftTopMode from "./modes/LeftTopMode.vue"
 import TopMode from "./modes/TopMode.vue"
@@ -39,5 +40,7 @@ watchEffect(() => {
     <TopMode v-else-if="isTop" />
     <!-- 混合模式 -->
     <LeftTopMode v-else-if="isLeftTop" />
+    <!-- 首次登录强制改密对话框：must_change_password 为 true 时弹出，不可关闭 -->
+    <ChangePasswordDialog />
   </div>
 </template>
