@@ -1470,6 +1470,7 @@ def complete_production_run(
             .selectinload(InventoryItem.bom_components)
             .selectinload(ProductBomItem.part),
             selectinload(ProductionRun.allocations),
+            selectinload(ProductionRun.material_reservations),
         )
     )
     if db.bind and db.bind.dialect.name != "sqlite":
@@ -1477,8 +1478,6 @@ def complete_production_run(
     run = db.scalar(query)
     if not run:
         raise HTTPException(404, "生产批次不存在")
-    if run.workflow_version >= 2 and run.status != "RUNNING":
-        raise HTTPException(409, "新批次必须先开始生产再办理完工")
     if run.status not in {"PLANNED", "RUNNING"}:
         raise HTTPException(409, "只有待完工批次可以办理生产入库")
     if not run.product.bom_components:
@@ -1491,6 +1490,7 @@ def complete_production_run(
         raise HTTPException(400, "报废数量不能为负")
     total_consumed = qualified + scrap
     occurred_at = datetime.combine(payload.completion_date, time.min)
+    direct_planned_completion = run.status == "PLANNED"
     consumption_tx = db.scalar(
         select(StockTransaction)
         .where(
@@ -1512,9 +1512,13 @@ def complete_production_run(
             db,
             "PRODUCTION_OUT",
             component_changes,
-            payload.notes or f"生产批次 {run.run_no} 历史开工领料补记",
+            payload.notes or (
+                f"生产批次 {run.run_no} 完工倒冲"
+                if direct_planned_completion
+                else f"生产批次 {run.run_no} 历史开工领料补记"
+            ),
             related_production_run_id=run.id,
-            occurred_at=run.actual_start_at or occurred_at,
+            occurred_at=occurred_at if direct_planned_completion else (run.actual_start_at or occurred_at),
         )
     elif total_consumed != int(run.planned_quantity):
         variance = total_consumed - int(run.planned_quantity)
@@ -1539,6 +1543,16 @@ def complete_production_run(
             related_production_run_id=run.id,
             occurred_at=occurred_at,
         )
+    if direct_planned_completion:
+        consumed_by_part = {
+            component.part_id: float(component.quantity) * total_consumed
+            for component in run.product.bom_components
+        }
+        for reservation in run.material_reservations:
+            if reservation.status == "ACTIVE":
+                reservation.quantity = consumed_by_part.get(reservation.part_id, 0.0)
+                reservation.status = "CONSUMED"
+        run.actual_start_at = occurred_at
     external_required = bool(run.product.requires_external_processing)
     # 完工成本 = 本批次净材料成本（含超产补领、扣少产退料）÷ 合格数量。
     # 报废消耗的材料由合格品吸收，全部按领料时点快照，不用完工时点零件均价。

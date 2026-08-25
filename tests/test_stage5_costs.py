@@ -128,6 +128,84 @@ def inbound(db, item, quantity, unit_cost):
     db.commit()
 
 
+# ───────────────── Lite V1：待生产批次直接完工 ─────────────────
+
+def test_lite_planned_run_direct_completion_backflushes_actual_quantity():
+    """PLANNED 可直接完工，按合格+报废数量倒冲 BOM，并把合格品入库。"""
+    with database() as db:
+        part = make_part(db, "LITE-X", stock=100, cost=2)
+        product = make_product(db, "LITE-P")
+        make_bom(db, product, part, quantity=2)
+        run = make_run(db, product, 40, run_no="PR-LITE-DIRECT")
+
+        result = complete_run(db, run, qualified=35, scrap=5)
+
+        db.refresh(part)
+        db.refresh(product)
+        db.refresh(run)
+        assert result["qualified_quantity"] == 35
+        assert float(part.stock_qty) == 20
+        assert float(product.stock_qty) == 35
+        assert run.status == "COMPLETED"
+        assert run.actual_start_at is not None
+        issues = db.scalars(
+            select(StockTransaction).where(
+                StockTransaction.related_production_run_id == run.id,
+                StockTransaction.transaction_type == "PRODUCTION_OUT",
+            )
+        ).all()
+        assert len(issues) == 1
+
+
+def test_lite_planned_run_direct_completion_rejects_material_shortage():
+    """理论排产允许缺料，但实际完工不得把原料库存扣成负数。"""
+    with database() as db:
+        part = make_part(db, "LITE-SHORT", stock=80, cost=2)
+        product = make_product(db, "LITE-P-SHORT")
+        make_bom(db, product, part, quantity=2)
+        run = make_run(db, product, 100, run_no="PR-LITE-SHORT")
+
+        with pytest.raises(HTTPException) as error:
+            complete_run(db, run, qualified=50)
+
+        assert error.value.status_code == 409
+        assert "库存不足" in str(error.value.detail)
+        db.refresh(part)
+        db.refresh(run)
+        assert float(part.stock_qty) == 80
+        assert run.status == "PLANNED"
+        assert db.scalar(
+            select(StockTransaction).where(
+                StockTransaction.related_production_run_id == run.id,
+                StockTransaction.transaction_type == "PRODUCTION_OUT",
+            )
+        ) is None
+
+
+def test_legacy_running_completion_does_not_backflush_twice():
+    """Full 的 RUNNING 批次已在开工时领料，完成时只调整差异，不重复倒冲。"""
+    with database() as db:
+        part = make_part(db, "LEGACY-X", stock=100, cost=2)
+        product = make_product(db, "LEGACY-P")
+        make_bom(db, product, part, quantity=2)
+        run = make_run(db, product, 40, run_no="PR-LEGACY")
+
+        start_run(db, run)
+        complete_run(db, run, qualified=40)
+
+        db.refresh(part)
+        db.refresh(product)
+        assert float(part.stock_qty) == 20
+        assert float(product.stock_qty) == 40
+        issues = db.scalars(
+            select(StockTransaction).where(
+                StockTransaction.related_production_run_id == run.id,
+                StockTransaction.transaction_type == "PRODUCTION_OUT",
+            )
+        ).all()
+        assert len(issues) == 1
+
+
 # ───────────────── 5A：生产成本使用领料快照 ─────────────────
 
 def test_issue_snapshot_and_completion_cost():

@@ -531,33 +531,6 @@ async function createManualPlan() {
   }
 }
 
-async function startProduction(run: any) {
-  if (!run.materials_ready) {
-    void ElMessageBox.alert(
-      `当前不能开工：${materialShortageText(run)}。请先办理零件入库。`,
-      "生产缺料",
-      { type: "warning" }
-    )
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确认开始生产“${run.product_name}” ${productQty(run.planned_quantity)} ${run.unit}？`,
-      "开始生产",
-      { type: "warning" }
-    )
-    await api(`/api/production/runs/${run.id}/status`, {
-      method: "PUT",
-      body: JSON.stringify({ status: "RUNNING" })
-    })
-    ElMessage.success("批次已开始生产，可在生产入库页审核完工数量")
-    await load(true)
-    openRuns("running")
-  } catch (error: any) {
-    if (error !== "cancel") ElMessage.error(error.message)
-  }
-}
-
 async function cancelManualRun(run: any) {
   try {
     await ElMessageBox.confirm(
@@ -755,8 +728,8 @@ useLiveRefresh(() => load(true))
             >
               <div class="run-card-head">
                 <strong>{{ run.product_name }}</strong>
-                <el-button link type="primary" @click="startProduction(run)">
-                  开始生产
+                <el-button link type="primary" @click="$router.push('/lite-production/completion')">
+                  登记完工
                 </el-button>
               </div>
               <span>{{ run.product_sku }} · {{ run.run_no }}</span>
@@ -794,8 +767,8 @@ useLiveRefresh(() => load(true))
               <div class="run-card-head">
                 <strong>{{ run.product_name }}</strong>
                 <div>
-                  <el-button link type="primary" @click="startProduction(run)">
-                    开始生产
+                  <el-button link type="primary" @click="$router.push('/lite-production/completion')">
+                    登记完工
                   </el-button>
                   <el-button link @click="unlockSchedule(run)">
                     恢复自动
@@ -840,8 +813,8 @@ useLiveRefresh(() => load(true))
               <div class="run-card-head">
                 <strong>{{ run.product_name }}</strong>
                 <div>
-                  <el-button link type="primary" @click="startProduction(run)">
-                    开始生产
+                  <el-button link type="primary" @click="$router.push('/lite-production/completion')">
+                    登记完工
                   </el-button>
                   <el-button link type="danger" @click="cancelManualRun(run)">
                     取消
