@@ -491,7 +491,7 @@ def test_external_batches_allocated_by_time_per_order():
         make_ext_batch(db, product, 100, datetime(2026, 8, 30, 8, 0), batch_no="EP-B")
         order1 = add_order(db, "SO-1", [(product, 40)], days_until_due=2)
         order2 = add_order(db, "SO-2", [(product, 80)], days_until_due=3)
-        recalculate_production_plan(db)
+        recalculate_production_plan(db, NOW)
         assert order1.items[0].pipeline_quantity == 40
         assert order1.items[0].estimated_completion_at == datetime(2026, 8, 25, 8, 0)
         assert order1.items[0].eta_reliable
@@ -514,7 +514,7 @@ def test_pipeline_full_coverage_with_partial_return_keeps_eta():
         product.stock_qty = 40
         product.processing_qty = 60
         order = add_order(db, "SO-1", [(product, 100)], days_until_due=4)
-        recalculate_production_plan(db)
+        recalculate_production_plan(db, NOW)
         line = order.items[0]
         # 40 由成品库存预留，60 由外协在途覆盖，ETA = 8/30
         assert int(line.reserved_quantity) == 40
@@ -531,7 +531,7 @@ def test_undated_batch_and_semi_finished_make_eta_unreliable():
         product.external_process_name = "喷漆"
         make_ext_batch(db, product, 30, None, batch_no="EP-U")
         order1 = add_order(db, "SO-1", [(product, 30)], days_until_due=2)
-        recalculate_production_plan(db)
+        recalculate_production_plan(db, NOW)
         # 无预计回厂时间：数量被覆盖但 ETA 不可靠
         assert order1.items[0].pipeline_quantity == 30
         assert order1.items[0].eta_reliable is False
@@ -542,7 +542,7 @@ def test_undated_batch_and_semi_finished_make_eta_unreliable():
         product2.external_process_name = "电镀"
         product2.semi_finished_qty = 20
         order2 = add_order(db, "SO-2", [(product2, 20)], days_until_due=3)
-        recalculate_production_plan(db)
+        recalculate_production_plan(db, NOW)
         # 半成品未送出：不可交付，ETA 不可靠
         assert order2.items[0].pipeline_quantity == 20
         assert order2.items[0].eta_reliable is False
