@@ -47,7 +47,7 @@ async function completeRun() {
   if (total > Number(activeRun.value.planned_quantity)) {
     const excess = total - Number(activeRun.value.planned_quantity)
     try {
-      await ElMessageBox.confirm(`合格+报废高于计划数量 ${productQty(excess)}，超出部分将补领 BOM 零件。是否继续？`, "产量高于计划", { type: "warning" })
+      await ElMessageBox.confirm(`合格+报废高于计划数量 ${productQty(excess)}，超出部分将补领 BOM 原料。是否继续？`, "产量高于计划", { type: "warning" })
     } catch {
       return
     }

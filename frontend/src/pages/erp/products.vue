@@ -97,7 +97,7 @@ function removeComponent(index: number) {
 }
 async function save() {
   if (!await formRef.value?.validate().catch(() => false)) return
-  if (form.components.some(line => !line.part_id || Number(line.quantity) <= 0)) return ElMessage.warning("请完整填写 BOM 零件和用量")
+  if (form.components.some(line => !line.part_id || Number(line.quantity) <= 0)) return ElMessage.warning("请完整填写 BOM 原料和用量")
   if (form.requires_external_processing && !form.external_process_name.trim()) return ElMessage.warning("请填写外协工序名称")
   saving.value = true
   try {
@@ -275,7 +275,7 @@ useLiveRefresh(() => load(true))
         <el-table :data="form.components" border>
           <el-table-column label="组成原料" min-width="260">
             <template #default="{ row }">
-              <el-select v-model="row.part_id" filterable placeholder="选择零件" style="width:100%">
+              <el-select v-model="row.part_id" filterable placeholder="选择原料" style="width:100%">
                 <el-option
                   v-for="part in parts"
                   :key="part.id"

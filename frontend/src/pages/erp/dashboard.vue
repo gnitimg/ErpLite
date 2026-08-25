@@ -231,16 +231,13 @@ useLiveRefresh(() => load(true))
           </div>
           <div class="card-body quick-actions">
             <router-link class="quick-action" to="/lite-inventory/operations">
-              <strong>开入库单</strong><span>采购件或普通物料入库</span>
+              <strong>办理出入库</strong><span>普通入库、领料或普通出库</span>
             </router-link>
-            <router-link class="quick-action" to="/lite-inventory/operations">
-              <strong>开出库单</strong><span>领料或普通物料出库</span>
-            </router-link>
-            <router-link class="quick-action" to="/lite-inventory/documents">
-              <strong>查看入库单</strong><span>生产与采购入库凭证</span>
+            <router-link class="quick-action" :to="{ path: '/lite-inventory/history', query: { tab: 'documents' } }">
+              <strong>查看库存记录</strong><span>库存流水与出入库单据</span>
             </router-link>
             <router-link class="quick-action" to="/lite-orders/documents">
-              <strong>查看出库单</strong><span>销售与普通出库凭证</span>
+              <strong>查看销售单据</strong><span>订单出库与客户退货记录</span>
             </router-link>
             <router-link class="quick-action" to="/lite-orders/list">
               <strong>新建客户订单</strong><span>录入客户需求与交期</span>
@@ -250,7 +247,7 @@ useLiveRefresh(() => load(true))
         <div class="content-card">
           <div class="card-head">
             <h3>库存预警</h3>
-            <router-link to="/lite-inventory/materials">
+            <router-link :to="{ path: '/lite-inventory/overview', query: { tab: 'materials' } }">
               库存详情
             </router-link>
           </div>

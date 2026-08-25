@@ -32,7 +32,7 @@ async function save() {
         schedule_auto_snap: form.schedule_auto_snap
       })
     }))
-    ElMessage.success("生产设置已保存，客单 ETA 已自动重算")
+    ElMessage.success("基本参数已保存，客单 ETA 已自动重算")
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
@@ -67,7 +67,7 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card settings-card" v-loading="loading">
       <div class="card-head">
-        <h3>生产设置</h3>
+        <h3>基本参数</h3>
         <span>全局参数会影响全部产品和未完成客单的预计完成时间</span>
       </div>
       <el-form label-position="top" class="settings-form">

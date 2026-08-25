@@ -202,7 +202,7 @@ watch(() => route.name, () => load())
           <el-table-column label="类型" width="90">
             <template #default="{ row }">
               <el-tag :type="row.kind === 'PRODUCT' ? 'primary' : 'info'" size="small" effect="plain">
-                {{ row.kind === 'PRODUCT' ? '产品' : '零件' }}
+                {{ row.kind === 'PRODUCT' ? '产品' : '原料' }}
               </el-tag>
             </template>
           </el-table-column>
@@ -360,7 +360,7 @@ watch(() => route.name, () => load())
               class="material-kind-select"
               @change="onItemKindChange"
             >
-              <el-option label="零件" value="PART" />
+              <el-option label="原料" value="PART" />
               <el-option label="产品" value="PRODUCT" />
             </el-select>
             <el-select
@@ -480,7 +480,7 @@ watch(() => route.name, () => load())
             <template #default="{ row }">
               <div class="sku-cell">
                 <strong>{{ row.name }}</strong>
-                <span class="mono">{{ row.sku }} · {{ row.kind === 'PRODUCT' ? '产品' : '零件' }}</span>
+                <span class="mono">{{ row.sku }} · {{ row.kind === 'PRODUCT' ? '产品' : '原料' }}</span>
               </div>
             </template>
           </el-table-column>

@@ -51,9 +51,9 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>采购缺口与预计到货</h3><span>只按生产缺口计算原料需求，采购承诺会进入 ETA 时间线</span>
+        <h3>采购需求</h3><span>查看缺什么、缺多少，以及已经登记的预计到货</span>
       </div>
-      <el-table v-loading="loading" :data="viewRows" empty-text="当前没有原料采购缺口">
+      <el-table v-loading="loading" :data="viewRows" empty-text="当前没有原料采购需求">
         <el-table-column label="原料" min-width="220">
           <template #default="{ row }">
             <div class="sku-cell">

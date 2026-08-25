@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref, watch } from "vue"
-import { useRoute } from "vue-router"
+import { useRoute, useRouter } from "vue-router"
 import { api, money, productQty, stockQty, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 
 const loading = ref(false)
 const route = useRoute()
+const router = useRouter()
 const rows = ref<any[]>([])
 const filterDrawer = ref(false)
 const inboundDrawer = ref(false)
@@ -15,8 +16,13 @@ const activePart = ref<any>(null)
 const keyword = ref("")
 const filters = reactive({ stockStatus: "" })
 const inboundForm = reactive({ quantity: 1, unit_cost: 0, notes: "" })
-const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" : "PART")
-const pageTitle = computed(() => kind.value === "PRODUCT" ? "成品库存" : "原料库存")
+const activeKind = ref<"PART" | "PRODUCT">(route.query.tab === "products" ? "PRODUCT" : "PART")
+const routeKind = computed(() => String(route.meta.inventoryKind || "PART"))
+const showKindTabs = computed(() => routeKind.value === "ALL")
+const kind = computed<"PART" | "PRODUCT">(() => showKindTabs.value
+  ? activeKind.value
+  : routeKind.value === "PRODUCT" ? "PRODUCT" : "PART")
+const pageTitle = computed(() => showKindTabs.value ? "库存总览" : kind.value === "PRODUCT" ? "成品库存" : "原料库存")
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
 const shortageValue = (row: any) => Math.max(Number(row.shortage_qty || 0), 0)
@@ -55,6 +61,10 @@ function resetFilters() {
   filters.stockStatus = ""
   applyFilters()
 }
+function selectKind(value: string | number) {
+  const tab = value === "PRODUCT" ? "products" : "materials"
+  router.replace({ query: { ...route.query, tab } })
+}
 function openInbound(row: any) {
   activePart.value = row
   inboundForm.quantity = Number(row.shortage_qty) > 0
@@ -82,7 +92,7 @@ async function submitInbound() {
         consume_bom: false
       })
     })
-    ElMessage.success("零件已入库，入库单和缺口数量已自动更新")
+    ElMessage.success("原料已入库，入库单和缺口数量已自动更新")
     inboundDrawer.value = false
     await load()
   } catch (error: any) {
@@ -92,12 +102,22 @@ async function submitInbound() {
   }
 }
 onMounted(load)
-watch(() => route.name, () => load())
+watch(kind, () => {
+  filters.stockStatus = ""
+  load()
+})
+watch(() => route.query.tab, (value) => {
+  if (showKindTabs.value) activeKind.value = value === "products" ? "PRODUCT" : "PART"
+})
 useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page">
+    <el-tabs v-if="showKindTabs" v-model="activeKind" class="inventory-kind-tabs" @tab-change="selectKind">
+      <el-tab-pane label="原料" name="PART" />
+      <el-tab-pane label="成品" name="PRODUCT" />
+    </el-tabs>
     <ListToolbar
       v-model="keyword"
       placeholder="搜索物料编码、名称或规格"
@@ -269,6 +289,12 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
+.inventory-kind-tabs {
+  margin-bottom: 2px;
+}
+.inventory-kind-tabs :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
 .column-help {
   margin-left: 5px;
   color: var(--el-text-color-secondary);

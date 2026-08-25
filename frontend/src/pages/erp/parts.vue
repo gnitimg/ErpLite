@@ -18,8 +18,8 @@ const editingId = ref<number | null>(null)
 const emptyForm = () => ({ sku: "", name: "", unit: "件", spec: "", cost_price: 0, min_stock: 0, supply_mode: "STOCK" })
 const form = reactive(emptyForm())
 const rules: FormRules = {
-  sku: [{ required: true, message: "请输入零件编码", trigger: "blur" }],
-  name: [{ required: true, message: "请输入零件名称", trigger: "blur" }]
+  sku: [{ required: true, message: "请输入原料编码", trigger: "blur" }],
+  name: [{ required: true, message: "请输入原料名称", trigger: "blur" }]
 }
 
 async function load(silent = false) {
@@ -68,7 +68,7 @@ async function save() {
   saving.value = true
   try {
     await api(editingId.value ? `/api/parts/${editingId.value}` : "/api/parts", { method: editingId.value ? "PUT" : "POST", body: JSON.stringify(form) })
-    ElMessage.success(editingId.value ? "零件已更新" : "零件已创建")
+    ElMessage.success(editingId.value ? "原料已更新" : "原料已创建")
     drawer.value = false
     await load()
   } catch (error: any) {
@@ -79,9 +79,9 @@ async function save() {
 }
 async function remove(row: any) {
   try {
-    await ElMessageBox.confirm(`确定停用“${row.name}”吗？`, "停用零件", { type: "warning" })
+    await ElMessageBox.confirm(`确定停用“${row.name}”吗？`, "停用原料", { type: "warning" })
     await api(`/api/parts/${row.id}`, { method: "DELETE" })
-    ElMessage.success("零件已停用")
+    ElMessage.success("原料已停用")
     await load()
   } catch (error: any) {
     if (error !== "cancel") ElMessage.error(error.message)
@@ -95,7 +95,7 @@ useLiveRefresh(() => load(true))
   <div class="erp-page">
     <ListToolbar
       v-model="keyword"
-      placeholder="搜索零件编码或名称"
+      placeholder="搜索原料编码或名称"
       :filter-count="activeFilterCount"
       :loading="loading"
       @search="load"
@@ -103,15 +103,15 @@ useLiveRefresh(() => load(true))
       @refresh="load"
     >
       <el-button type="primary" @click="openCreate">
-        <el-icon><Plus /></el-icon>新建零件
+        <el-icon><Plus /></el-icon>新建原料
       </el-button>
     </ListToolbar>
     <div class="content-card">
       <div class="card-head">
-        <h3>零件档案</h3><span>共 {{ rows.length }} 项</span>
+        <h3>原料资料</h3><span>共 {{ rows.length }} 项</span>
       </div>
       <el-table v-loading="loading" :data="rows">
-        <el-table-column label="零件" min-width="190">
+        <el-table-column label="原料" min-width="190">
           <template #default="{ row }">
             <div class="sku-cell">
               <strong>{{ row.name }}</strong><span class="mono">{{ row.sku }}</span>
@@ -165,7 +165,7 @@ useLiveRefresh(() => load(true))
       </el-table>
     </div>
 
-    <el-drawer v-model="filterDrawer" title="筛选零件" size="min(420px, 92vw)">
+    <el-drawer v-model="filterDrawer" title="筛选原料" size="min(420px, 92vw)">
       <el-form label-position="top">
         <el-form-item label="备料方式">
           <el-select v-model="filters.supplyMode" clearable placeholder="全部方式" style="width:100%">
@@ -187,13 +187,13 @@ useLiveRefresh(() => load(true))
       </el-form>
     </el-drawer>
 
-    <el-drawer v-model="drawer" :title="editingId ? '编辑零件' : '新建零件'" size="min(520px, 92vw)">
+    <el-drawer v-model="drawer" :title="editingId ? '编辑原料' : '新建原料'" size="min(520px, 92vw)">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-grid">
-          <el-form-item label="零件编码" prop="sku">
+          <el-form-item label="原料编码" prop="sku">
             <el-input v-model="form.sku" placeholder="例如 P-MOTOR-001" />
           </el-form-item>
-          <el-form-item label="零件名称" prop="name">
+          <el-form-item label="原料名称" prop="name">
             <el-input v-model="form.name" placeholder="请输入名称" />
           </el-form-item>
           <el-form-item label="规格型号">
@@ -223,7 +223,7 @@ useLiveRefresh(() => load(true))
           <el-button @click="drawer = false">
             取消
           </el-button><el-button type="primary" :loading="saving" @click="save">
-            保存零件
+            保存原料
           </el-button>
         </div>
       </el-form>

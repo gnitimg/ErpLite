@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref, watch } from "vue"
-import { useRoute } from "vue-router"
+import { useRoute, useRouter } from "vue-router"
 import {
   api,
   formatDate,
@@ -15,7 +15,10 @@ import {
 import ListToolbar from "./components/ListToolbar.vue"
 import { printWithSavedSize } from "./print"
 
+type DocumentTab = "inbound" | "outbound" | "returns"
+
 const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const rows = ref<any[]>([])
 const itemOptions = ref<any[]>([])
@@ -29,17 +32,31 @@ const filters = reactive({
   transactionType: "",
   dateRange: [] as string[]
 })
-const direction = computed(() =>
-  String(route.meta.documentDirection || "inbound").toLowerCase()
+const documentContext = computed(() => String(route.meta.documentContext || "inventory"))
+const isSales = computed(() => documentContext.value === "sales")
+const supportsDirectionTabs = computed(() => route.meta.documentDirection === "both")
+const documentTab = ref<DocumentTab>(
+  isSales.value
+    ? route.query.tab === "returns" ? "returns" : "outbound"
+    : route.query.direction === "outbound" ? "outbound" : "inbound"
 )
-const title = computed(() => direction.value === "inbound" ? "入库单" : "出库单")
-const scopeTitle = computed(() => scope.value === "PART" ? "零件" : "产品")
+const direction = computed(() => {
+  if (isSales.value) return documentTab.value === "returns" ? "inbound" : "outbound"
+  if (supportsDirectionTabs.value) return documentTab.value === "outbound" ? "outbound" : "inbound"
+  return String(route.meta.documentDirection || "inbound").toLowerCase()
+})
+const title = computed(() => {
+  if (isSales.value) return documentTab.value === "returns" ? "退货记录" : "销售出库单"
+  return direction.value === "inbound" ? "入库单" : "出库单"
+})
+const scopeTitle = computed(() => scope.value === "PART" ? "原料" : "产品")
 const activeFilterCount = computed(() =>
   Number(Boolean(filters.itemId))
   + Number(Boolean(filters.transactionType))
   + Number(filters.dateRange.length > 0)
 )
 const transactionOptions = computed(() => {
+  if (isSales.value) return documentTab.value === "returns" ? ["SALE_RETURN_IN"] : ["SALE_OUT"]
   if (direction.value === "inbound" && scope.value === "PART") {
     return ["PURCHASE_IN", "GENERAL_IN", "OPENING"]
   }
@@ -60,9 +77,8 @@ async function load(silent = false) {
   const params = new URLSearchParams({ scope: scope.value })
   if (keyword.value.trim()) params.set("keyword", keyword.value.trim())
   if (filters.itemId) params.set("item_id", String(filters.itemId))
-  if (filters.transactionType) {
-    params.set("transaction_type", filters.transactionType)
-  }
+  const transactionType = isSales.value ? transactionOptions.value[0] : filters.transactionType
+  if (transactionType) params.set("transaction_type", transactionType)
   if (filters.dateRange[0]) params.set("start_date", filters.dateRange[0])
   if (filters.dateRange[1]) params.set("end_date", filters.dateRange[1])
   try {
@@ -78,6 +94,7 @@ async function load(silent = false) {
       }))
       .filter(row =>
         row.lines.length > 0
+        && (!transactionType || row.transaction_type === transactionType)
         && (!filters.itemId || row.lines.some(
           (line: any) => line.item_id === filters.itemId
         ))
@@ -118,14 +135,21 @@ function resetFilters() {
   filters.dateRange = []
   applyFilters()
 }
+function selectDocumentTab(value: string | number) {
+  const tab = value as DocumentTab
+  const query = { ...route.query }
+  if (isSales.value) query.tab = tab
+  else query.direction = tab
+  router.replace({ query })
+}
 onMounted(() => {
   keyword.value = typeof route.query.keyword === "string" ? route.query.keyword : ""
-  scope.value = route.query.scope === "PRODUCT" ? "PRODUCT" : "PART"
+  scope.value = isSales.value || route.query.scope === "PRODUCT" ? "PRODUCT" : "PART"
   load()
   loadItemOptions()
 })
 watch(direction, () => {
-  scope.value = "PART"
+  scope.value = isSales.value ? "PRODUCT" : "PART"
   filters.itemId = undefined
   filters.transactionType = ""
   filters.dateRange = []
@@ -142,6 +166,22 @@ useLiveRefresh(() => load(true))
 
 <template>
   <div class="erp-page document-page">
+    <el-tabs v-if="isSales" v-model="documentTab" class="document-context-tabs" @tab-change="selectDocumentTab">
+      <el-tab-pane label="出库单" name="outbound" />
+      <el-tab-pane label="退货记录" name="returns" />
+    </el-tabs>
+    <el-tabs v-else-if="supportsDirectionTabs" v-model="documentTab" class="document-context-tabs" @tab-change="selectDocumentTab">
+      <el-tab-pane label="入库" name="inbound" />
+      <el-tab-pane label="出库" name="outbound" />
+    </el-tabs>
+    <el-alert
+      v-if="isSales && documentTab === 'returns'"
+      title="退货请在客户订单详情中登记；此处汇总已经产生库存记录的客户退货。"
+      type="info"
+      :closable="false"
+      show-icon
+      class="document-context-alert"
+    />
     <ListToolbar
       v-model="keyword"
       placeholder="搜索单号、物料编码、名称、规格或客户"
@@ -151,9 +191,9 @@ useLiveRefresh(() => load(true))
       @filter="filterDrawer = true"
       @refresh="load"
     >
-      <router-link to="/lite-inventory/operations">
+      <router-link :to="isSales ? '/lite-orders/list' : '/lite-inventory/operations'">
         <el-button type="primary">
-          {{ direction === 'inbound' ? '开入库单' : '办理出库' }}
+          {{ isSales ? (documentTab === 'returns' ? '登记客户退货' : '办理订单出库') : direction === 'inbound' ? '开入库单' : '办理出库' }}
         </el-button>
       </router-link>
     </ListToolbar>
@@ -162,9 +202,10 @@ useLiveRefresh(() => load(true))
       <div class="card-head">
         <h3>{{ title }}</h3>
         <el-segmented
+          v-if="!isSales"
           v-model="scope"
           :options="[
-            { label: '零件', value: 'PART' },
+            { label: '原料', value: 'PART' },
             { label: '产品', value: 'PRODUCT' },
           ]"
           class="operation-scope-switch"
@@ -216,12 +257,12 @@ useLiveRefresh(() => load(true))
       size="min(420px, 92vw)"
     >
       <el-form label-position="top">
-        <el-form-item :label="scope === 'PART' ? '零件' : '产品'">
+        <el-form-item :label="scope === 'PART' ? '原料' : '产品'">
           <el-select
             v-model="filters.itemId"
             filterable
             clearable
-            :placeholder="scope === 'PART' ? '搜索并选择零件' : '搜索并选择产品'"
+            :placeholder="scope === 'PART' ? '搜索并选择原料' : '搜索并选择产品'"
             style="width: 100%"
           >
             <el-option
@@ -232,7 +273,7 @@ useLiveRefresh(() => load(true))
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="业务类型">
+        <el-form-item v-if="!isSales" label="业务类型">
           <el-select
             v-model="filters.transactionType"
             clearable
@@ -360,6 +401,8 @@ useLiveRefresh(() => load(true))
 
 <style scoped>
 @page { size: 297mm 210mm; margin: 0; }
+.document-context-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
+.document-context-alert { margin-bottom: 12px; }
 .card-head .operation-scope-switch {
   margin-bottom: 0;
   align-self: center;

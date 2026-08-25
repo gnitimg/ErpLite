@@ -64,11 +64,11 @@ useLiveRefresh(() => load(true))
       </el-button>
     </ListToolbar>
 
-    <el-alert class="list-page-alert" title="生产日历例外用于标记节假日（不生产）或临时调班日（生产）。排产算法会跳过非工作日。" type="info" :closable="false" show-icon />
+    <el-alert class="list-page-alert" title="工作日历例外用于标记节假日（不生产）或临时调班日（生产）。排产算法会跳过非工作日。" type="info" :closable="false" show-icon />
 
     <div class="content-card">
       <div class="card-head">
-        <h3>生产日历例外</h3><span>标记节假日和临时调班日</span>
+        <h3>工作日历</h3><span>标记节假日和临时调班日</span>
       </div>
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无日历例外">
         <el-table-column label="日期" prop="exception_date" width="160" />

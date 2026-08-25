@@ -81,9 +81,9 @@ async function markArrived(row: Commitment) {
 
 async function remove(row: Commitment) {
   try {
-    await ElMessageBox.confirm(`确认删除 #${row.id}（${row.part_sku}）的采购承诺？`, "删除", { type: "warning" })
+    await ElMessageBox.confirm(`确认取消 #${row.id}（${row.part_sku}）的预计到货？`, "取消预计到货", { type: "warning" })
     await api(`/api/purchase/commitments/${row.id}`, { method: "DELETE" })
-    ElMessage.success("已删除")
+    ElMessage.success("预计到货已取消")
     await load()
   } catch (error: any) {
     if (error !== "cancel" && error !== "close") ElMessage.error(error.message)
@@ -96,7 +96,7 @@ useLiveRefresh(() => load(true))
 
 <template>
   <div class="erp-page">
-    <ListToolbar v-model="keyword" placeholder="搜索零件、供应商" :loading="loading" @refresh="load" @update:model-value="applyFilter">
+    <ListToolbar v-model="keyword" placeholder="搜索原料、供应商" :loading="loading" @refresh="load" @update:model-value="applyFilter">
       <el-button type="primary" @click="dialog = true; form.part_id = 0; form.supplier_text = ''; form.quantity = 0; form.expected_arrival_date = ''; form.notes = ''">
         <el-icon><Plus /></el-icon>登记预计到货
       </el-button>
@@ -104,9 +104,9 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card">
       <div class="card-head">
-        <h3>采购与预计到货</h3><span>登记已采购数量和预计到货日期，系统会自动更新排产 ETA</span>
+        <h3>到货登记</h3><span>登记已采购数量和预计到货日期，系统会自动更新排产 ETA</span>
       </div>
-      <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无采购预计到货">
+      <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无到货登记">
         <el-table-column label="原料" min-width="180">
           <template #default="{ row }">{{ row.part_sku }} {{ row.part_name }}</template>
         </el-table-column>
@@ -122,8 +122,8 @@ useLiveRefresh(() => load(true))
         </el-table-column>
         <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.status === 'PLANNED'" link type="success" @click="markArrived(row as any)">到货</el-button>
-            <el-button v-if="row.status === 'PLANNED'" link type="danger" @click="remove(row as any)">删除</el-button>
+            <el-button v-if="row.status === 'PLANNED'" link type="success" @click="markArrived(row as any)">确认到货</el-button>
+            <el-button v-if="row.status === 'PLANNED'" link type="danger" @click="remove(row as any)">取消</el-button>
           </template>
         </el-table-column>
       </el-table>
