@@ -2,15 +2,11 @@
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { useRouter } from "vue-router"
-import { useUserStore } from "@/pinia/stores/user"
 import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
 const router = useRouter()
-const userStore = useUserStore()
-const isAdmin = computed(() => userStore.roles.includes("ADMIN"))
-
 const loading = ref(false)
 const saving = ref(false)
 const drawer = ref(false)
@@ -688,7 +684,7 @@ useLiveRefresh(async () => {
                 <strong>登记客户退货</strong>
               </div>
               <el-alert
-                title="退货数量不能超过该产品累计已出库且尚未退回的数量；只有勾选“退回成品库存”才会增加库存并生成退货入库单。"
+                title="选择退款退货或换货，并填写本次实际退回数量。只有确认退回库存的合格品才会增加成品库存。"
                 type="info"
                 :closable="false"
                 show-icon
@@ -709,7 +705,7 @@ useLiveRefresh(async () => {
                 </el-table-column>
                 <el-table-column label="库存处理" width="145">
                   <template #default="{ row }">
-                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">退回成品库存</el-checkbox>
+                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">合格品回库</el-checkbox>
                   </template>
                 </el-table-column>
               </el-table>
@@ -739,17 +735,11 @@ useLiveRefresh(async () => {
                 <el-table-column label="库存处理" width="120">
                   <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>
                 </el-table-column>
-                <el-table-column label="退款/换货" min-width="180">
+                <el-table-column label="退款金额 / 换货" min-width="180">
                   <template #default="{ row }">
                     <span v-if="row.resolution === 'REPLACE'">换货补发</span>
                     <span v-else-if="row.refund_unit_price_snapshot == null">—</span>
                     <span v-else>{{ money(row.refund_unit_price_snapshot) }} / 件，合计 {{ money(row.refund_total) }}</span>
-                  </template>
-                </el-table-column>
-                <el-table-column v-if="isAdmin" label="退货成本" min-width="180">
-                  <template #default="{ row }">
-                    <span v-if="row.return_unit_cost_snapshot == null">—</span>
-                    <span v-else>{{ money(row.return_unit_cost_snapshot) }} / 件，合计 {{ money(row.return_cost_total) }}</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="日期" width="120">

@@ -61,10 +61,10 @@ const allocateForm = reactive({ payment_id: 0, receivable_id: 0, amount: 0 })
 const settleForm = reactive({ credit_id: 0, settled_amount: 0, notes: "" })
 const availableReceivables = ref<Receivable[]>([])
 
-const statusLabels: Record<string, string> = { OPEN: "待核销", PARTIAL: "部分核销", SETTLED: "已结清", CANCELLED: "已取消" }
+const statusLabels: Record<string, string> = { OPEN: "待收款", PARTIAL: "部分收款", SETTLED: "已结清", CANCELLED: "已取消" }
 const statusTypes: Record<string, string> = { OPEN: "primary", PARTIAL: "warning", SETTLED: "success", CANCELLED: "info" }
 const methodLabels: Record<string, string> = { TRANSFER: "银行转账", CASH: "现金", OTHER: "其他" }
-const kindLabels: Record<string, string> = { OFFSET_RECEIVABLE: "冲减应收", REFUND_DUE: "应退现金" }
+const kindLabels: Record<string, string> = { OFFSET_RECEIVABLE: "退货冲减应收", REFUND_DUE: "应退款给客户" }
 
 const rows = computed<(Receivable | Payment | CustomerCredit)[]>(() => {
   if (tab.value === "receivables") return receivableRows.value
@@ -150,7 +150,7 @@ async function allocatePayment() {
       method: "POST",
       body: JSON.stringify({ receivable_id: allocateForm.receivable_id, amount: allocateForm.amount })
     })
-    ElMessage.success("核销成功")
+    ElMessage.success("收款已用于冲抵应收")
     allocateDialog.value = false
     await load()
   } catch (error: any) {
@@ -188,37 +188,37 @@ useLiveRefresh(() => load(true))
     <div class="metric-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
       <div class="metric-card">
         <div>
-          <div class="metric-label">应收余额</div>
+          <div class="metric-label">客户未收</div>
           <div class="metric-value">{{ totalReceivable.toFixed(2) }}</div>
-          <div class="metric-note">未核销应收合计</div>
+          <div class="metric-note">仍需向客户收取</div>
         </div>
         <div class="metric-icon"><el-icon><Coin /></el-icon></div>
       </div>
       <div class="metric-card">
         <div>
-          <div class="metric-label">已核销金额</div>
+          <div class="metric-label">客户已收</div>
           <div class="metric-value">{{ totalSettled.toFixed(2) }}</div>
-          <div class="metric-note">已收款核销合计</div>
+          <div class="metric-note">已用于订单应收</div>
         </div>
         <div class="metric-icon"><el-icon><Wallet /></el-icon></div>
       </div>
       <div class="metric-card">
         <div>
-          <div class="metric-label">应退客户</div>
+          <div class="metric-label">退款 / 贷项</div>
           <div class="metric-value">{{ totalCreditDue.toFixed(2) }}</div>
-          <div class="metric-note">未结清客户贷项</div>
+          <div class="metric-note">仍需退款或冲减</div>
         </div>
         <div class="metric-icon"><el-icon><RefreshLeft /></el-icon></div>
       </div>
     </div>
 
     <el-tabs v-model="tab" @tab-change="() => load()">
-      <el-tab-pane label="应收账款" name="receivables" />
-      <el-tab-pane label="收款记录" name="payments" />
-      <el-tab-pane label="客户贷项" name="credits" />
+      <el-tab-pane label="应收" name="receivables" />
+      <el-tab-pane label="收款" name="payments" />
+      <el-tab-pane label="退款与贷项" name="credits" />
     </el-tabs>
 
-    <ListToolbar v-model="keyword" :placeholder="tab === 'receivables' ? '搜索应收编号、订单、客户' : tab === 'credits' ? '搜索贷项编号、客户' : '搜索收款编号、客户'" :loading="loading" @refresh="load">
+    <ListToolbar v-model="keyword" :placeholder="tab === 'receivables' ? '搜索订单或客户' : tab === 'credits' ? '搜索退款客户' : '搜索收款客户'" :loading="loading" @refresh="load">
       <el-button v-if="tab === 'payments'" type="primary" @click="paymentDialog = true">
         <el-icon><Plus /></el-icon>新建收款
       </el-button>
@@ -227,15 +227,14 @@ useLiveRefresh(() => load(true))
     <div class="content-card">
       <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无数据">
         <template v-if="tab === 'receivables'">
-          <el-table-column label="应收编号" prop="receivable_no" width="160" />
-          <el-table-column label="订单编号" prop="order_no" width="140" />
           <el-table-column label="客户" prop="customer_name" min-width="120" />
+          <el-table-column label="订单" prop="order_no" width="150" />
           <el-table-column label="应收金额" prop="amount" width="120" align="right" />
-          <el-table-column label="已核销" prop="settled_amount" width="120" align="right" />
-          <el-table-column label="贷项冲减" width="120" align="right">
+          <el-table-column label="已收" prop="settled_amount" width="120" align="right" />
+          <el-table-column label="退货冲减" width="120" align="right">
             <template #default="{ row }">{{ (row.credit_offset_amount || 0).toFixed(2) }}</template>
           </el-table-column>
-          <el-table-column label="剩余" width="120" align="right">
+          <el-table-column label="未收" width="120" align="right">
             <template #default="{ row }">{{ (row.remaining_amount ?? (row.amount - row.settled_amount)).toFixed(2) }}</template>
           </el-table-column>
           <el-table-column label="状态" width="100">
@@ -248,13 +247,12 @@ useLiveRefresh(() => load(true))
           </el-table-column>
         </template>
         <template v-else-if="tab === 'credits'">
-          <el-table-column label="贷项编号" prop="credit_no" width="160" />
           <el-table-column label="客户" prop="customer_name" min-width="120" />
-          <el-table-column label="类型" width="100">
+          <el-table-column label="处理方式" min-width="150">
             <template #default="{ row }">{{ kindLabels[row.kind] || row.kind }}</template>
           </el-table-column>
           <el-table-column label="金额" prop="amount" width="120" align="right" />
-          <el-table-column label="已处理" prop="settled_amount" width="120" align="right" />
+          <el-table-column label="已退款/冲减" prop="settled_amount" width="130" align="right" />
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="(statusTypes[row.status] as any) || 'info'" size="small">{{ statusLabels[row.status] || row.status }}</el-tag>
@@ -270,17 +268,16 @@ useLiveRefresh(() => load(true))
           </el-table-column>
         </template>
         <template v-else>
-          <el-table-column label="收款编号" prop="payment_no" width="160" />
           <el-table-column label="客户" prop="customer_name" min-width="120" />
           <el-table-column label="收款金额" prop="amount" width="120" align="right" />
-          <el-table-column label="已核销" prop="allocated_amount" width="120" align="right" />
+          <el-table-column label="已用于应收" prop="allocated_amount" width="120" align="right" />
           <el-table-column label="收款方式" width="100">
             <template #default="{ row }">{{ methodLabels[row.method] || row.method }}</template>
           </el-table-column>
           <el-table-column label="收款日期" prop="payment_date" width="120" />
           <el-table-column label="操作" width="100" fixed="right">
             <template #default="{ row }">
-              <el-button v-if="row.allocated_amount < row.amount" link type="primary" @click="openAllocateDialog(row as any)">核销</el-button>
+              <el-button v-if="row.allocated_amount < row.amount" link type="primary" @click="openAllocateDialog(row as any)">冲抵应收</el-button>
             </template>
           </el-table-column>
         </template>
@@ -307,18 +304,18 @@ useLiveRefresh(() => load(true))
       </template>
     </el-dialog>
 
-    <el-dialog v-model="allocateDialog" title="核销应收" width="480px">
+    <el-dialog v-model="allocateDialog" title="用收款冲抵应收" width="480px">
       <el-form label-position="top">
-        <el-form-item label="选择应收">
-          <el-select v-model="allocateForm.receivable_id" style="width:100%" placeholder="选择待核销应收" @change="onAllocateReceivableChange">
-            <el-option v-for="r in availableReceivables" :key="r.id" :label="`${r.receivable_no} - ${r.customer_name} (余${(r.remaining_amount ?? (r.amount - r.settled_amount)).toFixed(2)})`" :value="r.id" />
+        <el-form-item label="选择客户订单应收">
+          <el-select v-model="allocateForm.receivable_id" style="width:100%" placeholder="选择待收款订单" @change="onAllocateReceivableChange">
+            <el-option v-for="r in availableReceivables" :key="r.id" :label="`${r.order_no} - ${r.customer_name}（未收 ${(r.remaining_amount ?? (r.amount - r.settled_amount)).toFixed(2)}）`" :value="r.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="核销金额"><el-input-number v-model="allocateForm.amount" :min="0" :precision="2" style="width:100%" /></el-form-item>
+        <el-form-item label="本次冲抵金额"><el-input-number v-model="allocateForm.amount" :min="0" :precision="2" style="width:100%" /></el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="allocateDialog = false">取消</el-button>
-        <el-button type="primary" @click="allocatePayment">确认核销</el-button>
+        <el-button type="primary" @click="allocatePayment">确认冲抵</el-button>
       </template>
     </el-dialog>
 
