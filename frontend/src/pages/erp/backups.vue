@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { api, apiBlob, formatTime, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import InfoTip from "./components/InfoTip.vue"
 
 interface BackupRow {
   filename: string
@@ -169,11 +170,12 @@ useLiveRefresh(() => load(true))
         <el-icon><DocumentAdd /></el-icon>立即备份
       </el-button>
     </ListToolbar>
-    <el-alert class="list-page-alert" title="备份包含所有业务数据。恢复操作会覆盖当前数据，并在恢复前自动生成一份安全快照。" type="warning" :closable="false" show-icon />
-
     <div class="content-card">
       <div class="card-head">
-        <h3>数据备份</h3><span>备份文件保存在项目 backups 目录，可下载到其他位置留存</span>
+        <h3>
+          数据备份
+          <InfoTip content="备份保存在项目 backups 目录并可下载留存。恢复会覆盖当前数据，但系统会先自动生成安全快照。" />
+        </h3>
       </div>
       <el-table v-loading="loading" :data="filteredRows" row-key="filename" empty-text="暂无符合条件的数据备份">
         <el-table-column label="备份文件" min-width="310">

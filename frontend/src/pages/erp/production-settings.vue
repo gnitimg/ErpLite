@@ -2,6 +2,7 @@
 import { ElMessage } from "element-plus"
 import { onMounted, reactive, ref } from "vue"
 import { api, formatTime, useLiveRefresh } from "./api"
+import InfoTip from "./components/InfoTip.vue"
 
 const loading = ref(false)
 const saving = ref(false)
@@ -47,14 +48,7 @@ useLiveRefresh(() => load(true))
 <template>
   <div class="erp-page">
     <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-alert
-          title="生产线仅作为排产并行槽位，不维护编号、名称或独立档案。"
-          type="info"
-          :closable="false"
-          show-icon
-        />
-      </div>
+      <div />
       <div class="toolbar-right">
         <el-button :loading="loading" @click="() => load()">
           <el-icon><Refresh /></el-icon>刷新
@@ -67,8 +61,10 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card settings-card" v-loading="loading">
       <div class="card-head">
-        <h3>基本参数</h3>
-        <span>全局参数会影响全部产品和未完成客单的预计完成时间</span>
+        <h3>
+          基本参数
+          <InfoTip content="生产位只作为并行排产槽位；这些全局参数会影响未完成客单的预计完成日期。" />
+        </h3>
       </div>
       <el-form label-position="top" class="settings-form">
         <el-form-item label="并行生产线数量" required>

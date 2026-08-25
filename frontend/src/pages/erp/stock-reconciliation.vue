@@ -3,6 +3,7 @@ import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { api, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import InfoTip from "./components/InfoTip.vue"
 
 interface InventoryRow {
   id: number
@@ -104,15 +105,15 @@ useLiveRefresh(() => load(true))
 
     <el-tabs v-model="activeTab" class="content-card">
       <el-tab-pane label="库存盘点" name="stocktake">
-        <el-alert
+        <!-- <el-alert
           class="list-page-alert"
           title="录入实物数量后提交盘点；盘盈生成 MANUAL_IN，盘亏生成 MANUAL_OUT。"
           type="info"
           :closable="false"
           show-icon
-        />
+        /> -->
         <div class="card-head">
-          <h3>库存盘点</h3><span>零件与产品均可盘点</span>
+          <h3>库存盘点</h3>
         </div>
         <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无库存">
           <el-table-column label="SKU" prop="sku" width="140" />
@@ -156,15 +157,11 @@ useLiveRefresh(() => load(true))
       </el-tab-pane>
 
       <el-tab-pane label="系统库存对账" name="audit">
-        <el-alert
-          class="list-page-alert"
-          title="只读比较系统库存与主库存流水，不会自动修改库存；发现差异后请人工盘点。"
-          type="warning"
-          :closable="false"
-          show-icon
-        />
         <div class="card-head">
-          <h3>系统库存对账</h3>
+          <h3>
+            系统库存对账
+            <InfoTip content="只读比较系统库存与主库存流水，不会自动修改库存；发现差异后请人工盘点。" />
+          </h3>
           <el-checkbox v-model="onlyDifferences">只显示差异</el-checkbox>
         </div>
         <el-table v-loading="loading" :data="filteredAuditRows" row-key="item_id" empty-text="暂无库存">

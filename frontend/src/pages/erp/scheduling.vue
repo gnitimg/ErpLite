@@ -2,6 +2,7 @@
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue"
 import { api, productQty, useLiveRefresh } from "./api"
+import InfoTip from "./components/InfoTip.vue"
 
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
@@ -20,6 +21,12 @@ const pointerDrag = ref<{
   originScrollLeft: number
   sourceStartOffset: number
   sourceLineSlot: number
+  moved: boolean
+} | null>(null)
+const timelinePan = ref<{
+  pointerId: number
+  lastX: number
+  lastY: number
   moved: boolean
 } | null>(null)
 const suppressRunClick = ref(false)
@@ -41,6 +48,9 @@ const products = ref<any[]>([])
 const lineCount = ref(1)
 const autoSnap = ref(true)
 const pixelsPerDay = ref(112)
+const pastExtensionDays = ref(30)
+const futureExtensionDays = ref(90)
+const rangeExpanding = ref(false)
 const today = () => new Date().toISOString().slice(0, 10)
 const manualForm = reactive({
   product_id: undefined as number | undefined,
@@ -82,19 +92,25 @@ const selectedProduct = computed(() =>
   products.value.find(row => row.id === manualForm.product_id)
 )
 
-const timelineStart = computed(() => {
+const baseTimelineStart = computed(() => {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const starts = activeRuns.value.map(row => new Date(row.planned_start_at).getTime())
   const earliest = starts.length ? Math.min(...starts) : today.getTime()
   return new Date(Math.min(today.getTime(), earliest))
 })
-const timelineEnd = computed(() => {
-  const minimum = timelineStart.value.getTime() + 14 * DAY_MS
+const baseTimelineEnd = computed(() => {
+  const minimum = baseTimelineStart.value.getTime() + 14 * DAY_MS
   const ends = activeRuns.value.map(row => new Date(row.planned_end_at).getTime())
   const latest = ends.length ? Math.max(...ends) + 2 * DAY_MS : minimum
   return new Date(Math.max(minimum, latest))
 })
+const timelineStart = computed(() => new Date(
+  baseTimelineStart.value.getTime() - pastExtensionDays.value * DAY_MS
+))
+const timelineEnd = computed(() => new Date(
+  baseTimelineEnd.value.getTime() + futureExtensionDays.value * DAY_MS
+))
 const totalDays = computed(() =>
   Math.ceil((timelineEnd.value.getTime() - timelineStart.value.getTime()) / DAY_MS)
 )
@@ -380,6 +396,73 @@ function removePointerListeners() {
   document.body.classList.remove("timeline-pointer-dragging")
 }
 
+async function ensureTimelineRange() {
+  const scroll = timelineScroll.value
+  if (!scroll || rangeExpanding.value) return
+  const edge = Math.max(pixelsPerDay.value * 7, scroll.clientWidth * 0.2)
+  if (scroll.scrollLeft < edge) {
+    rangeExpanding.value = true
+    const addedDays = 90
+    pastExtensionDays.value += addedDays
+    await nextTick()
+    scroll.scrollLeft += addedDays * pixelsPerDay.value
+    rangeExpanding.value = false
+    return
+  }
+  if (scroll.scrollWidth - scroll.scrollLeft - scroll.clientWidth < edge) {
+    rangeExpanding.value = true
+    futureExtensionDays.value += 90
+    await nextTick()
+    rangeExpanding.value = false
+  }
+}
+
+function removeTimelinePanListeners() {
+  window.removeEventListener("pointermove", moveTimelinePan)
+  window.removeEventListener("pointerup", finishTimelinePan)
+  window.removeEventListener("pointercancel", finishTimelinePan)
+  document.body.classList.remove("timeline-pan-active")
+}
+
+function startTimelinePan(event: PointerEvent) {
+  if (event.button !== 2 || pointerDrag.value) return
+  event.preventDefault()
+  timelinePan.value = {
+    pointerId: event.pointerId,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    moved: false
+  }
+  document.body.classList.add("timeline-pan-active")
+  window.addEventListener("pointermove", moveTimelinePan, { passive: false })
+  window.addEventListener("pointerup", finishTimelinePan)
+  window.addEventListener("pointercancel", finishTimelinePan)
+}
+
+function moveTimelinePan(event: PointerEvent) {
+  const state = timelinePan.value
+  const scroll = timelineScroll.value
+  if (!state || !scroll || event.pointerId !== state.pointerId) return
+  event.preventDefault()
+  const deltaX = event.clientX - state.lastX
+  const deltaY = event.clientY - state.lastY
+  if (Math.abs(deltaX) + Math.abs(deltaY) > 2) state.moved = true
+  scroll.scrollLeft -= deltaX
+  scroll.scrollTop -= deltaY
+  state.lastX = event.clientX
+  state.lastY = event.clientY
+  void ensureTimelineRange()
+}
+
+async function finishTimelinePan(event: PointerEvent) {
+  const state = timelinePan.value
+  if (!state || event.pointerId !== state.pointerId) return
+  event.preventDefault()
+  removeTimelinePanListeners()
+  timelinePan.value = null
+  await ensureTimelineRange()
+}
+
 function startTimelineBlock(event: PointerEvent, run: any) {
   if (run.status !== "PLANNED" || event.button !== 0 || saving.value) return
   event.preventDefault()
@@ -553,21 +636,17 @@ onMounted(async () => {
   await load()
   await scrollToNow()
 })
-onUnmounted(removePointerListeners)
+onUnmounted(() => {
+  removePointerListeners()
+  removeTimelinePanListeners()
+})
 useLiveRefresh(() => load(true))
 </script>
 
 <template>
   <div class="erp-page scheduling-page">
     <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-alert
-          title="排产图按日期显示；时间块长度根据生产数量和产品目录中的单机日产量计算。"
-          type="info"
-          :closable="false"
-          show-icon
-        />
-      </div>
+      <div />
       <div class="toolbar-right">
         <el-button-group>
           <el-button :disabled="pixelsPerDay <= 72" @click="zoom(-16)">
@@ -593,13 +672,25 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card schedule-card" v-loading="loading || saving">
       <div class="card-head">
-        <h3>订单排产</h3>
+        <h3>
+          订单排产
+          <InfoTip
+            content="任务块长度由生产数量和单机日产量计算。左键拖动任务块调整排期；在时间轴内按住右键可上下、左右平移，日期范围会自动扩展。"
+          />
+        </h3>
         <span>
           {{ lineCount }} 个生产位 · {{ pendingRuns.length }} 个系统建议 ·
           {{ manualRuns.length }} 个自主计划 · {{ runningRuns.length }} 个生产中
         </span>
       </div>
-      <div ref="timelineScroll" class="timeline-scroll">
+      <div
+        ref="timelineScroll"
+        class="timeline-scroll"
+        :class="{ 'is-panning': Boolean(timelinePan) }"
+        @pointerdown="startTimelinePan"
+        @contextmenu.prevent
+        @scroll="ensureTimelineRange"
+      >
         <div
           class="timeline-grid"
           :style="{ width: `${timelineWidth + LANE_LABEL_WIDTH}px` }"
@@ -953,10 +1044,6 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
-.page-toolbar .el-alert {
-  min-width: min(680px, 55vw);
-}
-
 .schedule-card {
   overflow: hidden;
 }
@@ -967,6 +1054,12 @@ useLiveRefresh(() => load(true))
   min-height: 310px;
   border-top: 1px solid var(--el-border-color-lighter);
   border-bottom: 1px solid var(--el-border-color-lighter);
+  cursor: default;
+}
+
+.timeline-scroll.is-panning {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .timeline-grid {

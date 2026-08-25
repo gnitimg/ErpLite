@@ -15,6 +15,20 @@ interface DocumentLine {
   unit_price: number
 }
 
+const props = withDefaults(defineProps<{
+  embedded?: boolean
+  initialDirection?: Direction
+  initialOrderId?: number
+}>(), {
+  embedded: false,
+  initialDirection: "INBOUND",
+  initialOrderId: 0
+})
+const emit = defineEmits<{
+  saved: [payload: { direction: Direction, scope: string, keyword: string }]
+  view: [payload: { direction: Direction, scope: string, keyword: string }]
+}>()
+
 const route = useRoute()
 const router = useRouter()
 const saving = ref(false)
@@ -22,7 +36,7 @@ const loading = ref(false)
 const inventory = ref<any[]>([])
 const linkedOrder = ref<any>(null)
 const documentNo = ref("提交后自动生成")
-const direction = ref<Direction>("INBOUND")
+const direction = ref<Direction>(props.initialDirection)
 const directionOptions = [
   { label: "入库", value: "INBOUND" },
   { label: "出库", value: "OUTBOUND" }
@@ -39,6 +53,9 @@ const form = reactive({
 })
 
 const orderId = computed(() => {
+  if (Number.isInteger(props.initialOrderId) && props.initialOrderId > 0) {
+    return props.initialOrderId
+  }
   const value = Number(route.query.order_id)
   return Number.isInteger(value) && value > 0 ? value : 0
 })
@@ -113,6 +130,14 @@ function replacementQty(line: any) {
 /** 本行按原单计价的数量（换货补发不产生销售金额）。 */
 function originalQty(line: any) {
   return Math.max(0, Number(line.quantity || 0) - replacementQty(line))
+}
+
+function savedPayload() {
+  return {
+    direction: direction.value,
+    scope: itemOf(form.items.find(line => line.item_id) || {})?.kind || "PART",
+    keyword: documentNo.value
+  }
 }
 
 function applyOrder(order: any) {
@@ -227,6 +252,7 @@ async function submit() {
     }
     ElMessage.success(`${title.value}已保存，库存与单据记录已同步更新`)
     await loadInventory(true)
+    emit("saved", savedPayload())
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
@@ -236,13 +262,17 @@ async function submit() {
 
 function viewDocument() {
   if (documentNo.value === "提交后自动生成") return
+  const payload = savedPayload()
+  if (props.embedded) {
+    emit("view", payload)
+    return
+  }
   router.push({
-    path: linkedOrder.value ? "/lite-orders/documents" : "/lite-inventory/history",
+    path: linkedOrder.value ? "/lite-orders/documents" : "/lite-stock-documents/list",
     query: {
-      keyword: documentNo.value,
-      scope: itemOf(form.items.find(line => line.item_id) || {})?.kind || "PART",
+      keyword: payload.keyword,
+      scope: payload.scope,
       ...(!linkedOrder.value && {
-        tab: "documents",
         direction: direction.value === "INBOUND" ? "inbound" : "outbound"
       })
     }
@@ -263,14 +293,18 @@ useLiveRefresh(() => loadInventory(true))
 </script>
 
 <template>
-  <div class="erp-page stock-document-page" v-loading="loading">
+  <div
+    :class="['stock-document-page', { 'erp-page': !embedded, embedded }]"
+    v-loading="loading"
+  >
     <section class="content-card document-card">
-      <header class="card-head document-card-head">
+      <header v-if="!embedded || linkedOrder" class="card-head document-card-head">
         <div>
-          <h3>出入库开单</h3>
+          <h3 v-if="!embedded">出入库开单</h3>
           <p v-if="linkedOrder" class="order-hint">由客户订单 {{ linkedOrder.order_no }} 回填，提交后同步更新订单状态</p>
         </div>
         <el-segmented
+          v-if="!embedded"
           v-model="direction"
           :options="directionOptions"
           :disabled="Boolean(linkedOrder)"
@@ -408,6 +442,17 @@ useLiveRefresh(() => loadInventory(true))
 <style scoped>
 @page { size: 297mm 210mm; margin: 0; }
 .document-card { overflow: hidden; }
+.stock-document-page.embedded {
+  padding: 0;
+}
+.stock-document-page.embedded .document-card {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.stock-document-page.embedded .document-sheet {
+  margin-top: 4px;
+}
 .document-card-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .document-card-head h3 { margin: 0; }
 .order-hint { margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; }

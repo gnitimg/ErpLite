@@ -214,7 +214,7 @@ function openShipment(row: any) {
 }
 function openStockDocument(row: any) {
   workflowDrawer.value = false
-  router.push({ path: "/lite-inventory/operations", query: { order_id: row.id } })
+  router.push({ path: "/lite-stock-documents/list", query: { order_id: row.id } })
 }
 function viewOutboundDocuments(row: any) {
   workflowDrawer.value = false

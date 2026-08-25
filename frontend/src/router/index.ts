@@ -366,9 +366,8 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "operations",
-        component: () => import("@/pages/erp/stock-document.vue"),
-        name: "LiteStockOperations",
-        meta: { title: "出入库", keepAlive: true }
+        redirect: to => ({ path: "/lite-stock-documents/list", query: to.query }),
+        meta: { hidden: true }
       },
       {
         path: "stocktake",
@@ -380,7 +379,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "history",
         component: () => import("@/pages/erp/inventory-history.vue"),
         name: "LiteInventoryHistory",
-        meta: { title: "库存记录", stockView: "history", documentDirection: "both", keepAlive: true }
+        meta: { title: "库存流水", stockView: "history", keepAlive: true }
       },
       {
         path: "materials",
@@ -399,13 +398,33 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "documents",
-        redirect: { path: "/lite-inventory/history", query: { tab: "documents", direction: "inbound" } },
+        redirect: { path: "/lite-stock-documents/list", query: { direction: "inbound" } },
         meta: { hidden: true }
       },
       {
         path: "movements",
-        redirect: { path: "/lite-inventory/history", query: { tab: "movements" } },
+        redirect: "/lite-inventory/history",
         meta: { hidden: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-stock-documents",
+    component: Layouts,
+    redirect: "/lite-stock-documents/list",
+    name: "LiteStockDocumentsRoot",
+    meta: { title: "出入库", elIcon: "Sort", alwaysShow: true },
+    children: [
+      {
+        path: "list",
+        component: () => import("@/pages/erp/documents.vue"),
+        name: "LiteStockDocuments",
+        meta: {
+          title: "库存单据",
+          documentContext: "inventory",
+          documentDirection: "both",
+          keepAlive: true
+        }
       }
     ]
   },

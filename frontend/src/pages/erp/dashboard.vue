@@ -227,14 +227,14 @@ useLiveRefresh(() => load(true))
       <div class="dashboard-side-stack">
         <div class="content-card">
           <div class="card-head">
-            <h3>快捷开单</h3><span>常用单据入口</span>
+            <h3>快捷开单</h3>
           </div>
           <div class="card-body quick-actions">
-            <router-link class="quick-action" to="/lite-inventory/operations">
-              <strong>办理出入库</strong><span>普通入库、领料或普通出库</span>
+            <router-link class="quick-action" to="/lite-stock-documents/list">
+              <strong>库存单据</strong><span>开入库单或开出库单</span>
             </router-link>
-            <router-link class="quick-action" :to="{ path: '/lite-inventory/history', query: { tab: 'documents' } }">
-              <strong>查看库存记录</strong><span>库存流水与出入库单据</span>
+            <router-link class="quick-action" to="/lite-inventory/history">
+              <strong>查看库存流水</strong><span>按时间追溯库存变化</span>
             </router-link>
             <router-link class="quick-action" to="/lite-orders/documents">
               <strong>查看销售单据</strong><span>订单出库与客户退货记录</span>

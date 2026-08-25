@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from "element-plus"
 import { onMounted, ref, reactive } from "vue"
 import { api, formatTime, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import InfoTip from "./components/InfoTip.vue"
 
 interface Commitment {
   id: number
@@ -104,7 +105,10 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card">
       <div class="card-head">
-        <h3>到货登记</h3><span>登记已采购数量和预计到货日期，系统会自动更新排产 ETA</span>
+        <h3>
+          到货登记
+          <InfoTip content="登记采购数量和预计到货日期后，系统会自动更新排产预计完成日期。" />
+        </h3>
       </div>
       <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无到货登记">
         <el-table-column label="原料" min-width="180">

@@ -3,6 +3,7 @@ import { ElMessage } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { api, formatTime, useLiveRefresh } from "./api"
 import { applyPrintSettings, defaultPrintSettings } from "./print"
+import InfoTip from "./components/InfoTip.vue"
 
 const presets = [
   { value: "A4_LANDSCAPE", label: "A4 横向", width: 297, height: 210 },
@@ -85,14 +86,7 @@ useLiveRefresh(() => load(true))
 <template>
   <div class="erp-page print-settings-page">
     <div class="page-toolbar">
-      <div class="toolbar-group">
-        <el-alert
-          title="打印机驱动中的纸张尺寸应与这里保持一致；页面会自动按宽度等比缩放。"
-          type="info"
-          :closable="false"
-          show-icon
-        />
-      </div>
+      <div />
       <div class="toolbar-right">
         <el-button :loading="loading" @click="() => load()"><el-icon><Refresh /></el-icon>刷新</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存设置</el-button>
@@ -101,7 +95,12 @@ useLiveRefresh(() => load(true))
 
     <div class="settings-layout" v-loading="loading">
       <section class="content-card settings-card">
-        <div class="card-head"><h3>打印设置</h3><span>全局应用于入库单和出库单</span></div>
+        <div class="card-head">
+          <h3>
+            打印设置
+            <InfoTip content="设置全局应用于出入库单；打印机驱动的纸张尺寸应保持一致，页面会按宽度等比缩放。" />
+          </h3>
+        </div>
         <el-form label-position="top" class="settings-form">
           <el-form-item label="常用单据尺寸">
             <el-select :model-value="form.paper_preset" style="width: 100%" @change="choosePreset">

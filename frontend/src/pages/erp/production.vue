@@ -2,6 +2,7 @@
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { api, formatDate, productQty, useLiveRefresh } from "./api"
+import InfoTip from "./components/InfoTip.vue"
 
 const loading = ref(false)
 const saving = ref(false)
@@ -84,7 +85,10 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>完工登记</h3><span>计划完成后登记实际产量，系统自动倒冲 BOM 并入库</span>
+        <h3>
+          完工登记
+          <InfoTip content="登记实际合格数量；审核后系统按 BOM 扣减零件并办理成品或半成品入库。" />
+        </h3>
       </div>
       <el-table v-loading="loading" :data="visibleRows" empty-text="当前没有待完工生产批次">
         <el-table-column prop="run_no" label="批次号" min-width="180">

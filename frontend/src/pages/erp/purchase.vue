@@ -2,6 +2,7 @@
 import { ElMessage } from "element-plus"
 import { computed, onMounted, ref } from "vue"
 import { api, qty, useLiveRefresh } from "./api"
+import InfoTip from "./components/InfoTip.vue"
 
 const loading = ref(false)
 const rows = ref<any[]>([])
@@ -51,7 +52,10 @@ useLiveRefresh(() => load(true))
     </div>
     <section class="content-card">
       <div class="card-head">
-        <h3>采购需求</h3><span>查看缺什么、缺多少，以及已经登记的预计到货</span>
+        <h3>
+          采购需求
+          <InfoTip content="汇总原料缺口、待采购数量以及已经登记的预计到货。" />
+        </h3>
       </div>
       <el-table v-loading="loading" :data="viewRows" empty-text="当前没有原料采购需求">
         <el-table-column label="原料" min-width="220">

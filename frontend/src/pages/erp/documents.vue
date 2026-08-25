@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
-import { computed, onMounted, reactive, ref, watch } from "vue"
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import {
   api,
@@ -13,9 +13,12 @@ import {
   useLiveRefresh
 } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import InfoTip from "./components/InfoTip.vue"
 import { printWithSavedSize } from "./print"
+import StockDocument from "./stock-document.vue"
 
 type DocumentTab = "inbound" | "outbound" | "returns"
+type StockDocumentDirection = "INBOUND" | "OUTBOUND"
 
 const route = useRoute()
 const router = useRouter()
@@ -25,6 +28,9 @@ const itemOptions = ref<any[]>([])
 const detail = ref<any>(null)
 const drawer = ref(false)
 const filterDrawer = ref(false)
+const documentDialog = ref(false)
+const stockDocumentDirection = ref<StockDocumentDirection>("INBOUND")
+const stockDocumentKey = ref(0)
 const keyword = ref("")
 const scope = ref("PART")
 const filters = reactive({
@@ -49,6 +55,13 @@ const title = computed(() => {
   if (isSales.value) return documentTab.value === "returns" ? "退货记录" : "销售出库单"
   return direction.value === "inbound" ? "入库单" : "出库单"
 })
+const routeOrderId = computed(() => {
+  const value = Number(route.query.order_id)
+  return Number.isInteger(value) && value > 0 ? value : 0
+})
+const dialogTitle = computed(() =>
+  stockDocumentDirection.value === "INBOUND" ? "开入库单" : "开出库单"
+)
 const scopeTitle = computed(() => scope.value === "PART" ? "原料" : "产品")
 const activeFilterCount = computed(() =>
   Number(Boolean(filters.itemId))
@@ -142,12 +155,40 @@ function selectDocumentTab(value: string | number) {
   else query.direction = tab
   router.replace({ query })
 }
+function openDocumentDialog(selectedDirection?: StockDocumentDirection) {
+  stockDocumentDirection.value = selectedDirection
+    || (direction.value === "inbound" ? "INBOUND" : "OUTBOUND")
+  stockDocumentKey.value += 1
+  documentDialog.value = true
+}
+async function showSavedDocument(payload: {
+  direction: StockDocumentDirection
+  scope: string
+  keyword: string
+}) {
+  documentDialog.value = false
+  documentTab.value = payload.direction === "INBOUND" ? "inbound" : "outbound"
+  await nextTick()
+  scope.value = payload.scope === "PRODUCT" ? "PRODUCT" : "PART"
+  keyword.value = payload.keyword
+  router.replace({
+    query: {
+      direction: documentTab.value,
+      scope: scope.value,
+      keyword: keyword.value
+    }
+  })
+  load()
+}
 onMounted(() => {
   keyword.value = typeof route.query.keyword === "string" ? route.query.keyword : ""
   scope.value = isSales.value || route.query.scope === "PRODUCT" ? "PRODUCT" : "PART"
   load()
   loadItemOptions()
 })
+watch(routeOrderId, value => {
+  if (!isSales.value && value) openDocumentDialog("OUTBOUND")
+}, { immediate: true })
 watch(direction, () => {
   scope.value = isSales.value ? "PRODUCT" : "PART"
   filters.itemId = undefined
@@ -174,14 +215,6 @@ useLiveRefresh(() => load(true))
       <el-tab-pane label="入库" name="inbound" />
       <el-tab-pane label="出库" name="outbound" />
     </el-tabs>
-    <el-alert
-      v-if="isSales && documentTab === 'returns'"
-      title="退货请在客户订单详情中登记；此处汇总已经产生库存记录的客户退货。"
-      type="info"
-      :closable="false"
-      show-icon
-      class="document-context-alert"
-    />
     <ListToolbar
       v-model="keyword"
       placeholder="搜索单号、物料编码、名称、规格或客户"
@@ -191,16 +224,29 @@ useLiveRefresh(() => load(true))
       @filter="filterDrawer = true"
       @refresh="load"
     >
-      <router-link :to="isSales ? '/lite-orders/list' : '/lite-inventory/operations'">
+      <router-link v-if="isSales" to="/lite-orders/list">
         <el-button type="primary">
-          {{ isSales ? (documentTab === 'returns' ? '登记客户退货' : '办理订单出库') : direction === 'inbound' ? '开入库单' : '办理出库' }}
+          {{ documentTab === 'returns' ? '登记客户退货' : '办理订单出库' }}
         </el-button>
       </router-link>
+      <el-button
+        v-else
+        type="primary"
+        @click="openDocumentDialog()"
+      >
+        {{ direction === 'inbound' ? '开入库单' : '开出库单' }}
+      </el-button>
     </ListToolbar>
 
     <section class="content-card">
       <div class="card-head">
-        <h3>{{ title }}</h3>
+        <h3>
+          {{ title }}
+          <InfoTip
+            v-if="isSales && documentTab === 'returns'"
+            content="退货请在客户订单详情中登记；此处汇总已经产生库存记录的客户退货。"
+          />
+        </h3>
         <el-segmented
           v-if="!isSales"
           v-model="scope"
@@ -396,16 +442,41 @@ useLiveRefresh(() => load(true))
         </el-button>
       </template>
     </el-drawer>
+
+    <el-dialog
+      v-model="documentDialog"
+      :title="dialogTitle"
+      width="min(1480px, 96vw)"
+      top="2vh"
+      destroy-on-close
+      class="stock-document-dialog"
+    >
+      <StockDocument
+        :key="stockDocumentKey"
+        embedded
+        :initial-direction="stockDocumentDirection"
+        :initial-order-id="routeOrderId"
+        @saved="load(true)"
+        @view="showSavedDocument"
+      />
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 @page { size: 297mm 210mm; margin: 0; }
 .document-context-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
-.document-context-alert { margin-bottom: 12px; }
 .card-head .operation-scope-switch {
   margin-bottom: 0;
   align-self: center;
+}
+:global(.stock-document-dialog) {
+  max-width: 1480px;
+}
+:global(.stock-document-dialog .el-dialog__body) {
+  max-height: calc(96vh - 72px);
+  padding: 0;
+  overflow: auto;
 }
 .print-sheet h1 {
   margin: 0 0 22px;

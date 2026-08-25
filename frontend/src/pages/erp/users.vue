@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from "element-plus"
 import { onMounted, ref, reactive } from "vue"
 import { api, formatTime, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
+import InfoTip from "./components/InfoTip.vue"
 
 interface UserRow {
   id: number
@@ -116,7 +117,10 @@ useLiveRefresh(() => load(true))
 
     <div class="content-card">
       <div class="card-head">
-        <h3>用户管理</h3><span>管理系统用户和角色权限</span>
+        <h3>
+          用户管理
+          <InfoTip content="管理系统用户、启用状态和角色权限。" />
+        </h3>
       </div>
       <el-table v-loading="loading" :data="rows.filter(r => r.username.includes(keyword.trim()))" row-key="id" empty-text="暂无用户">
         <el-table-column label="用户名" prop="username" width="160" />

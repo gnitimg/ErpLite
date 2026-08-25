@@ -53,11 +53,11 @@ function createInstance() {
           break
         case 401:
           // Token 过期时
-          error.message = message || "未授权"
+          error.message = message || "账号或密码错误"
           useUserStore().logout()
           break
         case 403:
-          error.message = message || "拒绝访问"
+          error.message = message || "无访问权限"
           break
         case 404:
           error.message = "请求地址出错"
