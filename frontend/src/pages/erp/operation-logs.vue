@@ -66,7 +66,7 @@ useLiveRefresh(() => load(true))
   <div class="erp-page">
     <div class="page-toolbar">
       <div class="toolbar-group list-actions">
-        <el-input v-model="keyword" clearable class="list-search" placeholder="搜索操作、对象、路径或详情" @keyup.enter="load()" @clear="load()">
+        <el-input v-model="keyword" clearable class="list-search" placeholder="搜索操作或对象" @keyup.enter="load()" @clear="load()">
           <template #prefix>
             <el-icon><Search /></el-icon>
           </template>
@@ -87,6 +87,15 @@ useLiveRefresh(() => load(true))
         <h3>操作日志</h3><span>共 {{ rows.length }} 条</span>
       </div>
       <el-table v-loading="loading" :data="rows">
+        <el-table-column type="expand" width="42">
+          <template #default="{ row }">
+            <el-descriptions :column="1" border style="margin: 12px 20px">
+              <el-descriptions-item label="客户端 IP">{{ row.ip_address || '-' }}</el-descriptions-item>
+              <el-descriptions-item label="请求路径">{{ row.method }} {{ row.path }}</el-descriptions-item>
+              <el-descriptions-item label="技术详情">{{ row.detail || '-' }}</el-descriptions-item>
+            </el-descriptions>
+          </template>
+        </el-table-column>
         <el-table-column label="时间" width="165">
           <template #default="{ row }">
             <span class="muted">{{ formatTime(row.created_at) }}</span>
@@ -109,26 +118,11 @@ useLiveRefresh(() => load(true))
             <span>{{ row.target || '-' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="客户端 IP" width="140">
-          <template #default="{ row }">
-            <span class="mono">{{ row.ip_address || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="请求" min-width="160">
-          <template #default="{ row }">
-            <span class="mono">{{ row.method }} {{ row.path }}</span>
-          </template>
-        </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
             <el-tag :type="statusTag(row).type" effect="light" size="small">
               {{ statusTag(row).label }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="详情" min-width="160">
-          <template #default="{ row }">
-            <span class="muted">{{ row.detail || '-' }}</span>
           </template>
         </el-table-column>
       </el-table>

@@ -151,7 +151,7 @@ useLiveRefresh(() => load(true))
       @filter="filterDrawer = true"
       @refresh="load"
     >
-      <router-link to="/operations/stock-operations">
+      <router-link to="/lite-inventory/operations">
         <el-button type="primary">
           {{ direction === 'inbound' ? '开入库单' : '办理出库' }}
         </el-button>

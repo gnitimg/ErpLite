@@ -183,13 +183,6 @@ useLiveRefresh(() => load(true))
             {{ productQty(row.daily_capacity) }} {{ row.unit }}/日
           </template>
         </el-table-column>
-        <el-table-column label="完工后续" width="135">
-          <template #default="{ row }">
-            <el-tag v-if="row.requires_external_processing" type="warning" size="small" effect="plain">
-              {{ row.external_process_name }}
-            </el-tag><span v-else class="muted">直接成品入库</span>
-          </template>
-        </el-table-column>
         <el-table-column label="状态" width="85">
           <template #default="{ row }">
             <el-tag :type="row.low_stock ? 'danger' : 'success'" size="small">
@@ -274,37 +267,13 @@ useLiveRefresh(() => load(true))
             />
           </el-form-item>
         </div>
-        <div class="external-process-setting">
-          <div>
-            <strong>生产后需要外协加工</strong>
-            <span>启用后，生产完工先进入半成品库存，外协回厂后才进入成品库存。</span>
-          </div>
-          <el-switch v-model="form.requires_external_processing" />
-        </div>
-        <el-form-item v-if="form.requires_external_processing" label="外协工序名称" required>
-          <el-input
-            v-model="form.external_process_name"
-            maxlength="120"
-            placeholder="例如：喷漆、打铁件"
-          />
-        </el-form-item>
-        <el-form-item v-if="form.requires_external_processing" label="默认外协周期（天）">
-          <el-input-number
-            v-model="form.default_external_lead_days"
-            :min="0"
-            :controls="false"
-            style="width: 160px"
-            placeholder="0"
-          />
-          <span class="form-hint">外协送出时预填；本次未填时按此计算预计回厂时间</span>
-        </el-form-item>
         <div class="section-label">
-          <span>BOM 零件清单</span><el-button size="small" plain @click="addComponent">
+          <span>BOM 原料清单</span><el-button size="small" plain @click="addComponent">
             <el-icon><Plus /></el-icon>添加一行
           </el-button>
         </div>
         <el-table :data="form.components" border>
-          <el-table-column label="组成零件" min-width="260">
+          <el-table-column label="组成原料" min-width="260">
             <template #default="{ row }">
               <el-select v-model="row.part_id" filterable placeholder="选择零件" style="width:100%">
                 <el-option
@@ -344,26 +313,3 @@ useLiveRefresh(() => load(true))
     </el-drawer>
   </div>
 </template>
-
-<style scoped>
-.external-process-setting {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
-  background: var(--el-fill-color-light);
-  border-radius: 6px;
-}
-
-.external-process-setting div {
-  display: grid;
-  gap: 4px;
-}
-
-.external-process-setting span {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}
-</style>

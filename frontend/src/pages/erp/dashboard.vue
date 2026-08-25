@@ -1,24 +1,43 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
 import { computed, onMounted, ref } from "vue"
-import { api, formatTime, money, productQty, qty, stockQty, txLabels, useLiveRefresh } from "./api"
+import { api, formatDate, money, productQty, qty, stockQty, useLiveRefresh } from "./api"
 
 const loading = ref(true)
 const data = ref<any>({
   metrics: {},
-  recent_transactions: [],
   low_stock_items: [],
-  todos: { purchase: [], production: [], shipping: [] }
+  todos: { purchase: [], production: [], shipping: [] },
+  orders: [],
+  receivables: []
 })
 const todoFilter = ref("all")
 
-const metrics = [
-  { key: "parts", label: "零件种类", note: "在用零件档案", icon: "Cpu" },
-  { key: "products", label: "产品种类", note: "含 BOM 成品", icon: "Box" },
-  { key: "pending_orders", label: "待处理客单", note: "草稿及备货中", icon: "Tickets" },
-  { key: "low_stock", label: "库存预警", note: "低于安全库存", icon: "Warning" },
-  { key: "inventory_value", label: "库存成本", note: "按最新成本估算", icon: "Coin", money: true }
-]
+const activeOrders = computed(() => (data.value.orders || []).filter((order: any) => !["FULFILLED", "CANCELLED"].includes(order.status)))
+const orderHasRisk = (order: any) => {
+  if (!order.eta_reliable) return true
+  if (!order.estimated_completion_at) return false
+  return order.estimated_completion_at.slice(0, 10) > order.required_date
+}
+const dueSoonOrders = computed(() => activeOrders.value.filter((order: any) => {
+  const days = dueMeta(order.required_date).days
+  return days >= 0 && days <= 7
+}))
+const riskOrders = computed(() => activeOrders.value.filter((order: any) => dueMeta(order.required_date).days < 0 || orderHasRisk(order)))
+const recentOrders = computed(() => activeOrders.value.slice(0, 8))
+const outstandingReceivable = computed(() => (data.value.receivables || [])
+  .filter((row: any) => row.status !== "CANCELLED")
+  .reduce((total: number, row: any) => total + Number(row.remaining_amount ?? 0), 0))
+const pendingProduction = computed(() => (data.value.todos.production || [])
+  .reduce((total: number, row: any) => total + Number(row.total_production_required || 0), 0))
+const metrics = computed(() => [
+  { label: "进行中订单", note: "尚未全部交付", icon: "Tickets", value: activeOrders.value.length },
+  { label: "七天内到期", note: "需要优先跟进", icon: "Timer", value: dueSoonOrders.value.length },
+  { label: "延期 / ETA 风险", note: "逾期或预计不可靠", icon: "Warning", value: riskOrders.value.length },
+  { label: "待生产", note: "成品库存不足部分", icon: "Tools", value: pendingProduction.value },
+  { label: "待采购原料", note: "存在采购缺口的物料", icon: "ShoppingCart", value: (data.value.todos.purchase || []).length },
+  { label: "应收未收", note: "客户未结清金额", icon: "Money", value: outstandingReceivable.value, money: true }
+])
 
 const todoTypeMeta: Record<string, { label: string, type: string }> = {
   purchase: { label: "采购零件", type: "warning" },
@@ -56,7 +75,12 @@ const activeTodoRows = computed(() => allTodoRows.value.filter((row: any) => {
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    data.value = await api("/api/dashboard")
+    const [dashboard, orders, receivables] = await Promise.all([
+      api("/api/dashboard"),
+      api("/api/orders"),
+      api("/api/finance/receivables")
+    ])
+    data.value = { ...dashboard, orders, receivables }
   } catch (error: any) {
     ElMessage.error(error.message)
   } finally {
@@ -80,19 +104,9 @@ function dueMeta(value: string) {
 }
 
 function todoRoute(row: any) {
-  if (row.taskType === "purchase") return "/operations/purchase"
-  if (row.taskType === "production") return "/operations/production"
-  return "/operations/orders"
-}
-
-function transactionSummary(row: any) {
-  if (!row.lines?.length) return "暂无物料变化"
-  const first = row.lines[0]
-  const direction = first.quantity_change > 0 ? "入库" : "出库"
-  const quantity = first.kind === "PRODUCT"
-    ? productQty(Math.abs(first.quantity_change))
-    : qty(Math.abs(first.quantity_change))
-  return `${first.name} ${direction} ${quantity}${row.lines.length > 1 ? ` 等 ${row.lines.length} 项` : ""}`
+  if (row.taskType === "purchase") return "/lite-purchase/requirements"
+  if (row.taskType === "production") return "/lite-production/completion"
+  return "/lite-orders/list"
 }
 
 onMounted(load)
@@ -102,13 +116,13 @@ useLiveRefresh(() => load(true))
 <template>
   <div v-loading="loading" class="erp-page">
     <section class="metric-grid">
-      <div v-for="metric in metrics" :key="metric.key" class="metric-card">
+      <div v-for="metric in metrics" :key="metric.label" class="metric-card">
         <div>
           <div class="metric-label">
             {{ metric.label }}
           </div>
           <div class="metric-value">
-            {{ metric.money ? money(data.metrics[metric.key]) : productQty(data.metrics[metric.key]) }}
+            {{ metric.money ? money(metric.value) : productQty(metric.value) }}
           </div>
           <div class="metric-note">
             {{ metric.note }}
@@ -133,7 +147,7 @@ useLiveRefresh(() => load(true))
             <el-option label="待出库" value="shipping" />
             <el-option label="只看逾期" value="overdue" />
           </el-select>
-          <router-link to="/operations/orders">
+          <router-link to="/lite-orders/list">
             全部客单
           </router-link>
         </div>
@@ -179,32 +193,32 @@ useLiveRefresh(() => load(true))
     <section class="dashboard-grid dashboard-lower-grid">
       <div class="content-card">
         <div class="card-head">
-          <h3>最近库存动态</h3>
-          <router-link to="/logs/stock">
-            查看全部
+          <h3>近期客户订单</h3>
+          <router-link to="/lite-orders/list">
+            查看订单
           </router-link>
         </div>
-        <el-table :data="data.recent_transactions">
-          <el-table-column label="流水号" min-width="175">
+        <el-table :data="recentOrders" empty-text="当前没有进行中的客户订单">
+          <el-table-column label="订单 / 客户" min-width="210">
             <template #default="{ row }">
-              <span class="mono">{{ row.transaction_no }}</span>
+              <div class="sku-cell"><strong>{{ row.order_no }}</strong><span>{{ row.customer_name }}</span></div>
             </template>
           </el-table-column>
-          <el-table-column label="业务类型" width="105">
+          <el-table-column label="要求交期" width="160">
             <template #default="{ row }">
-              <el-tag size="small" effect="plain">
-                {{ txLabels[row.transaction_type] || row.transaction_type }}
+              <div class="due-cell"><span>{{ row.required_date }}</span><el-tag :type="dueMeta(row.required_date).type as any" size="small">{{ dueMeta(row.required_date).label }}</el-tag></div>
+            </template>
+          </el-table-column>
+          <el-table-column label="预计可交" width="150">
+            <template #default="{ row }">
+              {{ formatDate(row.estimated_completion_at) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="风险" min-width="150">
+            <template #default="{ row }">
+              <el-tag :type="orderHasRisk(row) ? 'warning' : 'success'" size="small" effect="plain">
+                {{ orderHasRisk(row) ? (row.eta_note || '需要关注') : '交期正常' }}
               </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="物料变化" min-width="230">
-            <template #default="{ row }">
-              <span>{{ transactionSummary(row) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="时间" width="165">
-            <template #default="{ row }">
-              <span class="muted">{{ formatTime(row.occurred_at) }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -216,19 +230,19 @@ useLiveRefresh(() => load(true))
             <h3>快捷开单</h3><span>常用单据入口</span>
           </div>
           <div class="card-body quick-actions">
-            <router-link class="quick-action" to="/operations/stock-operations">
+            <router-link class="quick-action" to="/lite-inventory/operations">
               <strong>开入库单</strong><span>采购件或普通物料入库</span>
             </router-link>
-            <router-link class="quick-action" to="/operations/stock-operations">
+            <router-link class="quick-action" to="/lite-inventory/operations">
               <strong>开出库单</strong><span>领料或普通物料出库</span>
             </router-link>
-            <router-link class="quick-action" to="/logs/inbound-documents">
+            <router-link class="quick-action" to="/lite-inventory/documents">
               <strong>查看入库单</strong><span>生产与采购入库凭证</span>
             </router-link>
-            <router-link class="quick-action" to="/logs/outbound-documents">
+            <router-link class="quick-action" to="/lite-orders/documents">
               <strong>查看出库单</strong><span>销售与普通出库凭证</span>
             </router-link>
-            <router-link class="quick-action" to="/operations/orders">
+            <router-link class="quick-action" to="/lite-orders/list">
               <strong>新建客户订单</strong><span>录入客户需求与交期</span>
             </router-link>
           </div>
@@ -236,7 +250,7 @@ useLiveRefresh(() => load(true))
         <div class="content-card">
           <div class="card-head">
             <h3>库存预警</h3>
-            <router-link to="/warehouse/parts-inventory">
+            <router-link to="/lite-inventory/materials">
               库存详情
             </router-link>
           </div>

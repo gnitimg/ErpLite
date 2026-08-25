@@ -237,7 +237,7 @@ async function submit() {
 function viewDocument() {
   if (documentNo.value === "提交后自动生成") return
   router.push({
-    path: direction.value === "INBOUND" ? "/logs/inbound-documents" : "/logs/outbound-documents",
+    path: direction.value === "INBOUND" ? "/lite-inventory/documents" : "/lite-orders/documents",
     query: {
       keyword: documentNo.value,
       scope: itemOf(form.items.find(line => line.item_id) || {})?.kind || "PART"
