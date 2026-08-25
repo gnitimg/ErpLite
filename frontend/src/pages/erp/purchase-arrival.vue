@@ -57,7 +57,7 @@ async function save() {
       method: "POST",
       body: JSON.stringify(form)
     })
-    ElMessage.success("采购到货承诺已创建")
+    ElMessage.success("采购预计到货已登记")
     dialog.value = false
     await load()
   } catch (error: any) {
@@ -98,17 +98,16 @@ useLiveRefresh(() => load(true))
   <div class="erp-page">
     <ListToolbar v-model="keyword" placeholder="搜索零件、供应商" :loading="loading" @refresh="load" @update:model-value="applyFilter">
       <el-button type="primary" @click="dialog = true; form.part_id = 0; form.supplier_text = ''; form.quantity = 0; form.expected_arrival_date = ''; form.notes = ''">
-        <el-icon><Plus /></el-icon>新增承诺
+        <el-icon><Plus /></el-icon>登记预计到货
       </el-button>
     </ListToolbar>
 
     <div class="content-card">
       <div class="card-head">
-        <h3>采购到货承诺</h3><span>管理采购订单的预计到货时间，用于排产ETA计算</span>
+        <h3>采购与预计到货</h3><span>登记已采购数量和预计到货日期，系统会自动更新排产 ETA</span>
       </div>
-      <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无采购承诺">
-        <el-table-column label="编号" prop="id" width="80" />
-        <el-table-column label="零件" min-width="140">
+      <el-table v-loading="loading" :data="filteredRows" row-key="id" empty-text="暂无采购预计到货">
+        <el-table-column label="原料" min-width="180">
           <template #default="{ row }">{{ row.part_sku }} {{ row.part_name }}</template>
         </el-table-column>
         <el-table-column label="供应商" prop="supplier_text" width="120" />
@@ -130,10 +129,10 @@ useLiveRefresh(() => load(true))
       </el-table>
     </div>
 
-    <el-dialog v-model="dialog" title="新增采购到货承诺" width="480px">
+    <el-dialog v-model="dialog" title="登记采购预计到货" width="480px">
       <el-form label-position="top">
-        <el-form-item label="零件">
-          <el-select v-model="form.part_id" filterable placeholder="选择零件" style="width:100%">
+        <el-form-item label="原料">
+          <el-select v-model="form.part_id" filterable placeholder="选择原料" style="width:100%">
             <el-option v-for="p in parts" :key="p.id" :label="`${p.sku} ${p.name}`" :value="p.id" />
           </el-select>
         </el-form-item>

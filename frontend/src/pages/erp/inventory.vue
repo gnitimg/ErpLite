@@ -16,11 +16,11 @@ const keyword = ref("")
 const filters = reactive({ stockStatus: "" })
 const inboundForm = reactive({ quantity: 1, unit_cost: 0, notes: "" })
 const kind = computed(() => route.meta.inventoryKind === "PRODUCT" ? "PRODUCT" : "PART")
-const pageTitle = computed(() => kind.value === "PRODUCT" ? "产品库存" : "零件库存")
+const pageTitle = computed(() => kind.value === "PRODUCT" ? "成品库存" : "原料库存")
 const activeFilterCount = computed(() => Number(Boolean(filters.stockStatus)))
 const displayQty = (value: number) => stockQty(value, kind.value === "PRODUCT")
 const shortageValue = (row: any) => Math.max(Number(row.shortage_qty || 0), 0)
-const gapValue = (row: any) => shortageValue(row) > 0 ? -shortageValue(row) : 0
+const gapValue = (row: any) => shortageValue(row)
 function stockLevelPercent(row: any) {
   const stock = Math.max(Number(row.stock_qty || 0), 0)
   const safety = Math.max(Number(row.min_stock || 0), 0)
@@ -63,7 +63,7 @@ function openInbound(row: any) {
   inboundForm.unit_cost = Number(row.cost_price || 0)
   inboundForm.notes = Number(row.shortage_qty) > 0
     ? `补足当前订单生产缺口 ${displayQty(row.shortage_qty)} ${row.unit}`
-    : "零件快捷入库"
+    : "原料快捷入库"
   inboundDrawer.value = true
 }
 async function submitInbound() {
@@ -127,20 +127,6 @@ useLiveRefresh(() => load(true))
             {{ row.unit }}
           </template>
         </el-table-column>
-        <el-table-column v-if="kind === 'PRODUCT'" label="半成品" width="105" align="right">
-          <template #default="{ row }">
-            <b :class="row.semi_finished_qty ? 'number-positive' : ''">
-              {{ productQty(row.semi_finished_qty) }}
-            </b>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="kind === 'PRODUCT'" label="外协在途" width="105" align="right">
-          <template #default="{ row }">
-            <b :class="row.processing_qty ? 'number-positive' : ''">
-              {{ productQty(row.processing_qty) }}
-            </b>
-          </template>
-        </el-table-column>
         <el-table-column v-if="kind === 'PRODUCT'" label="客单预留" width="105" align="right">
           <template #default="{ row }">
             {{ productQty(row.reserved_qty) }}
@@ -155,9 +141,9 @@ useLiveRefresh(() => load(true))
         </el-table-column>
         <el-table-column width="125" align="right">
           <template #header>
-            <span>订单缺口</span>
+            <span>{{ kind === 'PRODUCT' ? '待生产' : '采购缺口' }}</span>
             <el-tooltip
-              content="按全部未完成客单汇总；0 表示订单已被库存或在途覆盖，负数表示仍需采购或生产。"
+              content="按全部未完成订单汇总；0 表示当前无需补充，大于 0 表示仍需生产或采购。"
               placement="top"
             >
               <el-icon class="column-help"><QuestionFilled /></el-icon>
@@ -230,17 +216,17 @@ useLiveRefresh(() => load(true))
 
     <el-drawer
       v-model="inboundDrawer"
-      title="零件快捷入库"
+      title="原料快捷入库"
       size="min(520px, 96vw)"
     >
       <el-descriptions v-if="activePart" :column="1" border>
-        <el-descriptions-item label="零件">
+        <el-descriptions-item label="原料">
           {{ activePart.sku }} · {{ activePart.name }}
         </el-descriptions-item>
         <el-descriptions-item label="当前库存">
           {{ displayQty(activePart.stock_qty) }} {{ activePart.unit }}
         </el-descriptions-item>
-        <el-descriptions-item label="生产总需求">
+        <el-descriptions-item label="生产所需">
           {{ displayQty(activePart.order_required_qty) }} {{ activePart.unit }}
         </el-descriptions-item>
         <el-descriptions-item label="当前缺口">

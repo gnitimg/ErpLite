@@ -543,7 +543,7 @@ useLiveRefresh(async () => {
           </el-tab-pane>
           <el-tab-pane name="inventory">
             <template #label>
-              <span class="detail-tab-label">库存与交付</span>
+              <span class="detail-tab-label">库存、生产与 ETA</span>
             </template>
             <div v-if="workflow" class="detail-page">
               <div class="detail-section-head detail-section-head-first">
@@ -586,7 +586,7 @@ useLiveRefresh(async () => {
                 show-icon
               />
               <div class="detail-section-head">
-                <strong>产品库存与预留</strong>
+                <strong>每个产品如何满足订单</strong>
               </div>
               <el-table :data="workflow.product_lines" border empty-text="暂无产品库存信息">
                 <el-table-column label="产品" min-width="220">
@@ -594,12 +594,6 @@ useLiveRefresh(async () => {
                     <div class="sku-cell">
                       <strong>{{ row.name }}</strong><span>{{ row.sku }}</span>
                     </div>
-                  </template>
-                </el-table-column><el-table-column label="交期优先级" width="140" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="row.waiting_for_earlier_orders ? 'warning' : 'success'" size="small">
-                      第 {{ row.priority_rank }} / {{ row.priority_total }} 位
-                    </el-tag>
                   </template>
                 </el-table-column><el-table-column label="订单数量" width="120" align="right">
                   <template #default="{ row }">
@@ -613,29 +607,19 @@ useLiveRefresh(async () => {
                   <template #default="{ row }">
                     {{ productQty(row.remaining_quantity) }}
                   </template>
-                </el-table-column><el-table-column label="当前成品" width="105" align="right">
+                </el-table-column><el-table-column label="现有成品" width="105" align="right">
                   <template #default="{ row }">
                     {{ productQty(row.current_stock) }}
                   </template>
-                </el-table-column><el-table-column label="其他客单占用" width="120" align="right">
-                  <template #default="{ row }">
-                    <b :class="row.reserved_by_other_orders ? 'number-negative' : ''">
-                      {{ productQty(row.reserved_by_other_orders) }}
-                    </b>
-                  </template>
-                </el-table-column><el-table-column label="已预留" width="105" align="right">
+                </el-table-column><el-table-column label="库存满足" width="105" align="right">
                   <template #default="{ row }">
                     <b class="number-positive">{{ productQty(row.reserved_quantity) }}</b>
                   </template>
-                </el-table-column><el-table-column label="半成品/在途" width="125" align="right">
-                  <template #default="{ row }">
-                    {{ productQty(row.pipeline_quantity) }}
-                  </template>
-                </el-table-column><el-table-column label="需生产" width="120" align="right">
+                </el-table-column><el-table-column label="待生产" width="120" align="right">
                   <template #default="{ row }">
                     <b :class="row.production_required ? 'number-negative' : ''">{{ productQty(row.production_required) }}</b>
                   </template>
-                </el-table-column><el-table-column label="预计满足" width="170">
+                </el-table-column><el-table-column label="预计可交" min-width="180">
                   <template #default="{ row }">
                     <div class="sku-cell">
                       <strong :class="row.eta_reliable ? '' : 'number-negative'">
@@ -652,11 +636,11 @@ useLiveRefresh(async () => {
           </el-tab-pane>
           <el-tab-pane name="materials">
             <template #label>
-              <span class="detail-tab-label">零件与备料 <el-badge v-if="workflow?.material_lines?.length" :value="workflow.material_lines.length" /></span>
+              <span class="detail-tab-label">原料与采购 <el-badge v-if="workflow?.material_lines?.length" :value="workflow.material_lines.length" /></span>
             </template>
             <div v-if="workflow" class="detail-page">
               <div class="detail-section-head detail-section-head-first">
-                <strong>零件需求与采购</strong>
+                <strong>生产缺口所需原料</strong>
               </div>
               <el-alert v-if="workflow.next_action === 'PURCHASE'" title="存在零件缺口：按单采购零件应优先采购，其余零件办理常规入库后可重新检查。" type="warning" :closable="false" show-icon />
               <el-alert
@@ -667,7 +651,7 @@ useLiveRefresh(async () => {
                 show-icon
               />
               <el-table :data="workflow.material_lines" border empty-text="当前无需额外生产，或暂无 BOM 零件需求">
-                <el-table-column label="零件" min-width="230">
+                <el-table-column label="原料" min-width="230">
                   <template #default="{ row }">
                     <div class="sku-cell">
                       <strong>{{ row.name }}</strong><span>{{ row.sku }}</span>
@@ -679,15 +663,15 @@ useLiveRefresh(async () => {
                       {{ row.supply_mode === 'BUY_TO_ORDER' ? '按单采购' : '库存备料' }}
                     </el-tag>
                   </template>
-                </el-table-column><el-table-column label="需要" width="120" align="right">
+                </el-table-column><el-table-column label="生产需求" width="120" align="right">
                   <template #default="{ row }">
                     {{ qty(row.required_quantity) }}
                   </template>
-                </el-table-column><el-table-column label="现有" width="120" align="right">
+                </el-table-column><el-table-column label="当前库存" width="120" align="right">
                   <template #default="{ row }">
                     {{ qty(row.available_stock) }}
                   </template>
-                </el-table-column><el-table-column label="缺口" width="120" align="right">
+                </el-table-column><el-table-column label="采购缺口" width="120" align="right">
                   <template #default="{ row }">
                     <b :class="row.shortage_quantity ? 'number-negative' : 'number-positive'">{{ qty(row.shortage_quantity) }}</b>
                   </template>
