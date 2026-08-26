@@ -6,6 +6,18 @@ import { resetRouter, router } from "@/router"
 import { useSettingsStore } from "./settings"
 import { useTagsViewStore } from "./tags-view"
 
+export interface NavigationConfig {
+  root_order: string[]
+  hidden_roots: string[]
+  child_order: Record<string, string[]>
+}
+
+const emptyNavigationConfig = (): NavigationConfig => ({
+  root_order: [],
+  hidden_roots: [],
+  child_order: {}
+})
+
 export const useUserStore = defineStore("user", () => {
   const token = ref<string>(getToken() || "")
 
@@ -14,6 +26,8 @@ export const useUserStore = defineStore("user", () => {
   const permissions = ref<string[]>([])
 
   const username = ref<string>("")
+
+  const navigationConfig = ref<NavigationConfig>(emptyNavigationConfig())
 
   /** 首次登录强制改密标志：为 true 时由布局层弹出不可关闭的改密对话框 */
   const mustChangePassword = ref<boolean>(false)
@@ -37,6 +51,10 @@ export const useUserStore = defineStore("user", () => {
     roles.value = data.roles ?? []
     permissions.value = data.permissions ?? []
     mustChangePassword.value = Boolean(data.must_change_password)
+    navigationConfig.value = {
+      ...emptyNavigationConfig(),
+      ...(data.navigation_config || {})
+    }
     // 防止路由守卫逻辑进入无限循环
     isGotUserInfo.value = true
   }
@@ -56,6 +74,16 @@ export const useUserStore = defineStore("user", () => {
     location.reload()
   }
 
+  const setNavigationConfig = (value: NavigationConfig) => {
+    navigationConfig.value = {
+      root_order: [...value.root_order],
+      hidden_roots: [...value.hidden_roots],
+      child_order: Object.fromEntries(
+        Object.entries(value.child_order).map(([key, paths]) => [key, [...paths]])
+      )
+    }
+  }
+
   // 登出
   const logout = () => {
     resetToken()
@@ -72,6 +100,7 @@ export const useUserStore = defineStore("user", () => {
     roles.value = []
     permissions.value = []
     mustChangePassword.value = false
+    navigationConfig.value = emptyNavigationConfig()
     isGotUserInfo.value = false
   }
 
@@ -83,7 +112,22 @@ export const useUserStore = defineStore("user", () => {
     }
   }
 
-  return { token, roles, permissions, username, mustChangePassword, isGotUserInfo, setToken, getInfo, changePassword, changeUser, logout, resetToken }
+  return {
+    token,
+    roles,
+    permissions,
+    username,
+    navigationConfig,
+    mustChangePassword,
+    isGotUserInfo,
+    setToken,
+    getInfo,
+    changePassword,
+    changeUser,
+    setNavigationConfig,
+    logout,
+    resetToken
+  }
 })
 
 /**

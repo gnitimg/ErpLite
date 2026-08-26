@@ -1,10 +1,12 @@
 <script lang="ts" setup>
+import type { RouteRecordRaw } from "vue-router"
 import { useDevice } from "@@/composables/useDevice"
 import { useLayoutMode } from "@@/composables/useLayoutMode"
 import { getCssVar } from "@@/utils/css"
 import { useAppStore } from "@/pinia/stores/app"
 import { usePermissionStore } from "@/pinia/stores/permission"
 import { useSettingsStore } from "@/pinia/stores/settings"
+import { useUserStore } from "@/pinia/stores/user"
 import { Logo } from "../index"
 import Item from "./Item.vue"
 
@@ -24,11 +26,52 @@ const appStore = useAppStore()
 
 const permissionStore = usePermissionStore()
 
+const userStore = useUserStore()
+
 const settingsStore = useSettingsStore()
 
 const activeMenu = computed(() => route.meta.activeMenu || route.path)
 
-const noHiddenRoutes = computed(() => permissionStore.routes.filter(item => !item.meta?.hidden))
+const defaultRootOrder = [
+  "/",
+  "/lite-orders",
+  "/lite-purchase",
+  "/lite-production",
+  "/lite-inventory",
+  "/lite-stock-documents",
+  "/lite-finance",
+  "/lite-catalog",
+  "/lite-settings"
+]
+
+function orderedRoutes(routes: RouteRecordRaw[], order: string[]) {
+  const positions = new Map(order.map((path, index) => [path, index]))
+  return [...routes].sort((left, right) => {
+    const leftPosition = positions.get(left.path) ?? Number.MAX_SAFE_INTEGER
+    const rightPosition = positions.get(right.path) ?? Number.MAX_SAFE_INTEGER
+    return leftPosition - rightPosition
+  })
+}
+
+const noHiddenRoutes = computed(() => {
+  const config = userStore.navigationConfig
+  const protectedRoots = new Set(["/", "/lite-settings"])
+  const visible = permissionStore.routes.filter(item =>
+    !item.meta?.hidden
+    && (protectedRoots.has(item.path) || !config.hidden_roots.includes(item.path))
+  )
+  const rootOrder = config.root_order.length
+    ? config.root_order
+    : defaultRootOrder
+  return orderedRoutes(visible, rootOrder).map((routeItem) => {
+    const childOrder = config.child_order[routeItem.path] || []
+    if (!routeItem.children?.length || !childOrder.length) return routeItem
+    return {
+      ...routeItem,
+      children: orderedRoutes(routeItem.children, childOrder)
+    }
+  })
+})
 
 const isCollapse = computed(() => !appStore.sidebar.opened)
 

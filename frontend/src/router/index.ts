@@ -314,7 +314,7 @@ export const constantRoutes: RouteRecordRaw[] = [
     component: Layouts,
     redirect: "/lite-orders/list",
     name: "LiteOrdersRoot",
-    meta: { title: "订单", elIcon: "Tickets", alwaysShow: true },
+    meta: { title: "销售", elIcon: "Tickets", alwaysShow: true },
     children: [
       {
         path: "list",
@@ -326,7 +326,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "documents",
         component: () => import("@/pages/erp/documents.vue"),
         name: "LiteSalesDocuments",
-        meta: { title: "销售单据", documentContext: "sales", documentDirection: "outbound", keepAlive: true }
+        meta: { title: "销售出库与退货", documentContext: "sales", documentDirection: "outbound", keepAlive: true }
       }
     ]
   },
@@ -335,7 +335,7 @@ export const constantRoutes: RouteRecordRaw[] = [
     component: Layouts,
     redirect: "/lite-production/schedule",
     name: "LiteProductionRoot",
-    meta: { title: "生产排期", elIcon: "Calendar", alwaysShow: true },
+    meta: { title: "生产", elIcon: "Calendar", alwaysShow: true },
     children: [
       {
         path: "schedule",
@@ -348,6 +348,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/production.vue"),
         name: "LiteProductionCompletion",
         meta: { title: "完工登记", keepAlive: true }
+      },
+      {
+        path: "external-processing",
+        component: () => import("@/pages/erp/external-processing.vue"),
+        name: "LiteExternalProcessing",
+        meta: { title: "外协加工", keepAlive: true }
       }
     ]
   },
@@ -370,16 +376,21 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { hidden: true }
       },
       {
+        path: "samples",
+        component: () => import("@/pages/erp/samples.vue"),
+        name: "LiteSamples",
+        meta: { title: "样品库存", keepAlive: true }
+      },
+      {
         path: "stocktake",
         component: () => import("@/pages/erp/stock-reconciliation.vue"),
         name: "LiteStocktake",
-        meta: { title: "盘点", keepAlive: true }
+        meta: { title: "盘点与对账", keepAlive: true }
       },
       {
         path: "history",
-        component: () => import("@/pages/erp/inventory-history.vue"),
-        name: "LiteInventoryHistory",
-        meta: { title: "库存流水", stockView: "history", keepAlive: true }
+        redirect: "/lite-stock-documents/history",
+        meta: { hidden: true }
       },
       {
         path: "materials",
@@ -403,7 +414,7 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "movements",
-        redirect: "/lite-inventory/history",
+        redirect: "/lite-stock-documents/history",
         meta: { hidden: true }
       }
     ]
@@ -425,6 +436,12 @@ export const constantRoutes: RouteRecordRaw[] = [
           documentDirection: "both",
           keepAlive: true
         }
+      },
+      {
+        path: "history",
+        component: () => import("@/pages/erp/inventory-history.vue"),
+        name: "LiteInventoryHistory",
+        meta: { title: "库存流水", stockView: "history", keepAlive: true }
       }
     ]
   },
@@ -469,11 +486,11 @@ export const constantRoutes: RouteRecordRaw[] = [
     ]
   },
   {
-    path: "/lite-settings",
+    path: "/lite-catalog",
     component: Layouts,
-    redirect: "/lite-settings/products",
-    name: "LiteSettingsRoot",
-    meta: { title: "设置", elIcon: "Setting", alwaysShow: true },
+    redirect: "/lite-catalog/products",
+    name: "LiteCatalogRoot",
+    meta: { title: "基础资料", elIcon: "Collection", alwaysShow: true },
     children: [
       {
         path: "products",
@@ -485,7 +502,22 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "materials",
         component: () => import("@/pages/erp/parts.vue"),
         name: "LiteParts",
-        meta: { title: "原料资料", keepAlive: true }
+        meta: { title: "零件资料", keepAlive: true }
+      }
+    ]
+  },
+  {
+    path: "/lite-settings",
+    component: Layouts,
+    redirect: "/lite-settings/workflow",
+    name: "LiteSettingsRoot",
+    meta: { title: "设置", elIcon: "Setting", alwaysShow: true },
+    children: [
+      {
+        path: "workflow",
+        component: () => import("@/pages/erp/workflow-settings.vue"),
+        name: "LiteWorkflowSettings",
+        meta: { title: "业务规则", keepAlive: true }
       },
       {
         path: "production",
@@ -497,7 +529,17 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "system",
         component: () => import("@/pages/erp/system-management.vue"),
         name: "LiteSystemManagement",
-        meta: { title: "系统管理", keepAlive: true }
+        meta: { title: "系统维护", keepAlive: true }
+      },
+      {
+        path: "products",
+        redirect: "/lite-catalog/products",
+        meta: { hidden: true }
+      },
+      {
+        path: "materials",
+        redirect: "/lite-catalog/materials",
+        meta: { hidden: true }
       },
       {
         path: "calendar",

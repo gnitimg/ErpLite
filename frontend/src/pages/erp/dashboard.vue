@@ -105,7 +105,7 @@ function dueMeta(value: string) {
 
 function todoRoute(row: any) {
   if (row.taskType === "purchase") return "/lite-purchase/requirements"
-  if (row.taskType === "production") return "/lite-production/completion"
+  if (row.taskType === "production") return "/lite-production/schedule"
   return "/lite-orders/list"
 }
 

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .database import PROJECT_ROOT
 from .models import (
     CustomerCredit,
+    DocumentNumberRule,
     ExternalProcessingBatch,
     InventoryItem,
     Mold,
@@ -41,7 +42,7 @@ from .models import (
 
 
 BACKUP_DIRECTORY = PROJECT_ROOT / "backups"
-BACKUP_SCHEMA_VERSION = 22
+BACKUP_SCHEMA_VERSION = 23
 BACKUP_TABLES = (
     InventoryItem.__table__,
     SalesOrder.__table__,
@@ -49,6 +50,7 @@ BACKUP_TABLES = (
     SalesOrderItem.__table__,
     ProductionLine.__table__,
     ProductionSetting.__table__,
+    DocumentNumberRule.__table__,
     Mold.__table__,
     ProductMold.__table__,
     ProductionCapability.__table__,
@@ -76,6 +78,7 @@ DELETE_TABLES = (
     Payment.__table__,
     Receivable.__table__,
     User.__table__,
+    DocumentNumberRule.__table__,
     ProductionCalendarException.__table__,
     PurchaseCommitment.__table__,
     ExternalProcessingBatch.__table__,
@@ -355,6 +358,25 @@ def _load_archive(path: Path) -> dict[str, Any]:
         for row in tables.get("order_returns", []):
             row.setdefault("refund_unit_price_snapshot", None)
             row.setdefault("return_unit_cost_snapshot", None)
+        payload["schema_version"] = BACKUP_SCHEMA_VERSION
+    if schema_version <= 22:
+        for row in tables.get("users", []):
+            row.setdefault("navigation_config", "")
+        created_at = payload.get("created_at") or datetime.now().isoformat()
+        tables.setdefault("document_number_rules", [
+            {
+                "id": index,
+                "document_type": document_type,
+                "prefix": document_type,
+                "next_number": 1,
+                "digits": 6,
+                "updated_at": created_at,
+            }
+            for index, document_type in enumerate(
+                ("SO", "ST", "PR", "EP", "RT", "AR", "PAY", "CR"),
+                start=1,
+            )
+        ])
         payload["schema_version"] = BACKUP_SCHEMA_VERSION
     required_names = {table.name for table in BACKUP_TABLES}
     if set(tables) != required_names:

@@ -833,7 +833,7 @@ def _recalculate_plan_impl(
             if planned_quantity <= 0:
                 continue
             run = ProductionRun(
-                run_no=serial("PR"),
+                run_no=serial("PR", db),
                 product_id=product_id,
                 line_id=None,
                 line_slot=resource["line_slot"],

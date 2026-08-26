@@ -3,13 +3,13 @@ import hashlib
 import logging
 import os
 import secrets
-from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
+    DocumentNumberRule,
     InventoryItem,
     OperationLog,
     OrderShipmentAllocation,
@@ -128,11 +128,34 @@ def ensure_default_admin(db: Session) -> None:
     db.commit()
 
 
-def serial(prefix: str) -> str:
-    # 4 hex chars collide under the Stage 7 concurrency matrix often enough to
-    # surface as unrelated 503s. Eight chars keep the compact human-readable
-    # prefix while making concurrent document/run identifiers operationally unique.
-    return f"{prefix}{datetime.now():%Y%m%d%H%M%S}{uuid4().hex[:8].upper()}"
+def serial(prefix: str, db: Session | None = None) -> str:
+    """生成持久化、可配置且并发安全的业务单号。
+
+    正式业务调用必须传入当前事务的 Session。保留无 Session 的时间型回退，
+    仅兼容外部脚本；应用内所有开单路径均使用数据库序列。
+    """
+    key = prefix.strip().upper()
+    if db is None:
+        return f"{key}{datetime.now():%Y%m%d%H%M%S%f}"
+    rule = db.scalar(
+        select(DocumentNumberRule)
+        .where(DocumentNumberRule.document_type == key)
+        .with_for_update()
+    )
+    if rule is None:
+        rule = DocumentNumberRule(
+            document_type=key,
+            prefix=key,
+            next_number=1,
+            digits=6,
+        )
+        db.add(rule)
+        db.flush()
+    number = int(rule.next_number)
+    result = f"{rule.prefix}{number:0{int(rule.digits)}d}"
+    rule.next_number = number + 1
+    db.flush()
+    return result
 
 
 def ensure_sku_available(db: Session, sku: str, exclude_id: int | None = None) -> None:
@@ -369,7 +392,7 @@ def create_transaction(
 
     related_order = db.get(SalesOrder, related_order_id) if related_order_id else None
     tx = StockTransaction(
-        transaction_no=serial("ST"),
+        transaction_no=serial("ST", db),
         transaction_type=tx_type,
         notes=notes.strip(),
         related_order_id=related_order_id,
@@ -841,7 +864,7 @@ def seed_demo(db: Session) -> None:
         "系统演示期初库存",
     )
     order = SalesOrder(
-        order_no=serial("SO"), customer_name="上海示例科技", customer_phone="021-5555 0188",
+        order_no=serial("SO", db), customer_name="上海示例科技", customer_phone="021-5555 0188",
         customer_address="上海市浦东新区", status="CONFIRMED", order_date=date.today(), required_date=date.today(), notes="演示客单"
     )
     order.items = [SalesOrderItem(product_id=products[0].id, quantity=3, reference_price=239, unit_price=239, line_total=717)]

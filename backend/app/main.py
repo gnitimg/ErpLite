@@ -33,6 +33,7 @@ from .backup import (
 from .database import SessionLocal, engine, get_db, run_migrations
 from .models import (
     CustomerCredit,
+    DocumentNumberRule,
     ExternalProcessingBatch,
     InventoryItem,
     OperationLog,
@@ -60,10 +61,12 @@ from .schemas import (
     CalendarExceptionPayload,
     ChangePasswordPayload,
     CreditSettlementPayload,
+    DocumentNumberSettingsPayload,
     ExternalProcessingReturnPayload,
     ExternalProcessingSendPayload,
     LoginPayload,
     ManualProductionRunPayload,
+    NavigationSettingsPayload,
     OrderCancelPayload,
     OrderPayload,
     OrderReturnPayload,
@@ -144,6 +147,17 @@ from .auth import (
 
 StockStatus = Literal["LOW", "NORMAL"]
 BomStatus = Literal["CONFIGURED", "EMPTY"]
+
+DEFAULT_DOCUMENT_RULES = {
+    "SO": ("客户订单", "SO"),
+    "ST": ("库存单据", "ST"),
+    "PR": ("生产批次", "PR"),
+    "EP": ("外协单", "EP"),
+    "RT": ("退货单", "RT"),
+    "AR": ("应收单", "AR"),
+    "PAY": ("收款单", "PAY"),
+    "CR": ("客户抵扣", "CR"),
+}
 
 
 @asynccontextmanager
@@ -610,6 +624,23 @@ def change_password(payload: ChangePasswordPayload, request: Request, db: Sessio
     return {"code": 0, "data": {"ok": True}, "message": "success"}
 
 
+def navigation_config_dict(user: User) -> dict:
+    try:
+        value = json.loads(user.navigation_config or "{}")
+    except (TypeError, ValueError):
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def permissions_for_role(role: str) -> list[str]:
+    permissions = ["business:read"]
+    if role in {"OPERATOR", "ADMIN"}:
+        permissions.append("business:write")
+    if role == "ADMIN":
+        permissions.append("system:admin")
+    return permissions
+
+
 @app.get("/api/v1/users/me")
 def current_user(request: Request, db: Session = Depends(get_db)):
     token = extract_token(request)
@@ -623,12 +654,60 @@ def current_user(request: Request, db: Session = Depends(get_db)):
     if user_id > 0:
         user = load_user(db, user_id)
         if user:
-            return {"code": 0, "data": {"username": user.username, "display_name": user.display_name or user.username, "role": user.role, "roles": [user.role], "permissions": [], "must_change_password": bool(user.must_change_password)}, "message": "success"}
+            return {
+                "code": 0,
+                "data": {
+                    "username": user.username,
+                    "display_name": user.display_name or user.username,
+                    "role": user.role,
+                    "roles": [user.role],
+                    "permissions": permissions_for_role(user.role),
+                    "must_change_password": bool(user.must_change_password),
+                    "navigation_config": navigation_config_dict(user),
+                },
+                "message": "success",
+            }
         raise HTTPException(401, "登录状态无效，请重新登录")
     if payload.get("role") == "ADMIN" and emergency_token_still_valid(payload):
         # 应急管理员令牌（sub=0）：开关关闭或用户名已轮换时立即失效。
-        return {"code": 0, "data": {"username": payload.get("username", ""), "display_name": payload.get("display_name", ""), "role": "ADMIN", "roles": ["ADMIN"], "permissions": [], "must_change_password": False}, "message": "success"}
+        return {
+            "code": 0,
+            "data": {
+                "username": payload.get("username", ""),
+                "display_name": payload.get("display_name", ""),
+                "role": "ADMIN",
+                "roles": ["ADMIN"],
+                "permissions": permissions_for_role("ADMIN"),
+                "must_change_password": False,
+                "navigation_config": {},
+            },
+            "message": "success",
+        }
     raise HTTPException(401, "登录状态无效，请重新登录")
+
+
+@app.put("/api/v1/users/me/navigation")
+def update_my_navigation(
+    payload: NavigationSettingsPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = require_user(request)
+    user_id = int(token.get("sub", "0") or 0)
+    if user_id <= 0:
+        raise HTTPException(403, "应急管理员不保存个人导航设置")
+    user = db.get(User, user_id)
+    if user is None or not user.active:
+        raise HTTPException(401, "登录状态无效，请重新登录")
+    config = payload.model_dump()
+    encoded = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) > 3800:
+        raise HTTPException(422, "导航设置过大，请减少自定义项目")
+    user.navigation_config = encoded
+    db.commit()
+    request.state.audit_target = user.username
+    request.state.audit_summary = "用户更新个人侧栏顺序与显示项"
+    return {"ok": True, "navigation_config": config}
 
 
 @app.get("/api/dashboard")
@@ -797,7 +876,7 @@ def update_sample(
     product.sample_stock_qty = payload.stock_qty
     if stock_delta:
         transaction = StockTransaction(
-            transaction_no=serial("ST"),
+            transaction_no=serial("ST", db),
             transaction_type="SAMPLE_ADJUST",
             notes=f"{product.name} 样品库存调整为 {payload.stock_qty} {product.unit}",
         )
@@ -935,6 +1014,110 @@ def delete_product(item_id: int, db: Session = Depends(get_db)):
     product.active = False
     db.commit()
     return {"ok": True}
+
+
+def document_number_rule_dict(rule: DocumentNumberRule) -> dict:
+    label, _default_prefix = DEFAULT_DOCUMENT_RULES[rule.document_type]
+    return {
+        "document_type": rule.document_type,
+        "label": label,
+        "prefix": rule.prefix,
+        "next_number": rule.next_number,
+        "digits": rule.digits,
+        "preview": f"{rule.prefix}{int(rule.next_number):0{int(rule.digits)}d}",
+        "updated_at": rule.updated_at.isoformat(),
+    }
+
+
+def ensure_document_number_rules(db: Session) -> list[DocumentNumberRule]:
+    rows = {
+        row.document_type: row
+        for row in db.scalars(select(DocumentNumberRule)).all()
+    }
+    created = False
+    for document_type, (_label, prefix) in DEFAULT_DOCUMENT_RULES.items():
+        if document_type in rows:
+            continue
+        row = DocumentNumberRule(
+            document_type=document_type,
+            prefix=prefix,
+            next_number=1,
+            digits=6,
+        )
+        db.add(row)
+        rows[document_type] = row
+        created = True
+    if created:
+        db.commit()
+    return [rows[key] for key in DEFAULT_DOCUMENT_RULES]
+
+
+@app.get("/api/system/document-numbering")
+def document_numbering_settings(db: Session = Depends(get_db)):
+    return [document_number_rule_dict(row) for row in ensure_document_number_rules(db)]
+
+
+@app.put("/api/system/document-numbering")
+def update_document_numbering_settings(
+    payload: DocumentNumberSettingsPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_admin(request)
+    rows = {
+        row.document_type: row
+        for row in db.scalars(
+            select(DocumentNumberRule).with_for_update()
+        ).all()
+    }
+    for incoming in payload.rules:
+        row = rows.get(incoming.document_type)
+        if row is None:
+            row = DocumentNumberRule(document_type=incoming.document_type)
+            db.add(row)
+            rows[incoming.document_type] = row
+        if row.prefix == incoming.prefix and incoming.next_number < int(row.next_number or 1):
+            raise HTTPException(
+                409,
+                f"{DEFAULT_DOCUMENT_RULES[incoming.document_type][0]} 的起始号不能小于当前待用号 {row.next_number}",
+            )
+        row.prefix = incoming.prefix
+        row.next_number = incoming.next_number
+        row.digits = incoming.digits
+    db.commit()
+    request.state.audit_target = "单据编号"
+    request.state.audit_summary = "管理员更新业务单号前缀、位数与待用号码"
+    return [document_number_rule_dict(rows[key]) for key in DEFAULT_DOCUMENT_RULES]
+
+
+@app.get("/api/system/role-permissions")
+def role_permissions():
+    return [
+        {
+            "role": "VIEWER",
+            "label": "只读",
+            "read": True,
+            "business_write": False,
+            "system_admin": False,
+            "description": "查看业务数据、报表、单据和日志；不能新增、修改或审核。",
+        },
+        {
+            "role": "OPERATOR",
+            "label": "操作员",
+            "read": True,
+            "business_write": True,
+            "system_admin": False,
+            "description": "执行接单、采购、排产、出入库、完工与收款；不能管理用户、备份和系统级规则。",
+        },
+        {
+            "role": "ADMIN",
+            "label": "管理员",
+            "read": True,
+            "business_write": True,
+            "system_admin": True,
+            "description": "拥有全部业务权限，并可管理用户、备份、编号规则和全局参数。",
+        },
+    ]
 
 
 def production_settings_dict(settings: ProductionSetting) -> dict:
@@ -1145,7 +1328,7 @@ def create_manual_production_run(
     # 超出订单需求的产量在完工后自然进入自由库存。
     recalculate_production_plan(db)
     run = ProductionRun(
-        run_no=serial("PR"),
+        run_no=serial("PR", db),
         product_id=product.id,
         line_slot=payload.line_slot,
         mold_slot=mold_slot,
@@ -1687,7 +1870,7 @@ def send_external_processing(
     else:
         expected_return_at = occurred_at + timedelta(days=lead_days) if lead_days > 0 else None
     batch = ExternalProcessingBatch(
-        batch_no=serial("EP"),
+        batch_no=serial("EP", db),
         product_id=product.id,
         process_name_snapshot=product.external_process_name,
         supplier=payload.supplier.strip(),
@@ -2268,7 +2451,7 @@ def create_order(payload: OrderPayload, db: Session = Depends(get_db)):
     ids = [line.product_id for line in payload.items]
     products = lock_active_items(db, ids, "PRODUCT")
     order = SalesOrder(
-        order_no=serial("SO"), customer_name=payload.customer_name, customer_phone=payload.customer_phone,
+        order_no=serial("SO", db), customer_name=payload.customer_name, customer_phone=payload.customer_phone,
         customer_address=payload.customer_address, order_date=payload.order_date,
         required_date=payload.required_date or payload.order_date, notes=payload.notes, status="DRAFT"
     )
@@ -2578,7 +2761,7 @@ def _apply_refund_credit(
             receivable, existing_offset + offset
         )
         credits.append(CustomerCredit(
-            credit_no=serial("CR"),
+            credit_no=serial("CR", db),
             order_id=order.id,
             order_return_id=first_return_id,
             receivable_id=receivable.id,
@@ -2592,7 +2775,7 @@ def _apply_refund_credit(
         remaining_refund = round(remaining_refund - offset, 2)
     if remaining_refund > 1e-9:
         credits.append(CustomerCredit(
-            credit_no=serial("CR"),
+            credit_no=serial("CR", db),
             order_id=order.id,
             order_return_id=first_return_id,
             receivable_id=None,
@@ -2635,7 +2818,7 @@ def create_order_return(
     line_by_id = {line.id: line for line in order.items}
     if any(line.order_item_id not in line_by_id for line in payload.items):
         raise HTTPException(400, "退货明细不属于该客单")
-    return_no = serial("RT")
+    return_no = serial("RT", db)
     occurred_at = datetime.combine(payload.occurred_date, time.min)
     # 5.7：在创建 OrderReturn 之前，按剩余池计算本次退货的单价/成本快照。
     # 已退部分通过 prior OrderReturn snapshots 扣除，后续出库不能改写本次快照。
@@ -2871,7 +3054,7 @@ def _ship_order(
     db.flush()
     if original_total > 0:
         db.add(Receivable(
-            receivable_no=serial("AR"),
+            receivable_no=serial("AR", db),
             order_id=order.id,
             related_stock_transaction_id=tx.id,
             customer_name=order.customer_name,
@@ -3485,7 +3668,7 @@ def create_payment(
     db: Session = Depends(get_db),
 ):
     payment = Payment(
-        payment_no=serial("PAY"),
+        payment_no=serial("PAY", db),
         customer_name=payload.customer_name.strip(),
         amount=round(payload.amount, 2),
         payment_date=payload.payment_date,

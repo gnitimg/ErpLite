@@ -213,6 +213,23 @@ class ProductionSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class DocumentNumberRule(Base):
+    """可配置的业务单号规则；每个 document_type 独立、事务内递增。"""
+
+    __tablename__ = "document_number_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_type: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    prefix: Mapped[str] = mapped_column(String(12), default="")
+    next_number: Mapped[int] = mapped_column(Integer, default=1)
+    digits: Mapped[int] = mapped_column(Integer, default=6)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.now,
+        onupdate=datetime.now,
+    )
+
+
 class Mold(Base):
     __tablename__ = "molds"
 
@@ -653,5 +670,6 @@ class User(Base):
     # 首次登录强制改密标志：初始默认 admin 用弱口令 12345678 时为 True，
     # 改密成功后清除；登录时也会按明文密码强度动态复核。
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    navigation_config: Mapped[str] = mapped_column(String(4000), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

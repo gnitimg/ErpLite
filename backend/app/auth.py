@@ -39,7 +39,14 @@ PUBLIC_API_PATHS = {
 ADMIN_ONLY_PREFIXES = ("/api/users", "/api/backups")
 
 # 系统级设置：读取开放给登录用户，修改仅 ADMIN。
-ADMIN_WRITE_PREFIXES = ("/api/system/production-settings", "/api/system/print-settings")
+ADMIN_WRITE_PREFIXES = (
+    "/api/system/production-settings",
+    "/api/system/print-settings",
+    "/api/system/document-numbering",
+)
+
+# 登录用户自己的界面偏好不属于业务写入，只需有效登录态。
+SELF_SERVICE_WRITE_PATHS = {"/api/v1/users/me/navigation"}
 
 # 未认证请求在审计日志中显示的用户名。
 ANONYMOUS_USERNAME = "未登录"
@@ -253,6 +260,8 @@ def required_role_for(path: str, method: str) -> str | None:
     if path.startswith(ADMIN_ONLY_PREFIXES):
         return "ADMIN"
     if method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return "VIEWER"
+    if path in SELF_SERVICE_WRITE_PATHS:
         return "VIEWER"
     if path.startswith(ADMIN_WRITE_PREFIXES):
         return "ADMIN"

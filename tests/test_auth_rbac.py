@@ -169,6 +169,28 @@ def test_users_me_with_valid_token_returns_real_user(db):
     data = response.json()["data"]
     assert data["username"] == "viewer1"
     assert data["role"] == "VIEWER"
+    assert data["permissions"] == ["business:read"]
+    assert data["navigation_config"] == {}
+
+
+def test_viewer_can_save_only_own_navigation_preferences(db):
+    add_user(db, "viewer1", "VIEWER")
+    token = login_token("viewer1", "pass-123456")
+    payload = {
+        "root_order": ["/lite-orders", "/lite-inventory"],
+        "hidden_roots": ["/lite-finance"],
+        "child_order": {"/lite-orders": ["list", "documents"]},
+    }
+
+    saved = client.put(
+        "/api/v1/users/me/navigation",
+        headers=auth(token),
+        json=payload,
+    )
+    assert saved.status_code == 200
+    me = client.get("/api/v1/users/me", headers=auth(token))
+    assert me.status_code == 200
+    assert me.json()["data"]["navigation_config"] == payload
 
 
 # ───────────────────────── RBAC 中间件 ─────────────────────────
@@ -185,6 +207,8 @@ def test_required_role_rules():
     assert required_role_for("/api/system/production-settings", "GET") == "VIEWER"
     assert required_role_for("/api/system/production-settings", "PUT") == "ADMIN"
     assert required_role_for("/api/system/print-settings", "PUT") == "ADMIN"
+    assert required_role_for("/api/system/document-numbering", "PUT") == "ADMIN"
+    assert required_role_for("/api/v1/users/me/navigation", "PUT") == "VIEWER"
     assert required_role_for("/api/system/calendar/exceptions", "GET") == "VIEWER"
     assert required_role_for("/api/system/calendar/exceptions", "POST") == "OPERATOR"
 
@@ -267,6 +291,46 @@ def test_user_management_requires_admin(db):
     operator_token = login_token("op1", "pass-123456")
     response = client.get("/api/users", headers=auth(operator_token))
     assert response.status_code == 403
+
+
+def test_document_number_settings_require_admin(db):
+    add_user(db, "viewer1", "VIEWER")
+    add_user(db, "boss", "ADMIN")
+    viewer_token = login_token("viewer1", "pass-123456")
+    admin_token = login_token("boss", "pass-123456")
+
+    listed = client.get(
+        "/api/system/document-numbering",
+        headers=auth(viewer_token),
+    )
+    assert listed.status_code == 200
+    assert len(listed.json()) == 8
+    payload = {
+        "rules": [
+            {
+                "document_type": row["document_type"],
+                "prefix": "AA-" if row["document_type"] == "SO" else row["prefix"],
+                "next_number": 100 if row["document_type"] == "SO" else row["next_number"],
+                "digits": row["digits"],
+            }
+            for row in listed.json()
+        ]
+    }
+    assert client.put(
+        "/api/system/document-numbering",
+        headers=auth(viewer_token),
+        json=payload,
+    ).status_code == 403
+    updated = client.put(
+        "/api/system/document-numbering",
+        headers=auth(admin_token),
+        json=payload,
+    )
+    assert updated.status_code == 200
+    order_rule = next(
+        row for row in updated.json() if row["document_type"] == "SO"
+    )
+    assert order_rule["preview"] == "AA-000100"
 
 
 def test_one_of_two_active_admins_can_be_deactivated(db):

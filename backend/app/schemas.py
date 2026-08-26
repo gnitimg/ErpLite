@@ -178,6 +178,35 @@ class PrintSettingsPayload(BaseModel):
     height_mm: float = Field(default=210, ge=50, le=500)
 
 
+DocumentType = Literal[
+    "SO", "ST", "PR", "EP", "RT", "AR", "PAY", "CR"
+]
+
+
+class DocumentNumberRulePayload(BaseModel):
+    document_type: DocumentType
+    prefix: str = Field(min_length=0, max_length=12, pattern=r"^[A-Za-z0-9-]*$")
+    next_number: int = Field(default=1, ge=1, le=9999999999)
+    digits: int = Field(default=6, ge=3, le=10)
+
+    @field_validator("prefix")
+    @classmethod
+    def normalize_prefix(cls, value: str):
+        return value.strip().upper()
+
+
+class DocumentNumberSettingsPayload(BaseModel):
+    rules: list[DocumentNumberRulePayload] = Field(min_length=8, max_length=8)
+
+    @field_validator("rules")
+    @classmethod
+    def unique_document_types(cls, value: list[DocumentNumberRulePayload]):
+        document_types = [rule.document_type for rule in value]
+        if len(set(document_types)) != len(document_types):
+            raise ValueError("单号类型不能重复")
+        return value
+
+
 class ProductionRunStatusPayload(BaseModel):
     status: Literal["RUNNING", "CANCELLED", "TERMINATED"]
     qualified_quantity: int | None = Field(default=None, ge=0)
@@ -332,6 +361,29 @@ class UserUpdatePayload(BaseModel):
 class ChangePasswordPayload(BaseModel):
     old_password: str = Field(min_length=1, max_length=120)
     new_password: str = Field(min_length=8, max_length=120)
+
+
+class NavigationSettingsPayload(BaseModel):
+    root_order: list[str] = Field(default_factory=list, max_length=30)
+    hidden_roots: list[str] = Field(default_factory=list, max_length=30)
+    child_order: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("root_order", "hidden_roots")
+    @classmethod
+    def validate_route_paths(cls, value: list[str]):
+        cleaned = [path.strip()[:120] for path in value if path.strip().startswith("/")]
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator("child_order")
+    @classmethod
+    def validate_child_order(cls, value: dict[str, list[str]]):
+        if len(value) > 30:
+            raise ValueError("导航分组过多")
+        return {
+            key.strip()[:120]: list(dict.fromkeys(path.strip()[:120] for path in paths))[:30]
+            for key, paths in value.items()
+            if key.strip().startswith("/")
+        }
 
 
 class StocktakeLinePayload(BaseModel):
