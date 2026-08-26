@@ -79,7 +79,7 @@ export const constantRoutes: RouteRecordRaw[] = [
   {
     path: "/master-data",
     component: Layouts,
-    redirect: "/master-data/parts",
+    redirect: { path: "/lite-settings/items", query: { scope: "PART" } },
     name: "MasterData",
     meta: {
       title: "物料目录",
@@ -90,19 +90,23 @@ export const constantRoutes: RouteRecordRaw[] = [
     children: [
       {
         path: "parts",
-        component: () => import("@/pages/erp/parts.vue"),
-        name: "Parts",
-        meta: { title: "零件目录", elIcon: "Cpu", keepAlive: true }
+        redirect: to => ({
+          path: "/lite-settings/items",
+          query: { ...to.query, scope: "PART" }
+        }),
+        meta: { hidden: true }
       },
       {
         path: "products",
-        component: () => import("@/pages/erp/products.vue"),
-        name: "Products",
-        meta: { title: "产品目录", elIcon: "Box", keepAlive: true }
+        redirect: to => ({
+          path: "/lite-settings/items",
+          query: { ...to.query, scope: "PRODUCT" }
+        }),
+        meta: { hidden: true }
       },
       {
         path: "production-resources",
-        redirect: "/master-data/products",
+        redirect: { path: "/lite-settings/items", query: { scope: "PRODUCT" } },
         meta: { hidden: true }
       },
       {
@@ -327,6 +331,12 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import("@/pages/erp/documents.vue"),
         name: "LiteSalesDocuments",
         meta: { title: "销售出库与退货", documentContext: "sales", documentDirection: "outbound", keepAlive: true }
+      },
+      {
+        path: "finance",
+        component: () => import("@/pages/erp/finance.vue"),
+        name: "LiteFinance",
+        meta: { title: "应收与收款", keepAlive: true }
       }
     ]
   },
@@ -469,18 +479,13 @@ export const constantRoutes: RouteRecordRaw[] = [
   {
     path: "/lite-finance",
     component: Layouts,
-    name: "LiteFinanceRoot",
-    meta: { title: "财务", elIcon: "Money" },
+    redirect: to => ({ path: "/lite-orders/finance", query: to.query }),
+    name: "LiteFinanceLegacyRoot",
+    meta: { hidden: true },
     children: [
       {
-        path: "",
-        component: () => import("@/pages/erp/finance.vue"),
-        name: "LiteFinance",
-        meta: { title: "财务", elIcon: "Money", keepAlive: true }
-      },
-      {
         path: "receivables",
-        redirect: "/lite-finance",
+        redirect: to => ({ path: "/lite-orders/finance", query: to.query }),
         meta: { hidden: true }
       }
     ]
@@ -488,31 +493,46 @@ export const constantRoutes: RouteRecordRaw[] = [
   {
     path: "/lite-catalog",
     component: Layouts,
-    redirect: "/lite-catalog/products",
-    name: "LiteCatalogRoot",
-    meta: { title: "基础资料", elIcon: "Collection", alwaysShow: true },
+    redirect: to => ({ path: "/lite-settings/items", query: to.query }),
+    name: "LiteCatalogLegacyRoot",
+    meta: { hidden: true },
     children: [
       {
+        path: "items",
+        redirect: to => ({ path: "/lite-settings/items", query: to.query }),
+        meta: { hidden: true }
+      },
+      {
         path: "products",
-        component: () => import("@/pages/erp/products.vue"),
-        name: "LiteProducts",
-        meta: { title: "产品与 BOM", keepAlive: true }
+        redirect: to => ({
+          path: "/lite-settings/items",
+          query: { ...to.query, scope: "PRODUCT" }
+        }),
+        meta: { hidden: true }
       },
       {
         path: "materials",
-        component: () => import("@/pages/erp/parts.vue"),
-        name: "LiteParts",
-        meta: { title: "零件资料", keepAlive: true }
+        redirect: to => ({
+          path: "/lite-settings/items",
+          query: { ...to.query, scope: "PART" }
+        }),
+        meta: { hidden: true }
       }
     ]
   },
   {
     path: "/lite-settings",
     component: Layouts,
-    redirect: "/lite-settings/workflow",
+    redirect: "/lite-settings/items",
     name: "LiteSettingsRoot",
-    meta: { title: "设置", elIcon: "Setting", alwaysShow: true },
+    meta: { title: "资料与设置", elIcon: "Setting", alwaysShow: true },
     children: [
+      {
+        path: "items",
+        component: () => import("@/pages/erp/products.vue"),
+        name: "LiteCatalogItems",
+        meta: { title: "物料资料", keepAlive: true }
+      },
       {
         path: "workflow",
         component: () => import("@/pages/erp/workflow-settings.vue"),
@@ -533,12 +553,12 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         path: "products",
-        redirect: "/lite-catalog/products",
+        redirect: { path: "/lite-settings/items", query: { scope: "PRODUCT" } },
         meta: { hidden: true }
       },
       {
         path: "materials",
-        redirect: "/lite-catalog/materials",
+        redirect: { path: "/lite-settings/items", query: { scope: "PART" } },
         meta: { hidden: true }
       },
       {

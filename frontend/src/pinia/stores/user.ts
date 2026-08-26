@@ -12,11 +12,60 @@ export interface NavigationConfig {
   child_order: Record<string, string[]>
 }
 
-const emptyNavigationConfig = (): NavigationConfig => ({
-  root_order: [],
-  hidden_roots: [],
-  child_order: {}
-})
+function emptyNavigationConfig(): NavigationConfig {
+  return {
+    root_order: [],
+    hidden_roots: [],
+    child_order: {}
+  }
+}
+
+const retiredNavigationRoots = new Set(["/lite-finance", "/lite-catalog"])
+
+function uniquePaths(paths: string[]) {
+  return [...new Set(paths)]
+}
+
+function normalizeNavigationConfig(
+  value?: Partial<NavigationConfig> | null
+): NavigationConfig {
+  const source = {
+    ...emptyNavigationConfig(),
+    ...(value || {})
+  }
+  const childOrder = Object.fromEntries(
+    Object.entries(source.child_order || {}).map(([key, paths]) => [
+      key,
+      uniquePaths([...(paths || [])])
+    ])
+  )
+  delete childOrder["/lite-finance"]
+  delete childOrder["/lite-catalog"]
+
+  const salesOrder = childOrder["/lite-orders"] || []
+  if (salesOrder.length) {
+    childOrder["/lite-orders"] = uniquePaths([
+      ...salesOrder.filter(path => path !== "finance"),
+      "finance"
+    ])
+  }
+
+  const settingsOrder = childOrder["/lite-settings"] || []
+  if (settingsOrder.length) {
+    childOrder["/lite-settings"] = uniquePaths([
+      "items",
+      ...settingsOrder.filter(path => path !== "items")
+    ])
+  }
+
+  return {
+    root_order: uniquePaths(source.root_order || [])
+      .filter(path => !retiredNavigationRoots.has(path)),
+    hidden_roots: uniquePaths(source.hidden_roots || [])
+      .filter(path => !retiredNavigationRoots.has(path)),
+    child_order: childOrder
+  }
+}
 
 export const useUserStore = defineStore("user", () => {
   const token = ref<string>(getToken() || "")
@@ -51,10 +100,7 @@ export const useUserStore = defineStore("user", () => {
     roles.value = data.roles ?? []
     permissions.value = data.permissions ?? []
     mustChangePassword.value = Boolean(data.must_change_password)
-    navigationConfig.value = {
-      ...emptyNavigationConfig(),
-      ...(data.navigation_config || {})
-    }
+    navigationConfig.value = normalizeNavigationConfig(data.navigation_config)
     // 防止路由守卫逻辑进入无限循环
     isGotUserInfo.value = true
   }
@@ -75,13 +121,7 @@ export const useUserStore = defineStore("user", () => {
   }
 
   const setNavigationConfig = (value: NavigationConfig) => {
-    navigationConfig.value = {
-      root_order: [...value.root_order],
-      hidden_roots: [...value.hidden_roots],
-      child_order: Object.fromEntries(
-        Object.entries(value.child_order).map(([key, paths]) => [key, [...paths]])
-      )
-    }
+    navigationConfig.value = normalizeNavigationConfig(value)
   }
 
   // 登出

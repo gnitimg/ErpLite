@@ -42,7 +42,7 @@ const flowSteps = [
   { index: "03", title: "排产", text: "安排生产位并确认开始日期", to: "/lite-production/schedule" },
   { index: "04", title: "完工", text: "审核实际产量及外协流转", to: "/lite-production/completion" },
   { index: "05", title: "交付", text: "开出库单并形成销售单据", to: "/lite-stock-documents/list" },
-  { index: "06", title: "结算", text: "核对应收、收款和客户余额", to: "/lite-finance" }
+  { index: "06", title: "结算", text: "核对应收、收款和客户余额", to: "/lite-orders/finance" }
 ]
 
 const defaultRootOrder = [
@@ -52,8 +52,6 @@ const defaultRootOrder = [
   "/lite-production",
   "/lite-inventory",
   "/lite-stock-documents",
-  "/lite-finance",
-  "/lite-catalog",
   "/lite-settings"
 ]
 
@@ -189,7 +187,8 @@ async function saveNumberRules() {
   }
 }
 
-function numberPreview(rule: NumberRule) {
+function numberPreview(value: unknown) {
+  const rule = value as NumberRule
   const prefix = String(rule.prefix || "").toUpperCase()
   return `${prefix}${Number(rule.next_number || 1)
     .toString()

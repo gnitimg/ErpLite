@@ -2,7 +2,7 @@
 import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { useRouter } from "vue-router"
-import { api, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
+import { api, ApiError, formatDate, money, productQty, qty, statusMap, useLiveRefresh } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import QuantityInput from "./components/QuantityInput.vue"
 
@@ -16,8 +16,22 @@ const workflowLoading = ref(false)
 const workflow = ref<any>(null)
 const returnHistory = ref<any[]>([])
 const returnSaving = ref(false)
+type CancelDisposition = "cancel_runs" | "convert_to_replenishment" | "keep_runs"
+interface CancelRun { id: number, run_no: string, planned_quantity: number }
+interface CancelConflict {
+  message: string
+  locked_planned_runs: CancelRun[]
+  running_runs: CancelRun[]
+  options: Array<{ value: CancelDisposition, label: string }>
+}
+
 const shipmentDrawer = ref(false)
 const shipmentForm = reactive({ items: [] as any[], notes: "" })
+const cancelConflictDialog = ref(false)
+const cancelConflict = ref<CancelConflict | null>(null)
+const cancelDisposition = ref<CancelDisposition>("cancel_runs")
+const cancelSubmitting = ref(false)
+const cancelOrder = ref<any>(null)
 const activeOrder = ref<any>(null)
 const activeDetailTab = ref("overview")
 const rows = ref<any[]>([])
@@ -178,11 +192,60 @@ async function submitReturn() {
     returnSaving.value = false
   }
 }
+function isCancelConflict(value: unknown): value is CancelConflict {
+  if (!value || typeof value !== "object") return false
+  const detail = value as Partial<CancelConflict>
+  return Array.isArray(detail.options)
+    && Array.isArray(detail.locked_planned_runs)
+    && Array.isArray(detail.running_runs)
+}
+
+function cancelDispositionHint(value: CancelDisposition) {
+  const hints: Record<CancelDisposition, string> = {
+    cancel_runs: "取消仅服务本客单、尚未开工的计划；共享计划按剩余订单数量缩量。",
+    convert_to_replenishment: "保留生产数量，转为企业主动补充成品库存。",
+    keep_runs: "保留当前生产计划，只解除它与本客单的需求关联。"
+  }
+  return hints[value]
+}
+
+function openCancelConflict(row: any, detail: CancelConflict) {
+  cancelOrder.value = row
+  cancelConflict.value = detail
+  cancelDisposition.value = detail.locked_planned_runs.length ? (detail.options[0]?.value || "cancel_runs") : "keep_runs"
+  cancelConflictDialog.value = true
+}
+
+async function refreshOrderAfterAction(row: any) {
+  await load()
+  if (workflowDrawer.value && activeOrder.value?.id === row.id) {
+    await openWorkflow(rows.value.find(x => x.id === row.id) || row)
+  }
+}
+
+async function submitCancelDisposition() {
+  if (!cancelOrder.value || !cancelConflict.value) return
+  cancelSubmitting.value = true
+  try {
+    await api(`/api/orders/${cancelOrder.value.id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: cancelDisposition.value })
+    })
+    cancelConflictDialog.value = false
+    ElMessage.success("取消客单成功")
+    await refreshOrderAfterAction(cancelOrder.value)
+  } catch (error: any) {
+    ElMessage.error(error.message)
+  } finally {
+    cancelSubmitting.value = false
+  }
+}
+
 async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
   const labels = {
-    confirm: "确认客单、预留库存并计算 ETA",
+    "confirm": "确认客单、预留库存并计算 ETA",
     "ship-all": "将全部剩余产品出库",
-    cancel: "取消客单"
+    "cancel": "取消客单"
   }
   try {
     await ElMessageBox.confirm(`确定${labels[type]}“${row.order_no}”吗？`, "客单操作", {
@@ -190,15 +253,17 @@ async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
     })
     await api(`/api/orders/${row.id}/${type}`, { method: "POST" })
     ElMessage.success(`${labels[type]}成功`)
-    await load()
-    if (workflowDrawer.value && activeOrder.value?.id === row.id) {
-      await openWorkflow(rows.value.find(x => x.id === row.id) || row)
-    }
+    await refreshOrderAfterAction(row)
   } catch (error: any) {
-    if (error !== "cancel") ElMessage.error(error.message)
+    if (error === "cancel") return
+    if (type === "cancel" && error instanceof ApiError && error.status === 409 && isCancelConflict(error.detail)) {
+      openCancelConflict(row, error.detail)
+      return
+    }
+    ElMessage.error(error.message)
   }
 }
-function openShipment(row: any) {
+function _openShipment(row: any) {
   activeOrder.value = row
   shipmentForm.items = row.items
     .filter((line: any) => Number(line.remaining_quantity) > 0)
@@ -558,8 +623,8 @@ useLiveRefresh(async () => {
                         'WAITING_MATERIALS',
                         'READY_TO_SHIP',
                         'PARTIALLY_SHIPPED',
-                        'FULFILLED'
-                      ].includes(workflow.status)
+                        'FULFILLED',
+                      ].includes(workflow.status),
                     }"
                   >
                     3 零件采购/备料
@@ -692,7 +757,9 @@ useLiveRefresh(async () => {
               <el-table :data="returnForm.items" border style="margin-top: 16px" empty-text="该订单没有可登记的产品">
                 <el-table-column label="产品" min-width="220">
                   <template #default="{ row }">
-                    <div class="sku-cell"><strong>{{ row.product_name }}</strong><span>{{ row.product_sku }}</span></div>
+                    <div class="sku-cell">
+                      <strong>{{ row.product_name }}</strong><span>{{ row.product_sku }}</span>
+                    </div>
                   </template>
                 </el-table-column>
                 <el-table-column prop="shipped_quantity" label="累计出库" width="105" align="right" />
@@ -705,7 +772,9 @@ useLiveRefresh(async () => {
                 </el-table-column>
                 <el-table-column label="库存处理" width="145">
                   <template #default="{ row }">
-                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">合格品回库</el-checkbox>
+                    <el-checkbox v-model="row.restock" :disabled="!row.returnable_quantity">
+                      合格品回库
+                    </el-checkbox>
                   </template>
                 </el-table-column>
               </el-table>
@@ -716,7 +785,9 @@ useLiveRefresh(async () => {
                 </el-select>
                 <el-date-picker v-model="returnForm.occurred_date" type="date" value-format="YYYY-MM-DD" placeholder="退货日期" />
                 <el-input v-model="returnForm.notes" placeholder="退货原因或备注" clearable />
-                <el-button type="primary" :loading="returnSaving" @click="submitReturn">登记退货</el-button>
+                <el-button type="primary" :loading="returnSaving" @click="submitReturn">
+                  登记退货
+                </el-button>
               </div>
               <div class="detail-section-head">
                 <strong>退货记录</strong>
@@ -724,16 +795,28 @@ useLiveRefresh(async () => {
               <el-table :data="returnHistory" border empty-text="暂无退货记录">
                 <el-table-column prop="return_no" label="退货单号" min-width="185" />
                 <el-table-column label="产品" min-width="190">
-                  <template #default="{ row }">{{ row.product_name }} · {{ row.product_sku }}</template>
+                  <template #default="{ row }">
+                    {{ row.product_name }} · {{ row.product_sku }}
+                  </template>
                 </el-table-column>
                 <el-table-column label="数量" width="110" align="right">
-                  <template #default="{ row }">{{ productQty(row.quantity) }} {{ row.unit }}</template>
+                  <template #default="{ row }">
+                    {{ productQty(row.quantity) }} {{ row.unit }}
+                  </template>
                 </el-table-column>
                 <el-table-column label="类型" width="100">
-                  <template #default="{ row }"><el-tag :type="row.resolution === 'REFUND' ? 'warning' : 'primary'" size="small">{{ row.resolution === 'REFUND' ? '退款' : '换货' }}</el-tag></template>
+                  <template #default="{ row }">
+                    <el-tag :type="row.resolution === 'REFUND' ? 'warning' : 'primary'" size="small">
+                      {{ row.resolution === 'REFUND' ? '退款' : '换货' }}
+                    </el-tag>
+                  </template>
                 </el-table-column>
                 <el-table-column label="库存处理" width="120">
-                  <template #default="{ row }"><el-tag :type="row.restocked ? 'success' : 'info'" size="small">{{ row.restocked ? '已入库' : '不入库' }}</el-tag></template>
+                  <template #default="{ row }">
+                    <el-tag :type="row.restocked ? 'success' : 'info'" size="small">
+                      {{ row.restocked ? '已入库' : '不入库' }}
+                    </el-tag>
+                  </template>
                 </el-table-column>
                 <el-table-column label="退款金额 / 换货" min-width="180">
                   <template #default="{ row }">
@@ -743,7 +826,9 @@ useLiveRefresh(async () => {
                   </template>
                 </el-table-column>
                 <el-table-column label="日期" width="120">
-                  <template #default="{ row }">{{ formatDate(row.occurred_at) }}</template>
+                  <template #default="{ row }">
+                    {{ formatDate(row.occurred_at) }}
+                  </template>
                 </el-table-column>
               </el-table>
             </div>
@@ -751,6 +836,69 @@ useLiveRefresh(async () => {
         </el-tabs>
       </div>
     </el-drawer>
+
+    <el-dialog
+      v-model="cancelConflictDialog"
+      title="取消客单前处理生产计划"
+      width="min(560px, 92vw)"
+      :close-on-click-modal="!cancelSubmitting"
+      destroy-on-close
+    >
+      <el-alert
+        :title="cancelConflict?.message || '该客单存在关联生产计划，请先选择处置方式。'"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
+      <div v-if="cancelConflict" class="cancel-plan-summary">
+        <div v-if="cancelConflict.locked_planned_runs.length" class="cancel-run-group">
+          <span>已排定未开工</span>
+          <el-tag v-for="run in cancelConflict.locked_planned_runs" :key="run.id" type="warning" effect="plain">
+            {{ run.run_no }} · {{ productQty(run.planned_quantity) }}
+          </el-tag>
+        </div>
+        <div v-if="cancelConflict.running_runs.length" class="cancel-run-group">
+          <span>正在生产</span>
+          <el-tag v-for="run in cancelConflict.running_runs" :key="run.id" type="primary" effect="light">
+            {{ run.run_no }} · {{ productQty(run.planned_quantity) }}
+          </el-tag>
+        </div>
+        <el-alert
+          v-if="cancelConflict.running_runs.length"
+          title="正在生产的计划不会被强制停止；取消客单后只解除订单关联。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+      </div>
+      <div v-if="cancelConflict?.locked_planned_runs.length" class="cancel-disposition-section">
+        <div class="cancel-disposition-title">
+          请选择未开工计划的处理方式
+        </div>
+        <el-radio-group v-model="cancelDisposition" class="cancel-disposition-list">
+          <el-radio
+            v-for="option in cancelConflict.options"
+            :key="option.value"
+            :value="option.value"
+            border
+            class="cancel-disposition-option"
+          >
+            <span class="cancel-option-copy">
+              <strong>{{ option.label }}</strong>
+              <small>{{ cancelDispositionHint(option.value) }}</small>
+            </span>
+          </el-radio>
+        </el-radio-group>
+      </div>
+      <template #footer>
+        <el-button :disabled="cancelSubmitting" @click="cancelConflictDialog = false">
+          暂不取消
+        </el-button>
+        <el-button type="danger" :loading="cancelSubmitting" @click="submitCancelDisposition">
+          确认取消客单
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="shipmentDrawer" title="订单出库" size="min(620px, 96vw)">
       <el-alert title="只能使用当前为本订单预留的库存；每次提交都会生成一张独立销售出库单。" type="info" :closable="false" show-icon />
@@ -881,6 +1029,58 @@ useLiveRefresh(async () => {
 </template>
 
 <style scoped>
+.cancel-plan-summary {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.cancel-run-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.cancel-run-group > span {
+  width: 104px;
+  color: var(--el-text-color-secondary);
+}
+
+.cancel-disposition-section {
+  margin-top: 16px;
+}
+
+.cancel-disposition-title {
+  margin-bottom: 10px;
+  color: var(--el-text-color-regular);
+  font-weight: 600;
+}
+
+.cancel-disposition-list {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.cancel-disposition-option {
+  width: 100%;
+  height: auto;
+  min-height: 66px;
+  margin: 0;
+  padding: 12px 16px;
+  white-space: normal;
+}
+
+.cancel-option-copy {
+  display: grid;
+  gap: 4px;
+  line-height: 1.45;
+}
+
+.cancel-option-copy small {
+  color: var(--el-text-color-secondary);
+}
 .return-form-footer {
   display: grid;
   grid-template-columns: 160px minmax(220px, 1fr) auto;

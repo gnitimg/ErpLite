@@ -8,15 +8,33 @@ function redirectToLogin() {
   window.location.href = `${base.endsWith("/") ? base : `${base}/`}#/login`
 }
 
-async function errorMessage(response: Response) {
+export class ApiError extends Error {
+  status: number
+  detail: unknown
+
+  constructor(status: number, message: string, detail: unknown = null) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.detail = detail
+  }
+}
+
+async function responseError(response: Response) {
+  let detail: unknown = null
   let message = `请求失败（${response.status}）`
   try {
     const data = await response.json()
-    message = typeof data.detail === "string" ? data.detail : message
+    detail = data.detail
+    if (typeof detail === "string") {
+      message = detail
+    } else if (detail && typeof detail === "object" && "message" in detail) {
+      message = String((detail as { message: unknown }).message)
+    }
   } catch {
     // Keep the HTTP fallback message.
   }
-  return message
+  return new ApiError(response.status, message, detail)
 }
 
 function bearerHeaders(extra: Record<string, string> = {}) {
@@ -41,7 +59,7 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     removeToken()
     redirectToLogin()
   }
-  if (!response.ok) throw new Error(await errorMessage(response))
+  if (!response.ok) throw await responseError(response)
   return response.status === 204 ? (undefined as T) : response.json()
 }
 
@@ -58,7 +76,7 @@ export async function apiBlob(path: string, options: RequestInit = {}): Promise<
     removeToken()
     redirectToLogin()
   }
-  if (!response.ok) throw new Error(await errorMessage(response))
+  if (!response.ok) throw await responseError(response)
   return response.blob()
 }
 

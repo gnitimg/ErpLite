@@ -39,8 +39,6 @@ const defaultRootOrder = [
   "/lite-production",
   "/lite-inventory",
   "/lite-stock-documents",
-  "/lite-finance",
-  "/lite-catalog",
   "/lite-settings"
 ]
 

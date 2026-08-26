@@ -114,10 +114,6 @@ useLiveRefresh(() => load(true))
 
 <template>
   <div class="erp-page">
-    <el-tabs v-if="showKindTabs" v-model="activeKind" class="inventory-kind-tabs" @tab-change="selectKind">
-      <el-tab-pane label="原料" name="PART" />
-      <el-tab-pane label="成品" name="PRODUCT" />
-    </el-tabs>
     <ListToolbar
       v-model="keyword"
       placeholder="搜索物料编码、名称或规格"
@@ -128,8 +124,19 @@ useLiveRefresh(() => load(true))
       @refresh="load"
     />
     <div class="content-card">
-      <div class="card-head">
+      <div class="card-head inventory-card-head">
         <h3>{{ pageTitle }}</h3>
+        <div v-if="showKindTabs" class="inventory-head-actions">
+          <el-segmented
+            v-model="activeKind"
+            :options="[
+              { label: '原料', value: 'PART' },
+              { label: '成品', value: 'PRODUCT' },
+            ]"
+            class="inventory-kind-switch"
+            @change="selectKind"
+          />
+        </div>
       </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column label="物料" min-width="210">
@@ -166,7 +173,9 @@ useLiveRefresh(() => load(true))
               content="按全部未完成订单汇总；0 表示当前无需补充，大于 0 表示仍需生产或采购。"
               placement="top"
             >
-              <el-icon class="column-help"><QuestionFilled /></el-icon>
+              <el-icon class="column-help">
+                <QuestionFilled />
+              </el-icon>
             </el-tooltip>
           </template>
           <template #default="{ row }">
@@ -289,16 +298,46 @@ useLiveRefresh(() => load(true))
 </template>
 
 <style scoped>
-.inventory-kind-tabs {
-  margin-bottom: 2px;
+.inventory-card-head {
+  align-items: center;
 }
-.inventory-kind-tabs :deep(.el-tabs__header) {
-  margin-bottom: 12px;
+
+.inventory-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
 }
+
+.inventory-count {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.inventory-kind-switch {
+  width: 128px;
+  min-width: 128px;
+  max-width: 128px;
+  margin: 0;
+  align-self: center;
+  flex: none;
+}
+
 .column-help {
   margin-left: 5px;
   color: var(--el-text-color-secondary);
   vertical-align: -2px;
   cursor: help;
+}
+
+@media (max-width: 640px) {
+  .inventory-head-actions {
+    gap: 8px;
+  }
+
+  .inventory-count {
+    display: none;
+  }
 }
 </style>
