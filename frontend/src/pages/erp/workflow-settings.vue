@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import type { RouteRecordRaw } from "vue-router"
-import { ElMessage } from "element-plus"
+import type { NavigationConfig } from "@/pinia/stores/user"
+import { ElMessage, ElMessageBox } from "element-plus"
 import { computed, onMounted, reactive, ref } from "vue"
 import { usePermissionStore } from "@/pinia/stores/permission"
-import {
-  useUserStore,
-  type NavigationConfig
-} from "@/pinia/stores/user"
+import { useUserStore } from "@/pinia/stores/user"
 import { api } from "./api"
 import InfoTip from "./components/InfoTip.vue"
 
@@ -36,15 +34,6 @@ interface NavigationItem {
   children: Array<{ path: string, title: string }>
 }
 
-const flowSteps = [
-  { index: "01", title: "接单", text: "创建客户订单并确认交期", to: "/lite-orders/list" },
-  { index: "02", title: "备料", text: "查看缺口并登记采购到货", to: "/lite-purchase/requirements" },
-  { index: "03", title: "排产", text: "安排生产位并确认开始日期", to: "/lite-production/schedule" },
-  { index: "04", title: "完工", text: "审核实际产量及外协流转", to: "/lite-production/completion" },
-  { index: "05", title: "交付", text: "开出库单并形成销售单据", to: "/lite-stock-documents/list" },
-  { index: "06", title: "结算", text: "核对应收、收款和客户余额", to: "/lite-orders/finance" }
-]
-
 const defaultRootOrder = [
   "/",
   "/lite-orders",
@@ -55,7 +44,7 @@ const defaultRootOrder = [
   "/lite-settings"
 ]
 
-const activeTab = ref("workflow")
+const activeTab = ref("numbers")
 const loading = ref(false)
 const savingNumbers = ref(false)
 const savingNavigation = ref(false)
@@ -67,6 +56,11 @@ const draggedChild = reactive({ rootPath: "", index: -1 })
 const userStore = useUserStore()
 const permissionStore = usePermissionStore()
 const isAdmin = computed(() => userStore.roles.includes("ADMIN"))
+
+function showError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "操作失败")
+  ElMessage({ type: "error", message, grouping: true })
+}
 
 function routeTitle(route: RouteRecordRaw) {
   return String(route.meta?.title || route.name || route.path)
@@ -151,14 +145,24 @@ async function saveNavigation() {
     })
     userStore.setNavigationConfig(payload)
     ElMessage.success("侧栏布局已保存")
-  } catch (error: any) {
-    ElMessage.error(error.message)
+  } catch (error: unknown) {
+    showError(error)
   } finally {
     savingNavigation.value = false
   }
 }
 
 async function resetNavigation() {
+  try {
+    await ElMessageBox.confirm("恢复后将立即覆盖当前账号保存的侧栏顺序与隐藏设置。", "恢复默认布局", {
+      type: "warning",
+      confirmButtonText: "恢复默认",
+      cancelButtonText: "保留当前布局"
+    })
+  } catch (error) {
+    if (error === "cancel" || error === "close") return
+    throw error
+  }
   userStore.setNavigationConfig({ root_order: [], hidden_roots: [], child_order: {} })
   buildNavigationItems()
   await saveNavigation()
@@ -180,8 +184,8 @@ async function saveNumberRules() {
       })
     })
     ElMessage.success("单号规则已保存，新建单据将立即使用")
-  } catch (error: any) {
-    ElMessage.error(error.message)
+  } catch (error: unknown) {
+    showError(error)
   } finally {
     savingNumbers.value = false
   }
@@ -190,7 +194,7 @@ async function saveNumberRules() {
 function numberPreview(value: unknown) {
   const rule = value as NumberRule
   const prefix = String(rule.prefix || "").toUpperCase()
-  return `${prefix}${Number(rule.next_number || 1)
+  return `${prefix}${Number(rule.next_number ?? 0)
     .toString()
     .padStart(Number(rule.digits || 6), "0")}`
 }
@@ -205,8 +209,8 @@ onMounted(async () => {
     ])
     numberRules.value = rules
     rolePermissions.value = roles
-  } catch (error: any) {
-    ElMessage.error(error.message)
+  } catch (error: unknown) {
+    showError(error)
   } finally {
     loading.value = false
   }
@@ -216,52 +220,16 @@ onMounted(async () => {
 <template>
   <div class="erp-page workflow-settings-page" v-loading="loading">
     <el-tabs v-model="activeTab" class="settings-tabs">
-      <el-tab-pane label="流程顺序" name="workflow" />
       <el-tab-pane label="单号规则" name="numbers" />
       <el-tab-pane label="角色权限" name="roles" />
       <el-tab-pane label="侧栏布局" name="navigation" />
     </el-tabs>
 
-    <section v-if="activeTab === 'workflow'" class="content-card workflow-card">
-      <div class="card-head">
-        <h3>
-          标准业务顺序
-          <InfoTip content="这是默认主流程；退货、外协和盘点属于对应阶段的例外处理，不再占用主流程入口。" />
-        </h3>
-      </div>
-      <div class="workflow-track">
-        <router-link
-          v-for="step in flowSteps"
-          :key="step.index"
-          :to="step.to"
-          class="workflow-step"
-        >
-          <span>{{ step.index }}</span>
-          <strong>{{ step.title }}</strong>
-          <small>{{ step.text }}</small>
-        </router-link>
-      </div>
-      <div class="exception-grid">
-        <article>
-          <strong>库存不足</strong>
-          <span>采购需求或自主生产计划承接，不允许用负库存掩盖。</span>
-        </article>
-        <article>
-          <strong>需要外协</strong>
-          <span>完工进入半成品，外协回厂后再转成品并等待交付。</span>
-        </article>
-        <article>
-          <strong>客户退货</strong>
-          <span>从客户订单登记，按行决定是否退回成品库存。</span>
-        </article>
-      </div>
-    </section>
-
-    <section v-else-if="activeTab === 'numbers'" class="content-card">
+    <section v-if="activeTab === 'numbers'" class="content-card">
       <div class="card-head">
         <h3>
           单号生成规则
-          <InfoTip content="已有单据编号保持不变；保存后仅影响下一张新单。相同前缀下待用号不能向前回退，以避免重复。" />
+          <InfoTip content="已有单据编号保持不变；待用号码可从 0 开始或重新指定，实际开单时会自动跳过已经使用的编号。" />
         </h3>
         <el-button
           type="primary"
@@ -290,7 +258,7 @@ onMounted(async () => {
             <el-input-number
               v-model="row.next_number"
               :disabled="!isAdmin"
-              :min="1"
+              :min="0"
               :max="9999999999"
               :controls="false"
               style="width: 100%"
@@ -310,7 +278,9 @@ onMounted(async () => {
           </template>
         </el-table-column>
       </el-table>
-      <p v-if="!isAdmin" class="permission-note">当前账号可查看规则；只有管理员可以修改。</p>
+      <p v-if="!isAdmin" class="permission-note">
+        当前账号可查看规则；只有管理员可以修改。
+      </p>
     </section>
 
     <section v-else-if="activeTab === 'roles'" class="content-card">
@@ -322,16 +292,30 @@ onMounted(async () => {
       </div>
       <el-table :data="rolePermissions" row-key="role">
         <el-table-column prop="label" label="身份" width="130">
-          <template #default="{ row }"><el-tag>{{ row.label }}</el-tag></template>
+          <template #default="{ row }">
+            <el-tag>{{ row.label }}</el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="查看" width="100" align="center">
-          <template #default="{ row }"><el-icon :color="row.read ? '#22a06b' : '#c0c4cc'"><Check /></el-icon></template>
+          <template #default="{ row }">
+            <el-icon :color="row.read ? '#22a06b' : '#c0c4cc'">
+              <Check />
+            </el-icon>
+          </template>
         </el-table-column>
         <el-table-column label="业务操作" width="120" align="center">
-          <template #default="{ row }"><el-icon :color="row.business_write ? '#22a06b' : '#c0c4cc'"><Check v-if="row.business_write" /><Close v-else /></el-icon></template>
+          <template #default="{ row }">
+            <el-icon :color="row.business_write ? '#22a06b' : '#c0c4cc'">
+              <Check v-if="row.business_write" /><Close v-else />
+            </el-icon>
+          </template>
         </el-table-column>
         <el-table-column label="系统管理" width="120" align="center">
-          <template #default="{ row }"><el-icon :color="row.system_admin ? '#22a06b' : '#c0c4cc'"><Check v-if="row.system_admin" /><Close v-else /></el-icon></template>
+          <template #default="{ row }">
+            <el-icon :color="row.system_admin ? '#22a06b' : '#c0c4cc'">
+              <Check v-if="row.system_admin" /><Close v-else />
+            </el-icon>
+          </template>
         </el-table-column>
         <el-table-column prop="description" label="权限说明" min-width="360" />
       </el-table>
@@ -343,9 +327,13 @@ onMounted(async () => {
           我的侧栏布局
           <InfoTip content="拖动分组或二级菜单调整顺序；工作台和设置为固定入口，不能隐藏。此设置跟随当前账号。" />
         </h3>
-        <div>
-          <el-button @click="resetNavigation">恢复默认</el-button>
-          <el-button type="primary" :loading="savingNavigation" @click="saveNavigation">保存布局</el-button>
+        <div class="navigation-actions">
+          <el-button @click="resetNavigation">
+            恢复默认
+          </el-button>
+          <el-button type="primary" :loading="savingNavigation" @click="saveNavigation">
+            保存布局
+          </el-button>
         </div>
       </div>
       <div class="navigation-list">
@@ -359,7 +347,9 @@ onMounted(async () => {
           @drop="dropRoot(rootIndex)"
         >
           <header>
-            <el-icon class="drag-handle"><Rank /></el-icon>
+            <el-icon class="drag-handle">
+              <Rank />
+            </el-icon>
             <strong>{{ root.title }}</strong>
             <el-switch
               v-model="root.visible"
@@ -394,48 +384,74 @@ onMounted(async () => {
   border-radius: 10px;
   background: var(--el-bg-color);
 }
-.settings-tabs :deep(.el-tabs__header) { margin: 0; }
-.settings-tabs :deep(.el-tabs__content) { display: none; }
-.workflow-track {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
-  gap: 0;
-  padding: 24px;
+.settings-tabs :deep(.el-tabs__header) {
+  margin: 0;
 }
-.workflow-step {
-  position: relative;
+.settings-tabs :deep(.el-tabs__content) {
+  display: none;
+}
+.number-preview {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.permission-note {
+  margin: 16px 24px 22px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+.navigation-actions {
+  display: flex;
+  gap: 10px;
+}
+.navigation-actions .el-button + .el-button {
+  margin-left: 0;
+}
+.navigation-list {
   display: grid;
-  min-height: 116px;
-  padding: 18px 18px 16px;
-  color: inherit;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 20px 24px 24px;
+}
+.navigation-group {
+  overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
-  border-right: 0;
-  background: color-mix(in srgb, var(--el-color-primary) 3%, var(--el-bg-color));
-  transition: transform .18s ease, background .18s ease;
+  border-radius: 8px;
+  background: var(--el-bg-color);
 }
-.workflow-step:first-child { border-radius: 8px 0 0 8px; }
-.workflow-step:last-child { border-right: 1px solid var(--el-border-color-lighter); border-radius: 0 8px 8px 0; }
-.workflow-step:hover { z-index: 2; transform: translateY(-3px); background: color-mix(in srgb, var(--el-color-primary) 8%, var(--el-bg-color)); }
-.workflow-step > span { color: var(--el-color-primary); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-.workflow-step strong { align-self: end; font-size: 17px; }
-.workflow-step small { margin-top: 6px; color: var(--el-text-color-secondary); line-height: 1.45; }
-.exception-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 0 24px 24px; }
-.exception-grid article { display: grid; gap: 5px; padding: 14px 16px; border-left: 3px solid var(--el-color-warning); background: var(--el-fill-color-light); }
-.exception-grid span { color: var(--el-text-color-secondary); font-size: 13px; }
-.number-preview { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 700; letter-spacing: .04em; }
-.permission-note { margin: 16px 24px 22px; color: var(--el-text-color-secondary); font-size: 13px; }
-.navigation-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 20px 24px 24px; }
-.navigation-group { overflow: hidden; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-bg-color); }
-.navigation-group > header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; padding: 13px 15px; background: var(--el-fill-color-light); cursor: grab; }
-.drag-handle, .navigation-children .el-icon { color: var(--el-text-color-placeholder); cursor: grab; }
-.navigation-children { display: grid; padding: 7px 14px 12px 38px; }
-.navigation-children > div { display: flex; align-items: center; gap: 9px; min-height: 36px; padding: 0 8px; border-bottom: 1px dashed var(--el-border-color-lighter); cursor: grab; }
-.navigation-children > div:last-child { border-bottom: 0; }
-@media (max-width: 1050px) {
-  .workflow-track { grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .workflow-step, .workflow-step:first-child, .workflow-step:last-child { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; }
+.navigation-group > header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+  background: var(--el-fill-color-light);
+  cursor: grab;
+}
+.drag-handle,
+.navigation-children .el-icon {
+  color: var(--el-text-color-placeholder);
+  cursor: grab;
+}
+.navigation-children {
+  display: grid;
+  padding: 7px 14px 12px 38px;
+}
+.navigation-children > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 0 8px;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+  cursor: grab;
+}
+.navigation-children > div:last-child {
+  border-bottom: 0;
 }
 @media (max-width: 720px) {
-  .workflow-track, .exception-grid, .navigation-list { grid-template-columns: 1fr; }
+  .navigation-list {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

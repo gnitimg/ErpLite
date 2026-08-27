@@ -2,6 +2,7 @@ import type { AxiosInstance, AxiosRequestConfig } from "axios"
 import { getToken } from "@@/utils/local-storage"
 import axios from "axios"
 import { get, merge } from "lodash-es"
+import { backendErrorMessage } from "@/common/utils/api-error"
 import { useUserStore } from "@/pinia/stores/user"
 
 /** 创建请求实例 */
@@ -46,10 +47,11 @@ function createInstance() {
     (error) => {
       // status 是 HTTP 状态码
       const status = get(error, "response.status")
-      const message = get(error, "response.data.message")
+      const responseData = get(error, "response.data")
+      const message = backendErrorMessage(responseData, "")
       switch (status) {
         case 400:
-          error.message = "请求错误"
+          error.message = message || "请求错误"
           break
         case 401:
           // Token 过期时
@@ -64,6 +66,9 @@ function createInstance() {
           break
         case 408:
           error.message = "请求超时"
+          break
+        case 422:
+          error.message = message || "请求参数错误"
           break
         case 500:
           error.message = "服务器内部错误"
@@ -84,7 +89,7 @@ function createInstance() {
           error.message = "HTTP 版本不受支持"
           break
       }
-      ElMessage.error(error.message)
+      ElMessage({ type: "error", message: error.message, grouping: true })
       return Promise.reject(error)
     }
   )

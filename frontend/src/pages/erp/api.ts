@@ -1,4 +1,5 @@
 import { onActivated, onBeforeUnmount, onDeactivated, onMounted } from "vue"
+import { backendErrorMessage } from "@/common/utils/api-error"
 import { getToken, removeToken } from "@/common/utils/local-storage"
 
 const clientId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`
@@ -26,11 +27,7 @@ async function responseError(response: Response) {
   try {
     const data = await response.json()
     detail = data.detail
-    if (typeof detail === "string") {
-      message = detail
-    } else if (detail && typeof detail === "object" && "message" in detail) {
-      message = String((detail as { message: unknown }).message)
-    }
+    message = backendErrorMessage(data, message)
   } catch {
     // Keep the HTTP fallback message.
   }

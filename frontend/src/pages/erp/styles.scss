@@ -43,8 +43,8 @@
   justify-content: space-between;
   border-bottom: 1px solid var(--el-border-color-lighter);
   h3 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; }
-  span, a { color: var(--el-text-color-secondary); font-size: 12px; }
-  a { color: var(--el-color-primary); text-decoration: none; }
+  > span, > a { color: var(--el-text-color-secondary); font-size: 12px; }
+  > a { color: var(--el-color-primary); text-decoration: none; }
 }
 
 .erp-page .el-drawer__title,

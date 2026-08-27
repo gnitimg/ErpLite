@@ -112,6 +112,7 @@ from .services import (
     latest_sale_out_unit_cost,
     latest_semi_finished_unit_cost,
     load_order,
+    next_available_document_number,
     operation_log_dict,
     order_dict,
     order_workflow_dict,
@@ -1076,13 +1077,15 @@ def update_document_numbering_settings(
             row = DocumentNumberRule(document_type=incoming.document_type)
             db.add(row)
             rows[incoming.document_type] = row
-        if row.prefix == incoming.prefix and incoming.next_number < int(row.next_number or 1):
-            raise HTTPException(
-                409,
-                f"{DEFAULT_DOCUMENT_RULES[incoming.document_type][0]} 的起始号不能小于当前待用号 {row.next_number}",
-            )
+        available_number, _preview = next_available_document_number(
+            db,
+            incoming.document_type,
+            incoming.prefix,
+            incoming.next_number,
+            incoming.digits,
+        )
         row.prefix = incoming.prefix
-        row.next_number = incoming.next_number
+        row.next_number = available_number
         row.digits = incoming.digits
     db.commit()
     request.state.audit_target = "单据编号"

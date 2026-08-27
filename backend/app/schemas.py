@@ -186,7 +186,7 @@ DocumentType = Literal[
 class DocumentNumberRulePayload(BaseModel):
     document_type: DocumentType
     prefix: str = Field(min_length=0, max_length=12, pattern=r"^[A-Za-z0-9-]*$")
-    next_number: int = Field(default=1, ge=1, le=9999999999)
+    next_number: int = Field(default=1, ge=0, le=9999999999)
     digits: int = Field(default=6, ge=3, le=10)
 
     @field_validator("prefix")

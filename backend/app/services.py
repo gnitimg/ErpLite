@@ -9,11 +9,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import (
+    CustomerCredit,
     DocumentNumberRule,
+    ExternalProcessingBatch,
     InventoryItem,
     OperationLog,
+    OrderReturn,
     OrderShipmentAllocation,
+    Payment,
     ProductBomItem,
+    ProductionRun,
+    Receivable,
     SalesOrder,
     SalesOrderItem,
     StockReservation,
@@ -128,6 +134,44 @@ def ensure_default_admin(db: Session) -> None:
     db.commit()
 
 
+DOCUMENT_NUMBER_FIELDS = {
+    "SO": SalesOrder.order_no,
+    "ST": StockTransaction.transaction_no,
+    "PR": ProductionRun.run_no,
+    "EP": ExternalProcessingBatch.batch_no,
+    "RT": OrderReturn.return_no,
+    "AR": Receivable.receivable_no,
+    "PAY": Payment.payment_no,
+    "CR": CustomerCredit.credit_no,
+}
+
+
+def next_available_document_number(
+    db: Session,
+    document_type: str,
+    prefix: str,
+    start_number: int,
+    digits: int,
+) -> tuple[int, str]:
+    """Return the first unused number at or after ``start_number``.
+
+    Administrators may reset a sequence to any non-negative value. Existing
+    documents remain immutable, so reused ranges are skipped instead of
+    producing a duplicate-key failure during the next business transaction.
+    """
+    key = document_type.strip().upper()
+    column = DOCUMENT_NUMBER_FIELDS.get(key)
+    number = max(0, int(start_number))
+    while number <= 9_999_999_999:
+        candidate = f"{prefix}{number:0{int(digits)}d}"
+        if column is None or db.scalar(
+            select(column).where(column == candidate).limit(1)
+        ) is None:
+            return number, candidate
+        number += 1
+    raise HTTPException(409, "当前前缀和位数已没有可用的单据编号")
+
+
 def serial(prefix: str, db: Session | None = None) -> str:
     """生成持久化、可配置且并发安全的业务单号。
 
@@ -151,8 +195,13 @@ def serial(prefix: str, db: Session | None = None) -> str:
         )
         db.add(rule)
         db.flush()
-    number = int(rule.next_number)
-    result = f"{rule.prefix}{number:0{int(rule.digits)}d}"
+    number, result = next_available_document_number(
+        db,
+        key,
+        rule.prefix,
+        int(rule.next_number),
+        int(rule.digits),
+    )
     rule.next_number = number + 1
     db.flush()
     return result
