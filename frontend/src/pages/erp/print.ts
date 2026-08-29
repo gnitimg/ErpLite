@@ -34,7 +34,7 @@ export function applyPrintSettings(settings: PrintSettings) {
   pageStyle.textContent = `@page { size: ${width}mm ${height}mm; margin: 0; }`
 }
 
-export async function printWithSavedSize() {
+export async function printWithSavedSize(printTarget?: HTMLElement) {
   let settings = defaultPrintSettings
   try {
     settings = await api<PrintSettings>("/api/system/print-settings")
@@ -48,6 +48,35 @@ export async function printWithSavedSize() {
     document.title = previousTitle
   }
   document.title = "\u200B"
-  window.addEventListener("afterprint", restoreTitle, { once: true })
+
+  if (!printTarget) {
+    window.addEventListener("afterprint", restoreTitle, { once: true })
+    requestAnimationFrame(() => window.print())
+    return
+  }
+
+  // 弹层（抽屉/对话框）里的单据会受上层定位元素与内联宽度影响而偏移、裁切；
+  // 打印期间把单据节点搬到 body 下，让它以打印页为定位基准，结束后放回原处。
+  const parent = printTarget.parentNode
+  if (!parent) {
+    window.addEventListener("afterprint", restoreTitle, { once: true })
+    requestAnimationFrame(() => window.print())
+    return
+  }
+  const marker = document.createComment("erp-print-anchor")
+  parent.insertBefore(marker, printTarget)
+  document.body.appendChild(printTarget)
+
+  let restored = false
+  const restore = () => {
+    if (restored || !marker.parentNode) return
+    restored = true
+    parent.insertBefore(printTarget, marker)
+    marker.remove()
+    restoreTitle()
+  }
+  window.addEventListener("afterprint", restore, { once: true })
   requestAnimationFrame(() => window.print())
+  // 兜底：个别环境 afterprint 不触发，避免单据留在 body 下。
+  setTimeout(restore, 60000)
 }

@@ -25,8 +25,6 @@ interface CancelConflict {
   options: Array<{ value: CancelDisposition, label: string }>
 }
 
-const shipmentDrawer = ref(false)
-const shipmentForm = reactive({ items: [] as any[], notes: "" })
 const cancelConflictDialog = ref(false)
 const cancelConflict = ref<CancelConflict | null>(null)
 const cancelDisposition = ref<CancelDisposition>("cancel_runs")
@@ -263,20 +261,6 @@ async function action(row: any, type: "confirm" | "ship-all" | "cancel") {
     ElMessage.error(error.message)
   }
 }
-function _openShipment(row: any) {
-  activeOrder.value = row
-  shipmentForm.items = row.items
-    .filter((line: any) => Number(line.remaining_quantity) > 0)
-    .map((line: any) => ({
-      order_item_id: line.id,
-      product_name: line.product_name,
-      remaining_quantity: Number(line.remaining_quantity),
-      reserved_quantity: Number(line.reserved_quantity),
-      quantity: Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
-    }))
-  shipmentForm.notes = ""
-  shipmentDrawer.value = true
-}
 function openStockDocument(row: any) {
   workflowDrawer.value = false
   router.push({ path: "/lite-stock-documents/list", query: { order_id: row.id } })
@@ -287,28 +271,6 @@ function viewOutboundDocuments(row: any) {
     path: "/lite-orders/documents",
     query: { keyword: row.order_no, scope: "PRODUCT" }
   })
-}
-function fillShipmentLine(line: any) {
-  line.quantity = Math.min(Number(line.remaining_quantity), Number(line.reserved_quantity))
-}
-async function submitShipment() {
-  const items = shipmentForm.items
-    .filter(line => Number(line.quantity) > 0)
-    .map(line => ({ order_item_id: line.order_item_id, quantity: Number(line.quantity) }))
-  if (!items.length) return ElMessage.warning("请填写至少一项出库数量")
-  try {
-    await api(`/api/orders/${activeOrder.value.id}/ship`, {
-      method: "POST",
-      body: JSON.stringify({ items, notes: shipmentForm.notes })
-    })
-    ElMessage.success("出库成功，销售出库单已自动生成")
-    shipmentDrawer.value = false
-    await load()
-    const refreshed = rows.value.find(row => row.id === activeOrder.value.id)
-    if (refreshed && workflowDrawer.value) await openWorkflow(refreshed)
-  } catch (error: any) {
-    ElMessage.error(error.message)
-  }
 }
 onMounted(load)
 useLiveRefresh(async () => {
@@ -899,45 +861,6 @@ useLiveRefresh(async () => {
         </el-button>
       </template>
     </el-dialog>
-
-    <el-drawer v-model="shipmentDrawer" title="订单出库" size="min(620px, 96vw)">
-      <el-alert title="只能使用当前为本订单预留的库存；每次提交都会生成一张独立销售出库单。" type="info" :closable="false" show-icon />
-      <el-table :data="shipmentForm.items" border style="margin-top: 18px">
-        <el-table-column prop="product_name" label="产品" min-width="180" />
-        <el-table-column prop="remaining_quantity" label="剩余" width="90" align="right" />
-        <el-table-column prop="reserved_quantity" label="可出" width="90" align="right" />
-        <el-table-column label="本次出库" width="150">
-          <template #default="{ row }">
-            <QuantityInput
-              v-model="row.quantity"
-              integer
-              :min="0"
-              :max="Math.min(row.remaining_quantity, row.reserved_quantity)"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column label="快捷" width="100">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="fillShipmentLine(row)">
-              本产品全部
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-form label-position="top" style="margin-top: 18px">
-        <el-form-item label="备注">
-          <el-input v-model="shipmentForm.notes" type="textarea" :rows="3" />
-        </el-form-item>
-      </el-form>
-      <div class="drawer-footer">
-        <el-button @click="shipmentDrawer = false">
-          取消
-        </el-button>
-        <el-button type="primary" @click="submitShipment">
-          确认出库并生成出库单
-        </el-button>
-      </div>
-    </el-drawer>
 
     <el-drawer v-model="drawer" title="新建客户订单" size="min(760px, 96vw)">
       <el-form label-position="top">

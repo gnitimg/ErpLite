@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus"
-import { computed, onMounted, reactive, ref, watch } from "vue"
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, money, qty, useLiveRefresh } from "./api"
 import QuantityInput from "./components/QuantityInput.vue"
@@ -33,6 +33,9 @@ const route = useRoute()
 const router = useRouter()
 const saving = ref(false)
 const loading = ref(false)
+const successDialog = ref(false)
+const savedDirection = ref<Direction | null>(null)
+const savedDocumentNo = ref("")
 const inventory = ref<any[]>([])
 const linkedOrder = ref<any>(null)
 const documentNo = ref("提交后自动生成")
@@ -60,6 +63,8 @@ const orderId = computed(() => {
   return Number.isInteger(value) && value > 0 ? value : 0
 })
 const title = computed(() => direction.value === "INBOUND" ? "入库单" : "出库单")
+const successTitle = computed(() => savedDirection.value === "INBOUND" ? "入库成功" : "出库成功")
+const savedDocumentTitle = computed(() => savedDirection.value === "INBOUND" ? "入库单" : "出库单")
 const counterpartyLabel = computed(() => direction.value === "INBOUND" ? "供应商" : "收货单位")
 const totalQuantity = computed(() => form.items.reduce((sum, line) => sum + Number(line.quantity || 0), 0))
 const totalReplacement = computed(() => form.items.reduce((sum, line) => sum + replacementQty(line), 0))
@@ -212,8 +217,9 @@ async function submit() {
   if (!lines) return
   saving.value = true
   try {
+    let result: any
     if (linkedOrder.value) {
-      const result = await api(`/api/orders/${linkedOrder.value.id}/ship`, {
+      result = await api(`/api/orders/${linkedOrder.value.id}/ship`, {
         method: "POST",
         body: JSON.stringify({
           items: lines.map(line => ({
@@ -229,9 +235,8 @@ async function submit() {
           notes: form.notes
         })
       })
-      documentNo.value = result.transaction_no
     } else {
-      const result = await api("/api/stock/documents", {
+      result = await api("/api/stock/documents", {
         method: "POST",
         body: JSON.stringify({
           direction: direction.value,
@@ -248,9 +253,11 @@ async function submit() {
           }))
         })
       })
-      documentNo.value = result.transaction_no
     }
-    ElMessage.success(`${title.value}已保存，库存与单据记录已同步更新`)
+    documentNo.value = result.transaction_no
+    savedDocumentNo.value = result.transaction_no
+    savedDirection.value = direction.value
+    successDialog.value = true
     await loadInventory(true)
     emit("saved", savedPayload())
   } catch (error: any) {
@@ -281,6 +288,12 @@ function viewDocument() {
 
 async function printDocument() {
   await printWithSavedSize()
+}
+
+async function printSavedDocument() {
+  successDialog.value = false
+  await nextTick()
+  await printDocument()
 }
 
 watch(direction, () => {
@@ -432,10 +445,41 @@ useLiveRefresh(() => loadInventory(true))
 
       <footer class="document-actions no-print">
         <el-button v-if="documentNo !== '提交后自动生成'" @click="viewDocument">查看已保存单据</el-button>
-        <el-button @click="printDocument">打印</el-button>
-        <el-button type="primary" :loading="saving" @click="submit">保存并{{ direction === 'INBOUND' ? '入库' : '出库' }}</el-button>
+        <el-button v-if="documentNo !== '提交后自动生成'" @click="printDocument">打印{{ title }}</el-button>
+        <el-button
+          v-if="documentNo === '提交后自动生成'"
+          type="primary"
+          :loading="saving"
+          @click="submit"
+        >
+          保存并{{ direction === 'INBOUND' ? '入库' : '出库' }}
+        </el-button>
       </footer>
     </section>
+
+    <el-dialog
+      v-model="successDialog"
+      append-to-body
+      width="min(420px, 92vw)"
+      class="stock-document-success-dialog no-print"
+      :close-on-click-modal="false"
+    >
+      <div class="document-success-content">
+        <div class="document-success-mark" aria-hidden="true">✓</div>
+        <h2>{{ successTitle }}</h2>
+        <p>库存与单据记录已同步更新</p>
+        <div class="document-success-number">
+          <span>{{ savedDocumentTitle }}号</span>
+          <strong>{{ savedDocumentNo }}</strong>
+        </div>
+      </div>
+      <template #footer>
+        <div class="document-success-actions">
+          <el-button @click="successDialog = false">完成</el-button>
+          <el-button type="primary" @click="printSavedDocument">打印{{ savedDocumentTitle }}</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -474,6 +518,14 @@ useLiveRefresh(() => loadInventory(true))
 .document-footer-fields { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-top: 20px; }
 .signature-row { display: flex; justify-content: space-between; gap: 32px; margin-top: 30px; color: var(--el-text-color-regular); }
 .document-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 24px 24px; }
+.document-success-content { display: grid; justify-items: center; padding: 8px 8px 2px; text-align: center; }
+.document-success-mark { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 16px; border-radius: 50%; color: #fff; background: var(--el-color-success); font-size: 28px; font-weight: 700; box-shadow: 0 8px 24px color-mix(in srgb, var(--el-color-success) 24%, transparent); }
+.document-success-content h2 { margin: 0; color: var(--el-text-color-primary); font-size: 22px; }
+.document-success-content p { margin: 8px 0 18px; color: var(--el-text-color-secondary); }
+.document-success-number { display: grid; width: 100%; gap: 6px; padding: 14px 16px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; background: var(--el-fill-color-light); text-align: left; }
+.document-success-number span { color: var(--el-text-color-secondary); font-size: 12px; }
+.document-success-number strong { color: var(--el-text-color-primary); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 16px; letter-spacing: .02em; word-break: break-all; }
+.document-success-actions { display: flex; justify-content: flex-end; gap: 10px; width: 100%; }
 .print-only { display: none; }
 @media (max-width: 900px) {
   .document-sheet { margin: 16px; padding: 20px; overflow-x: auto; }

@@ -27,6 +27,7 @@ const rows = ref<any[]>([])
 const itemOptions = ref<any[]>([])
 const detail = ref<any>(null)
 const drawer = ref(false)
+const drawerSheetRef = ref<HTMLElement | null>(null)
 const filterDrawer = ref(false)
 const documentDialog = ref(false)
 const stockDocumentDirection = ref<StockDocumentDirection>("INBOUND")
@@ -135,8 +136,15 @@ function open(row: any) {
   detail.value = row
   drawer.value = true
 }
+async function printRow(row: any) {
+  open(row)
+  await nextTick()
+  await printDocument()
+}
 async function printDocument() {
-  await printWithSavedSize()
+  const sheet = drawerSheetRef.value
+  if (!sheet) return
+  await printWithSavedSize(sheet)
 }
 function applyFilters() {
   filterDrawer.value = false
@@ -287,10 +295,13 @@ useLiveRefresh(() => load(true))
             {{ formatTime(row.occurred_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="open(row)">
               查看
+            </el-button>
+            <el-button link type="primary" @click="printRow(row)">
+              打印
             </el-button>
           </template>
         </el-table-column>
@@ -362,7 +373,7 @@ useLiveRefresh(() => load(true))
       :title="`${scopeTitle}${title} · ${detail?.transaction_no || ''}`"
       size="min(820px, 98vw)"
     >
-      <div v-if="detail" class="print-sheet">
+      <div v-if="detail" ref="drawerSheetRef" class="print-sheet">
         <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
         <el-descriptions :column="2" border>
           <el-descriptions-item label="单号">
@@ -491,15 +502,6 @@ useLiveRefresh(() => load(true))
 .history-signature-row { display: flex; justify-content: space-between; gap: 32px; margin-top: 30px; color: var(--el-text-color-regular); }
 @media print {
   :global(html), :global(body) { width: var(--erp-print-page-width, 297mm); height: var(--erp-print-page-height, 210mm); margin: 0 !important; overflow: visible !important; background: #fff !important; }
-  :global(.el-overlay), :global(.el-drawer), :global(.el-drawer__body) {
-    position: static !important;
-    inset: auto !important;
-    width: auto !important;
-    height: auto !important;
-    padding: 0 !important;
-    overflow: visible !important;
-    transform: none !important;
-  }
   :global(body *) {
     visibility: hidden !important;
   }
