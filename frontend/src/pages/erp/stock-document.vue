@@ -347,7 +347,7 @@ useLiveRefresh(() => loadInventory(true))
         <div class="document-head">
           <PrintBrandHeader class="head-brand" />
           <h1>{{ title }}</h1>
-          <div class="document-number"><span>NO.</span><strong>{{ documentNo }}</strong></div>
+          <div class="document-number"><span class="no-label">NO.</span><strong>{{ documentNo }}</strong></div>
         </div>
 
         <div class="document-meta">
@@ -537,7 +537,8 @@ useLiveRefresh(() => loadInventory(true))
 .document-head { display: grid; grid-template-columns: repeat(12, 1fr); align-items: center; height: 64px; margin-bottom: 22px; }
 .document-head h1 { grid-column: 5 / 9; margin: 0; font-size: 32px; letter-spacing: .35em; text-indent: .35em; color: var(--el-text-color-primary); text-align: center; }
 .head-brand { grid-column: 1 / 4; justify-self: start; }
-.document-number { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 15px; }
+.document-number { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 30px; }
+.document-number .no-label { font-family: FangSong, "FangSong_GB2312", "仿宋", "仿宋_GB2312", serif; }
 .document-number strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 16px; }
 .document-meta { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px 20px; margin-bottom: 20px; font-size: 16px; }
 .document-meta label, .document-footer-fields label, .total-notes { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }

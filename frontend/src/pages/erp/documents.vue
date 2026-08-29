@@ -404,7 +404,7 @@ useLiveRefresh(() => load(true))
         <div class="sheet-head">
           <PrintBrandHeader class="head-brand" />
           <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
-          <div class="sheet-no"><span>NO.</span><strong>{{ detail.transaction_no }}</strong></div>
+          <div class="sheet-no"><span class="no-label">NO.</span><strong>{{ detail.transaction_no }}</strong></div>
         </div>
         <div class="sheet-info">
           <span class="info-party">
@@ -515,8 +515,9 @@ useLiveRefresh(() => load(true))
 .sheet-head { display: grid; grid-template-columns: repeat(12, 1fr); align-items: center; height: 64px; }
 .head-brand { grid-column: 1 / 4; justify-self: start; }
 .sheet-head h1 { grid-column: 5 / 9; margin: 0; text-align: center; font-size: 32px; letter-spacing: .35em; text-indent: .35em; }
-.sheet-no { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 15px; }
-.sheet-no strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 16px; }
+.sheet-no { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 30px; }
+.sheet-no .no-label { font-family: FangSong, "FangSong_GB2312", "仿宋", "仿宋_GB2312", serif; }
+.sheet-no strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .lines-table :deep(td.el-table__cell) { height: 42px; padding-top: 8px; padding-bottom: 8px; }
 .sheet-info { display: flex; flex-wrap: wrap; gap: 6px 28px; padding: 6px 0 14px; border-bottom: 1px solid var(--el-border-color); font-size: 16px; }
 .info-date { margin-left: auto; }
