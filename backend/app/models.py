@@ -210,6 +210,10 @@ class ProductionSetting(Base):
     print_paper_preset: Mapped[str] = mapped_column(String(30), default="A4_LANDSCAPE")
     print_width_mm: Mapped[float] = mapped_column(Float, default=297)
     print_height_mm: Mapped[float] = mapped_column(Float, default=210)
+    # 单据页眉：none 不显示 / name 仅厂名 / logo 仅标志 / both 厂名+标志
+    print_header_mode: Mapped[str] = mapped_column(String(10), default="none", server_default="none")
+    print_company_name: Mapped[str] = mapped_column(String(100), default="", server_default="")
+    print_logo: Mapped[str] = mapped_column(Text, default="", server_default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 

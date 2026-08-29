@@ -4,6 +4,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, money, qty, useLiveRefresh } from "./api"
 import QuantityInput from "./components/QuantityInput.vue"
+import PrintBrandHeader from "./components/PrintBrandHeader.vue"
 import { printWithSavedSize } from "./print"
 
 type Direction = "INBOUND" | "OUTBOUND"
@@ -66,8 +67,6 @@ const title = computed(() => direction.value === "INBOUND" ? "入库单" : "出�
 const successTitle = computed(() => savedDirection.value === "INBOUND" ? "入库成功" : "出库成功")
 const savedDocumentTitle = computed(() => savedDirection.value === "INBOUND" ? "入库单" : "出库单")
 const counterpartyLabel = computed(() => direction.value === "INBOUND" ? "供应商" : "收货单位")
-const totalQuantity = computed(() => form.items.reduce((sum, line) => sum + Number(line.quantity || 0), 0))
-const totalReplacement = computed(() => form.items.reduce((sum, line) => sum + replacementQty(line), 0))
 const totalAmount = computed(() => form.items.reduce(
   (sum, line) => sum + originalQty(line) * Number(line.unit_price || 0),
   0
@@ -82,8 +81,25 @@ function itemOf(line: any) {
   return inventory.value.find(item => Number(item.id) === Number(line.item_id))
 }
 
+/** 打印表格里"物料及规格型号"列的文本。 */
+function itemLabel(item: any) {
+  return [item.sku, item.name, item.spec].filter(Boolean).join(" · ")
+}
+
+/** 日期打印格式：2026 年 8 月 29 日。 */
+function chineseDate(value: string) {
+  if (!value) return "-"
+  const [year, month, day] = value.split("-")
+  return `${year} 年 ${Number(month)} 月 ${Number(day)} 日`
+}
+
 function addLine() {
   form.items.push({ quantity: 1, unit_price: 0 })
+}
+
+/** 纸质单据版面：明细区固定至少 5 行，不足补空行。 */
+function ensureMinLines(min = 5) {
+  while (form.items.length < min) addLine()
 }
 
 function clearLine(line: any) {
@@ -95,6 +111,7 @@ function clearLine(line: any) {
 
 function clearAll() {
   form.items.splice(0, form.items.length, { quantity: 1, unit_price: 0 })
+  ensureMinLines()
   documentNo.value = "提交后自动生成"
 }
 
@@ -188,6 +205,7 @@ async function initialise() {
   } else if (!form.items.length) {
     addLine()
   }
+  ensureMinLines()
 }
 
 function validateLines() {
@@ -326,9 +344,10 @@ useLiveRefresh(() => loadInventory(true))
       </header>
 
       <div class="document-sheet">
-        <div class="document-title-row">
+        <div class="document-head">
+          <PrintBrandHeader class="head-brand" />
           <h1>{{ title }}</h1>
-          <div class="document-number"><span>单据编号</span><strong>{{ documentNo }}</strong></div>
+          <div class="document-number"><span>NO.</span><strong>{{ documentNo }}</strong></div>
         </div>
 
         <div class="document-meta">
@@ -352,7 +371,7 @@ useLiveRefresh(() => loadInventory(true))
               class="no-print"
               style="width: 100%"
             />
-            <strong class="print-only">{{ form.occurred_date }}</strong>
+            <strong class="print-only">{{ chineseDate(form.occurred_date) }}</strong>
           </label>
           <label class="address-field">
             <span>{{ direction === 'INBOUND' ? '供应商地址' : '收货地址' }}</span>
@@ -369,76 +388,88 @@ useLiveRefresh(() => loadInventory(true))
           </div>
         </div>
 
-        <el-table :data="form.items" border class="document-lines">
-          <el-table-column type="index" label="序号" width="64" align="center" />
-          <el-table-column label="物料编码 / 名称" min-width="280">
-            <template #default="{ row }">
-              <el-select
-                v-model="row.item_id"
-                class="no-print"
-                filterable
-                placeholder="搜索编码或名称"
-                style="width: 100%"
-                @change="itemChanged(row)"
-              >
-                <el-option
-                  v-for="item in availableItems"
-                  :key="item.id"
-                  :label="`${item.sku} · ${item.name}`"
-                  :value="item.id"
+        <table class="doc-table document-lines">
+          <colgroup>
+            <col class="col-idx">
+            <col>
+            <col class="col-qty">
+            <col class="col-unit">
+            <col class="col-price">
+            <col class="col-sub">
+            <col class="col-remark">
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="ta-c">序号</th>
+              <th class="ta-c">物料及规格型号</th>
+              <th class="ta-c">数量</th>
+              <th class="ta-c">单位</th>
+              <th class="ta-c">单价</th>
+              <th class="ta-c">小计</th>
+              <th class="ta-c">备注</th>
+              <th class="ta-c no-print">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, index) in form.items" :key="index">
+              <td class="ta-c">{{ index + 1 }}</td>
+              <td>
+                <el-select
+                  v-model="row.item_id"
+                  class="no-print"
+                  filterable
+                  placeholder="搜索编码或名称"
+                  style="width: 100%"
+                  @change="itemChanged(row)"
+                >
+                  <el-option
+                    v-for="item in availableItems"
+                    :key="item.id"
+                    :label="`${item.sku} · ${item.name}`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <span class="print-only ta-c">{{ itemOf(row) ? itemLabel(itemOf(row)) : '' }}</span>
+              </td>
+              <td class="ta-r">
+                <QuantityInput
+                  v-model="row.quantity"
+                  class="no-print"
+                  :integer="itemOf(row)?.kind === 'PRODUCT'"
+                  :min="0"
                 />
-              </el-select>
-              <span class="print-only">{{ itemOf(row) ? `${itemOf(row).sku} · ${itemOf(row).name}` : '-' }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="规格型号" min-width="150">
-            <template #default="{ row }">{{ itemOf(row)?.spec || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="单位" width="80" align="center">
-            <template #default="{ row }">{{ itemOf(row)?.unit || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="数量" width="170">
-            <template #default="{ row }">
-              <QuantityInput
-                v-model="row.quantity"
-                class="no-print"
-                :integer="itemOf(row)?.kind === 'PRODUCT'"
-                :min="0"
-              />
-              <span class="print-only">
-                {{ qty(row.quantity) }}<template v-if="replacementQty(row) > 0">（换货 {{ replacementQty(row) }}）</template>
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column label="单价" width="150">
-            <template #default="{ row }">
-              <el-input-number v-model="row.unit_price" class="no-print" :min="0" :precision="2" :controls="false" />
-              <span class="print-only">{{ money(row.unit_price) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="金额" width="120" align="right">
-            <template #default="{ row }">{{ money(originalQty(row) * Number(row.unit_price || 0)) }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="82" align="center" class-name="no-print">
-            <template #default="{ row }">
-              <el-button link type="danger" @click="clearLine(row)">清空</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <div class="document-summary">
-          <div v-if="totalReplacement > 0"><span>其中换货</span><strong>{{ qty(totalReplacement) }}</strong></div>
-          <div><span>数量合计</span><strong>{{ qty(totalQuantity) }}</strong></div>
-          <div><span>金额合计</span><strong>{{ money(totalAmount) }}</strong></div>
-        </div>
+                <span class="print-only">{{ qty(row.quantity) }}</span>
+              </td>
+              <td class="ta-c">{{ itemOf(row)?.unit || '' }}</td>
+              <td class="ta-r">
+                <el-input-number v-model="row.unit_price" class="no-print" :min="0" :precision="2" :controls="false" />
+                <span class="print-only">{{ money(row.unit_price) }}</span>
+              </td>
+              <td class="ta-r">{{ money(originalQty(row) * Number(row.unit_price || 0)) }}</td>
+              <td class="ta-l">
+                <span v-if="replacementQty(row) > 0">换货 {{ replacementQty(row) }}</span>
+              </td>
+              <td class="ta-c no-print">
+                <el-button link type="danger" @click="clearLine(row)">清空</el-button>
+              </td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="2" class="ta-l">合计金额（人民币）　{{ money(totalAmount) }}</td>
+              <td colspan="5" class="ta-l">备注：{{ form.notes || '-' }}</td>
+              <td class="no-print"></td>
+            </tr>
+          </tfoot>
+        </table>
 
         <div class="document-footer-fields">
-          <label><span>经办人</span><el-input v-model="form.operator" class="no-print" placeholder="选填" /><strong class="print-only">{{ form.operator || '-' }}</strong></label>
-          <label class="notes-field"><span>备注</span><el-input v-model="form.notes" class="no-print" placeholder="填写本单说明" /><strong class="print-only">{{ form.notes || '-' }}</strong></label>
+          <label><span>经办人</span><el-input v-model="form.operator" class="no-print" placeholder="选填，打印后显示在制单处" /><strong class="print-only">{{ form.operator || '-' }}</strong></label>
+          <label><span>备注</span><el-input v-model="form.notes" class="no-print" placeholder="填写本单说明，打印后显示在合计行" /><strong class="print-only">{{ form.notes || '-' }}</strong></label>
         </div>
         <div class="signature-row">
-          <span>制单：________________</span>
-          <span>仓管：________________</span>
+          <span>制单：{{ form.operator || '________________' }}</span>
+          <span>仓库：________________</span>
           <span>审核：________________</span>
         </div>
       </div>
@@ -502,20 +533,34 @@ useLiveRefresh(() => loadInventory(true))
 .order-hint { margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .direction-switch { flex: none; align-self: center; }
 .document-sheet { margin: 24px; padding: 28px 32px; border: 1px solid var(--el-border-color); background: var(--el-bg-color); }
-.document-title-row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; margin-bottom: 24px; }
-.document-title-row h1 { grid-column: 2; margin: 0; font-size: 28px; letter-spacing: .35em; text-indent: .35em; color: var(--el-text-color-primary); }
-.document-number { grid-column: 3; display: flex; justify-content: flex-end; align-items: baseline; gap: 10px; font-size: 13px; }
-.document-number strong { min-width: 180px; text-align: right; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.document-meta { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px 20px; margin-bottom: 20px; }
-.document-meta label, .document-footer-fields label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }
-.document-meta label > span, .document-footer-fields label > span { white-space: nowrap; color: var(--el-text-color-regular); }
+/* 页眉按 6 等份定位：品牌占 0-1.5 份，标题占 2-4 份（页面正中），编号从 5 份起；高度固定 */
+.document-head { display: grid; grid-template-columns: repeat(12, 1fr); align-items: center; height: 64px; margin-bottom: 22px; }
+.document-head h1 { grid-column: 5 / 9; margin: 0; font-size: 32px; letter-spacing: .35em; text-indent: .35em; color: var(--el-text-color-primary); text-align: center; }
+.head-brand { grid-column: 1 / 4; justify-self: start; }
+.document-number { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 15px; }
+.document-number strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 16px; }
+.document-meta { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px 20px; margin-bottom: 20px; font-size: 16px; }
+.document-meta label, .document-footer-fields label, .total-notes { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }
+.document-meta label > span, .document-footer-fields label > span, .total-notes > span { white-space: nowrap; color: var(--el-text-color-regular); }
 .address-field { grid-column: 1 / -1; }
 .line-actions { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 10px; font-weight: 600; }
 .document-lines :deep(.el-input-number) { width: 100%; }
-.document-summary { display: flex; justify-content: flex-end; gap: 42px; padding: 16px 12px; border: 1px solid var(--el-border-color); border-top: 0; }
-.document-summary div { display: flex; gap: 14px; }
-.document-summary strong { min-width: 90px; text-align: right; }
-.document-footer-fields { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; margin-top: 20px; }
+/* 原生表格：全部列线由边框保证，合计行备注通过 colspan 合并到最右侧 */
+.doc-table { width: 100%; border-collapse: collapse; table-layout: fixed; border: 2px solid var(--el-border-color); }
+.doc-table th, .doc-table td { border: 1px solid var(--el-border-color); padding: 6px 10px; font-size: 15px; color: var(--el-text-color-primary); word-break: break-all; vertical-align: middle; }
+.doc-table th { height: 40px; font-weight: 700; }
+.doc-table tbody td { height: 42px; }
+.doc-table tfoot td { height: 42px; font-weight: 700; }
+.doc-table .col-idx { width: 5.5%; }
+.doc-table .col-qty { width: 13%; }
+.doc-table .col-unit { width: 6.5%; }
+.doc-table .col-price { width: 12.5%; }
+.doc-table .col-sub { width: 12.5%; }
+.doc-table .col-remark { width: 11.5%; }
+.ta-c { text-align: center; }
+.ta-l { text-align: left; }
+.ta-r { text-align: right; }
+.document-footer-fields { display: grid; grid-template-columns: 1fr; gap: 20px; margin-top: 20px; }
 .signature-row { display: flex; justify-content: space-between; gap: 32px; margin-top: 30px; color: var(--el-text-color-regular); }
 .document-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 0 24px 24px; }
 .document-success-content { display: grid; justify-items: center; padding: 8px 8px 2px; text-align: center; }
@@ -529,27 +574,25 @@ useLiveRefresh(() => loadInventory(true))
 .print-only { display: none; }
 @media (max-width: 900px) {
   .document-sheet { margin: 16px; padding: 20px; overflow-x: auto; }
-  .document-title-row { grid-template-columns: 1fr; gap: 12px; }
-  .document-title-row h1, .document-number { grid-column: 1; justify-self: start; }
+  .document-head { grid-template-columns: 1fr; height: auto; }
+  .document-head h1 { grid-column: 1; justify-self: start; }
+  .head-brand, .document-number { grid-column: 1; justify-self: start; }
   .document-meta, .document-footer-fields { grid-template-columns: 1fr; }
   .address-field { grid-column: 1; }
+  .total-notes { max-width: none; }
   .signature-row { flex-direction: column; }
 }
 @media print {
   :global(html), :global(body) { width: var(--erp-print-page-width, 297mm); height: var(--erp-print-page-height, 210mm); margin: 0 !important; overflow: visible !important; background: #fff !important; }
   :global(body *) { visibility: hidden !important; }
   .document-sheet, .document-sheet * { visibility: visible !important; }
-  .document-sheet { position: absolute; top: var(--erp-print-margin, 8mm); left: var(--erp-print-margin, 8mm); width: 277mm; margin: 0; padding: 0; border: 0; overflow: visible; color: #000; background: #fff; transform: scale(var(--erp-print-scale, 1)); transform-origin: top left; print-color-adjust: exact; }
+  .document-sheet { --el-border-color: #000; --el-border-color-light: #000; --el-border-color-lighter: #000; --el-table-border-color: #000; --el-table-header-text-color: #000; --el-table-text-color: #000; --el-text-color-primary: #000; --el-text-color-regular: #000; --el-text-color-secondary: #000; --el-fill-color-light: #fff; --el-fill-color-lighter: #fff; position: absolute; top: var(--erp-print-margin, 8mm); left: var(--erp-print-margin, 8mm); width: 277mm; margin: 0; padding: 0; border: 0; overflow: visible; color: #000; background: #fff; transform: scale(var(--erp-print-scale, 1)); transform-origin: top left; print-color-adjust: exact; }
   .no-print, :deep(.no-print) { display: none !important; }
   .print-only { display: inline !important; color: #000; font-weight: 500; }
-  .document-title-row { grid-template-columns: 1fr auto 1fr; gap: 0; }
-  .document-title-row h1 { grid-column: 2; justify-self: stretch; }
-  .document-number { grid-column: 3; justify-self: stretch; }
   .document-meta { grid-template-columns: 1.2fr 1fr 1fr; }
   .address-field { grid-column: 1 / -1; }
-  .document-footer-fields { grid-template-columns: 1fr 2fr; }
+  .document-footer-fields { grid-template-columns: 1fr; }
   .signature-row { flex-direction: row; }
   .document-meta label, .document-footer-fields label { grid-template-columns: auto 1fr; min-height: 32px; border-bottom: 1px solid #d7dce3; }
-  .document-lines :deep(.el-table__inner-wrapper::before) { background-color: #606266; }
 }
 </style>

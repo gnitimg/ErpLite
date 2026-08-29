@@ -176,6 +176,10 @@ class PrintSettingsPayload(BaseModel):
     ] = "A4_LANDSCAPE"
     width_mm: float = Field(default=297, ge=50, le=500)
     height_mm: float = Field(default=210, ge=50, le=500)
+    header_mode: Literal["none", "name", "logo", "both"] = "none"
+    company_name: str = Field(default="", max_length=100)
+    # Logo 以 data URL 形式存储（前端已限制原始图片体积）。
+    logo: str = Field(default="", max_length=800_000)
 
 
 DocumentType = Literal[

@@ -1,16 +1,30 @@
+import { reactive } from "vue"
 import { api } from "./api"
 
 export interface PrintSettings {
   paper_preset: string
   width_mm: number
   height_mm: number
+  header_mode: "none" | "name" | "logo" | "both"
+  company_name: string
+  logo: string
 }
 
 export const defaultPrintSettings: PrintSettings = {
   paper_preset: "A4_LANDSCAPE",
   width_mm: 297,
-  height_mm: 210
+  height_mm: 210,
+  header_mode: "none",
+  company_name: "",
+  logo: ""
 }
+
+/** 当前打印页眉品牌（厂名/Logo），由打印设置驱动，单据模板直接渲染。 */
+export const printBrand = reactive({
+  mode: "none" as PrintSettings["header_mode"],
+  company_name: "",
+  logo: ""
+})
 
 const DESIGN_WIDTH_MM = 277
 
@@ -25,6 +39,10 @@ export function applyPrintSettings(settings: PrintSettings) {
   root.style.setProperty("--erp-print-margin", `${margin}mm`)
   root.style.setProperty("--erp-print-scale", String(scale))
 
+  printBrand.mode = settings.header_mode || "none"
+  printBrand.company_name = settings.company_name || ""
+  printBrand.logo = settings.logo || ""
+
   let pageStyle = document.querySelector<HTMLStyleElement>("#erp-print-page-size")
   if (!pageStyle) {
     pageStyle = document.createElement("style")
@@ -34,10 +52,14 @@ export function applyPrintSettings(settings: PrintSettings) {
   pageStyle.textContent = `@page { size: ${width}mm ${height}mm; margin: 0; }`
 }
 
+/** 页眉是否显示厂名 / Logo（供模板计算布局）。 */
+export const showBrandName = () => printBrand.mode === "name" || printBrand.mode === "both"
+export const showBrandLogo = () => (printBrand.mode === "logo" || printBrand.mode === "both") && Boolean(printBrand.logo)
+
 export async function printWithSavedSize(printTarget?: HTMLElement) {
-  let settings = defaultPrintSettings
+  let settings: PrintSettings = defaultPrintSettings
   try {
-    settings = await api<PrintSettings>("/api/system/print-settings")
+    settings = { ...defaultPrintSettings, ...await api<PrintSettings>("/api/system/print-settings") }
   } catch {
     // 数据库暂不可用时仍允许按默认 A4 横向打印。
   }

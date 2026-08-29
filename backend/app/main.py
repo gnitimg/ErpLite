@@ -1167,6 +1167,9 @@ def print_settings_dict(settings: ProductionSetting) -> dict:
         "paper_preset": settings.print_paper_preset,
         "width_mm": settings.print_width_mm,
         "height_mm": settings.print_height_mm,
+        "header_mode": settings.print_header_mode or "none",
+        "company_name": settings.print_company_name or "",
+        "logo": settings.print_logo or "",
         "updated_at": settings.updated_at.isoformat(),
     }
 
@@ -1194,6 +1197,9 @@ def update_print_settings(
     row.print_paper_preset = payload.paper_preset
     row.print_width_mm = round(payload.width_mm, 1)
     row.print_height_mm = round(payload.height_mm, 1)
+    row.print_header_mode = payload.header_mode
+    row.print_company_name = payload.company_name.strip()
+    row.print_logo = payload.logo if payload.logo.startswith("data:image/") else ""
     db.commit()
     db.refresh(row)
     return print_settings_dict(row)

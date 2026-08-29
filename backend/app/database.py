@@ -115,6 +115,18 @@ def ensure_schema_compatibility() -> None:
             "required_date",
             "ALTER TABLE sales_orders ADD COLUMN required_date DATE NULL",
         ),
+        "production_settings.print_header_mode": (
+            "print_header_mode",
+            "ALTER TABLE production_settings ADD COLUMN print_header_mode VARCHAR(10) NOT NULL DEFAULT 'none'",
+        ),
+        "production_settings.print_company_name": (
+            "print_company_name",
+            "ALTER TABLE production_settings ADD COLUMN print_company_name VARCHAR(100) NOT NULL DEFAULT ''",
+        ),
+        "production_settings.print_logo": (
+            "print_logo",
+            "ALTER TABLE production_settings ADD COLUMN print_logo TEXT",
+        ),
     }
     with engine.begin() as connection:
         for addition_key, (column_name, statement) in additions.items():

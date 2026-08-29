@@ -14,6 +14,7 @@ import {
 } from "./api"
 import ListToolbar from "./components/ListToolbar.vue"
 import InfoTip from "./components/InfoTip.vue"
+import PrintBrandHeader from "./components/PrintBrandHeader.vue"
 import { printWithSavedSize } from "./print"
 import StockDocument from "./stock-document.vue"
 
@@ -131,6 +132,32 @@ function materialSummary(row: any) {
     .slice(0, 3)
     .map((line: any) => `${line.name} × ${Math.abs(line.quantity_change)}`)
     .join("、")
+}
+const detailTotal = computed(() => (detail.value?.lines || []).reduce(
+  (sum: number, line: any) => sum + Number(
+    line.line_total ?? Number(line.unit_price || 0) * Math.abs(Number(line.quantity_change || 0))
+  ),
+  0
+))
+const detailRemarks = computed(() => [
+  detail.value?.notes,
+  detail.value?.related_order_no ? `订单 ${detail.value.related_order_no}` : "",
+  detail.value?.related_production_run_no ? `生产批次 ${detail.value.related_production_run_no}` : ""
+].filter(Boolean).join("；"))
+/** 明细不足 5 行时用空行补齐，保持纸质单据的版面。 */
+const displayLines = computed(() => {
+  const lines = [...(detail.value?.lines || [])]
+  while (lines.length < 5) lines.push({})
+  return lines
+})
+function isBlankLine(row: any) {
+  return row.sku == null && row.name == null && row.quantity_change == null
+}
+/** 日期打印格式：2026 年 8 月 29 日。 */
+function chineseDate(value: string) {
+  if (!value) return "-"
+  const [year, month, day] = value.split("-")
+  return `${year} 年 ${Number(month)} 月 ${Number(day)} 日`
 }
 function open(row: any) {
   detail.value = row
@@ -374,73 +401,67 @@ useLiveRefresh(() => load(true))
       size="min(820px, 98vw)"
     >
       <div v-if="detail" ref="drawerSheetRef" class="print-sheet">
-        <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="单号">
-            {{ detail.transaction_no }}
-          </el-descriptions-item>
-          <el-descriptions-item label="日期">
-            {{ formatDate(detail.occurred_at) }}
-          </el-descriptions-item>
-          <el-descriptions-item
-            v-if="detail.counterparty_name"
-            :label="direction === 'inbound' ? '供应商' : '收货单位'"
-          >
-            {{ detail.counterparty_name }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="detail.counterparty_phone" label="联系电话">
-            {{ detail.counterparty_phone }}
-          </el-descriptions-item>
-          <el-descriptions-item v-if="detail.counterparty_address" label="地址" :span="2">
-            {{ detail.counterparty_address }}
-          </el-descriptions-item>
-          <el-descriptions-item
-            v-if="detail.related_production_run_no"
-            label="生产批次"
-            :span="2"
-          >
-            {{ detail.related_production_run_no }}
-          </el-descriptions-item>
-          <template v-if="detail.transaction_type === 'SALE_OUT'">
-            <el-descriptions-item label="订单号" :span="2">
-              {{ detail.related_order_no || '-' }}
-            </el-descriptions-item>
-          </template>
-        </el-descriptions>
-        <el-table :data="detail.lines" border style="margin-top: 18px">
-          <el-table-column prop="sku" label="编码" min-width="130" />
-          <el-table-column prop="name" label="物料" min-width="150" />
-          <el-table-column prop="spec" label="规格" min-width="120" />
-          <el-table-column label="数量" min-width="130" align="right">
-            <template #default="{ row }">
-              {{
-                row.kind === 'PRODUCT'
-                  ? productQty(Math.abs(row.quantity_change))
-                  : qty(Math.abs(row.quantity_change))
-              }}
-              <el-tag v-if="Number(row.replacement_quantity) > 0" type="warning" size="small" effect="plain" style="margin-left:6px">
-                换货 {{ qty(row.replacement_quantity) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="unit" label="单位" min-width="70" />
-          <el-table-column label="单价" min-width="110" align="right">
-            <template #default="{ row }">
-              {{ row.unit_price == null ? '-' : money(row.unit_price) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="金额" min-width="120" align="right">
-            <template #default="{ row }">
-              {{ row.line_total == null ? '-' : money(row.line_total) }}
-            </template>
-          </el-table-column>
-        </el-table>
-        <p class="document-notes">
-          备注：{{ detail.notes || '-' }}
-        </p>
+        <div class="sheet-head">
+          <PrintBrandHeader class="head-brand" />
+          <h1>{{ direction === 'inbound' ? '入 库 单' : '出 库 单' }}</h1>
+          <div class="sheet-no"><span>NO.</span><strong>{{ detail.transaction_no }}</strong></div>
+        </div>
+        <div class="sheet-info">
+          <span class="info-party">
+            {{ direction === 'inbound' ? '供应商' : '客户' }}：{{ detail.counterparty_name || '-' }}
+          </span>
+          <span v-if="detail.counterparty_phone">电话：{{ detail.counterparty_phone }}</span>
+          <span v-if="detail.counterparty_address">地址：{{ detail.counterparty_address }}</span>
+          <span class="info-date">{{ chineseDate(formatDate(detail.occurred_at)) }}</span>
+        </div>
+        <table class="doc-table">
+          <colgroup>
+            <col class="col-idx">
+            <col>
+            <col class="col-qty">
+            <col class="col-unit">
+            <col class="col-price">
+            <col class="col-sub">
+            <col class="col-remark">
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="ta-c">序号</th>
+              <th class="ta-c">物料及规格型号</th>
+              <th class="ta-c">数量</th>
+              <th class="ta-c">单位</th>
+              <th class="ta-c">单价</th>
+              <th class="ta-c">小计</th>
+              <th class="ta-c">备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, index) in displayLines" :key="index">
+              <td class="ta-c">{{ index + 1 }}</td>
+              <td class="ta-c">{{ isBlankLine(row) ? '' : [row.sku, row.name, row.spec].filter(Boolean).join(' · ') }}</td>
+              <td class="ta-r">
+                <template v-if="!isBlankLine(row)">
+                  {{ row.kind === 'PRODUCT' ? productQty(Math.abs(row.quantity_change)) : qty(Math.abs(row.quantity_change)) }}
+                </template>
+              </td>
+              <td class="ta-c">{{ row.unit }}</td>
+              <td class="ta-r">{{ isBlankLine(row) || row.unit_price == null ? '' : money(row.unit_price) }}</td>
+              <td class="ta-r">{{ isBlankLine(row) || row.line_total == null ? '' : money(row.line_total) }}</td>
+              <td class="ta-l">
+                <span v-if="Number(row.replacement_quantity) > 0">换货 {{ qty(row.replacement_quantity) }}</span>
+              </td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="2" class="ta-l">合计金额（人民币）　{{ money(detailTotal) }}</td>
+              <td colspan="5" class="ta-l">备注：{{ detailRemarks || '-' }}</td>
+            </tr>
+          </tfoot>
+        </table>
         <div class="history-signature-row">
           <span>制单：{{ detail.operator || '________________' }}</span>
-          <span>仓管：________________</span>
+          <span>仓库：________________</span>
           <span>审核：________________</span>
         </div>
       </div>
@@ -489,12 +510,31 @@ useLiveRefresh(() => load(true))
   padding: 0;
   overflow: auto;
 }
-.print-sheet h1 {
-  margin: 0 0 22px;
-  text-align: center;
-  font-size: 24px;
-  letter-spacing: 8px;
-}
+.print-sheet { color: var(--el-text-color-primary); }
+/* 页眉按 6 等份定位：品牌占 0-1.5 份，标题占 2-4 份（页面正中），编号从 5 份起；高度固定 */
+.sheet-head { display: grid; grid-template-columns: repeat(12, 1fr); align-items: center; height: 64px; }
+.head-brand { grid-column: 1 / 4; justify-self: start; }
+.sheet-head h1 { grid-column: 5 / 9; margin: 0; text-align: center; font-size: 32px; letter-spacing: .35em; text-indent: .35em; }
+.sheet-no { grid-column: 11 / 13; justify-self: start; display: flex; align-items: baseline; gap: 8px; font-size: 15px; }
+.sheet-no strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 16px; }
+.lines-table :deep(td.el-table__cell) { height: 42px; padding-top: 8px; padding-bottom: 8px; }
+.sheet-info { display: flex; flex-wrap: wrap; gap: 6px 28px; padding: 6px 0 14px; border-bottom: 1px solid var(--el-border-color); font-size: 16px; }
+.info-date { margin-left: auto; }
+/* 原生表格：全部列线由边框保证，合计行备注通过 colspan 合并到最右侧 */
+.doc-table { width: 100%; border-collapse: collapse; table-layout: fixed; border: 2px solid var(--el-border-color); }
+.doc-table th, .doc-table td { border: 1px solid var(--el-border-color); padding: 6px 10px; font-size: 15px; color: var(--el-text-color-primary); word-break: break-all; }
+.doc-table th { height: 40px; font-weight: 700; }
+.doc-table tbody td { height: 42px; }
+.doc-table tfoot td { height: 42px; font-weight: 700; }
+.doc-table .col-idx { width: 5.5%; }
+.doc-table .col-qty { width: 13%; }
+.doc-table .col-unit { width: 6.5%; }
+.doc-table .col-price { width: 12.5%; }
+.doc-table .col-sub { width: 12.5%; }
+.doc-table .col-remark { width: 11.5%; }
+.ta-c { text-align: center; }
+.ta-l { text-align: left; }
+.ta-r { text-align: right; }
 .document-notes {
   margin-top: 18px;
   color: var(--el-text-color-regular);
@@ -510,6 +550,17 @@ useLiveRefresh(() => load(true))
     visibility: visible !important;
   }
   .print-sheet {
+    --el-border-color: #000;
+    --el-border-color-light: #000;
+    --el-border-color-lighter: #000;
+    --el-table-border-color: #000;
+    --el-table-header-text-color: #000;
+    --el-table-text-color: #000;
+    --el-text-color-primary: #000;
+    --el-text-color-regular: #000;
+    --el-text-color-secondary: #000;
+    --el-fill-color-light: #fff;
+    --el-fill-color-lighter: #fff;
     position: absolute;
     top: var(--erp-print-margin, 8mm);
     left: var(--erp-print-margin, 8mm);
@@ -522,7 +573,5 @@ useLiveRefresh(() => load(true))
     transform-origin: top left;
     print-color-adjust: exact;
   }
-  .print-sheet :deep(.el-table__header),
-  .print-sheet :deep(.el-table__body) { width: 100% !important; }
 }
 </style>
